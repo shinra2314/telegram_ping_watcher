@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pulse Desk</title>
+  <meta name="theme-color" content="#080b10">
+  <link rel="manifest" href="/static/manifest.json">
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="login-screen" id="login-screen">
+    <div class="login-card">
+      <div class="brand"><span class="brand-icon"><i data-lucide="shield-check"></i></span>Pulse Desk</div>
+      <p>Введите токен доступа. Друзья могут использовать viewer-токен для просмотра, admin-токен открывает управление.</p>
+      <div class="grid">
+        <input class="input" id="login-token" type="password" placeholder="ADMIN_TOKEN или VIEWER_TOKEN" autocomplete="current-password">
+        <button class="btn primary" id="login-btn"><i data-lucide="log-in"></i>Войти</button>
+      </div>
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon"><i data-lucide="zap"></i></span>Pulse Desk</div>
+      <nav class="nav">
+        <button class="active" data-tab="dashboard"><i data-lucide="layout-dashboard"></i>Дашборд</button>
+        <button data-tab="market"><i data-lucide="line-chart"></i>Маркет</button>
+        <button data-tab="analytics"><i data-lucide="bar-chart-3"></i>Аналитика</button>
+        <button data-tab="share" class="admin-only"><i data-lucide="share-2"></i>Друзьям</button>
+        <button data-tab="accounts" class="admin-only"><i data-lucide="users"></i>Аккаунты</button>
+        <button data-tab="settings" class="admin-only"><i data-lucide="settings"></i>Настройки</button>
+      </nav>
+      <div class="side-status" id="side-status">Загрузка статуса...</div>
+    </aside>
+
+    <main class="workspace">
+      <header class="command-header dashboard-command">
+        <div class="command-title">
+          <div class="kicker">Live monitor</div>
+          <h1 id="page-title">Дашборд</h1>
+          <div class="subtitle" id="page-subtitle">Мониторинг Telegram-упоминаний в реальном времени</div>
+        </div>
+        <div class="actions command-actions">
+          <button class="btn primary admin-only" id="scan-btn"><i data-lucide="database"></i>Скан истории</button>
+          <button class="btn admin-only" id="report-btn"><i data-lucide="file-text"></i>Отчет</button>
+          <button class="btn" id="browser-notify-btn"><i data-lucide="bell"></i>Уведомления</button>
+          <button class="btn" id="refresh-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <button class="btn" id="logout-btn"><i data-lucide="log-out"></i>Выйти</button>
+        </div>
+        <div class="command-metrics" id="command-metrics">
+          <div class="command-chip"><span class="metric-icon"><i data-lucide="activity"></i></span><div><strong>Подключение</strong><span>ожидание статуса</span></div></div>
+          <div class="command-chip"><span class="metric-icon"><i data-lucide="radio"></i></span><div><strong>Аккаунты</strong><span>загрузка</span></div></div>
+          <div class="command-chip"><span class="metric-icon"><i data-lucide="target"></i></span><div><strong>Usernames</strong><span>загрузка</span></div></div>
+          <div class="command-chip"><span class="metric-icon"><i data-lucide="scan-line"></i></span><div><strong>Скан</strong><span>загрузка</span></div></div>
+        </div>
+      </header>
+
+      <section id="dashboard" class="tabs active dashboard-shell">
+        <div class="grid stats dashboard-stats" id="stats-row"></div>
+        <div class="dashboard-insight" id="dashboard-insight">
+          <span class="metric-icon"><i data-lucide="radar"></i></span>
+          <div><strong>Лента готовится</strong><span>После загрузки здесь будет короткий обзор новых, важных и решенных упоминаний.</span></div>
+        </div>
+        <div class="dashboard-ops-grid">
+          <div class="panel ops-panel ops-panel-main" id="dashboard-attention">
+            <div class="ops-panel-head">
+              <div>
+                <div class="kicker">Action center</div>
+                <h2>Что требует внимания</h2>
+              </div>
+              <span class="badge info">загрузка</span>
+            </div>
+            <div class="ops-list">
+              <div class="ops-item"><span class="metric-icon"><i data-lucide="loader-circle"></i></span><div><strong>Собираю сводку</strong><span>Проверяю ленту, дедлайны, аккаунты и розыгрыши.</span></div></div>
+            </div>
+          </div>
+          <div class="panel ops-panel" id="dashboard-scan-card">
+            <div class="ops-panel-head">
+              <div>
+                <div class="kicker">Scan</div>
+                <h2>Скан истории</h2>
+              </div>
+              <span class="badge">0%</span>
+            </div>
+            <div class="scan-progress-bar"><span style="width:0%"></span></div>
+            <div class="ops-micro-grid">
+              <div><span>Аккаунты</span><strong>0/0</strong></div>
+              <div><span>Usernames</span><strong>0/0</strong></div>
+              <div><span>Найдено</span><strong>0</strong></div>
+            </div>
+          </div>
+          <div class="panel ops-panel" id="dashboard-readiness">
+            <div class="ops-panel-head">
+              <div>
+                <div class="kicker">Readiness</div>
+                <h2>Готовность</h2>
+              </div>
+              <span class="badge info">проверка</span>
+            </div>
+            <div class="readiness-list"></div>
+          </div>
+        </div>
+        <div class="section-head feed-head">
+          <div>
+            <h2 class="section-title">Лента упоминаний</h2>
+            <div class="section-meta">Быстрый поиск, статусы и действия по найденным сообщениям</div>
+          </div>
+        </div>
+        <div class="toolbar dashboard-toolbar">
+          <div class="filters filter-row filter-primary">
+            <label class="field grow"><span>Поиск</span><input class="input" id="search-input" placeholder="Текст, чат, автор, username"></label>
+            <label class="field"><span>Тип</span><select class="select" id="type-filter">
+                <option value="all">Все типы</option>
+                <option value="private">Личка</option>
+                <option value="group">Группы</option>
+                <option value="channel">Каналы</option>
+                <option value="giveaway">Розыгрыши</option>
+                <option value="win">Победы</option>
+                <option value="auto_joined">Авто-вступления</option>
+                <option value="important">Важные</option>
+              </select></label>
+            <label class="field"><span>Статус</span><select class="select" id="status-filter">
+                <option value="">Любой статус</option>
+                <option value="new">Новые</option>
+                <option value="read">Прочитанные</option>
+                <option value="important">Важные</option>
+                <option value="ignored">Скрытые</option>
+                <option value="resolved">Решенные</option>
+              </select></label>
+            <label class="field"><span>Избранное</span><select class="select" id="favorite-filter">
+                <option value="">Все</option>
+                <option value="true">Избранное</option>
+                <option value="false">Не избранное</option>
+              </select></label>
+            <label class="field"><span>Username</span><input class="input" id="mention-filter" placeholder="Без @"></label>
+          </div>
+          <div class="filters filter-row filter-sort">
+            <label class="field"><span>Сортировка</span><select class="select" id="sort-by">
+                <option value="detected_at">По обнаружению</option>
+                <option value="date">По дате сообщения</option>
+                <option value="chat">По чату</option>
+                <option value="sender">По автору</option>
+                <option value="priority_score">По приоритету</option>
+              </select></label>
+            <label class="field"><span>Порядок</span><select class="select" id="sort-order">
+                <option value="DESC">Сначала новые</option>
+                <option value="ASC">Сначала старые</option>
+              </select></label>
+            <button class="btn" id="group-btn"><i data-lucide="layers"></i>Группировать</button>
+          </div>
+          <div class="quick-filters filter-quick" id="quick-filters">
+            <button class="btn chip primary" data-quick="new"><i data-lucide="sparkles"></i>Новые</button>
+            <button class="btn chip" data-quick="favorite"><i data-lucide="star"></i>Избранное</button>
+            <button class="btn chip" data-quick="win"><i data-lucide="trophy"></i>Победы</button>
+            <button class="btn chip" data-quick="giveaway"><i data-lucide="gift"></i>Giveaway</button>
+            <button class="btn chip" data-quick="important"><i data-lucide="flame"></i>Важные</button>
+            <button class="btn chip admin-only" id="read-all-btn" type="button"><i data-lucide="check-check"></i>Прочитать все</button>
+            <button class="btn chip" data-quick="reset"><i data-lucide="rotate-ccw"></i>Сброс</button>
+          </div>
+          <div class="filters filter-row filter-saved admin-only">
+            <label class="field grow"><span>Название фильтра</span><input class="input" id="saved-filter-name" placeholder="Например: Важные каналы"></label>
+            <button class="btn primary" id="save-filter-btn"><i data-lucide="bookmark-plus"></i>Сохранить фильтр</button>
+            <div id="saved-filters-list" class="badges"></div>
+          </div>
+        </div>
+        <div id="pings-list" class="grid cards"></div>
+        <div class="actions" style="justify-content:center;margin-top:18px">
+          <button class="btn" id="load-more-btn">Показать еще</button>
+        </div>
+      </section>
+
+      <section id="giveaways" class="tabs">
+        <div class="giveaway-board-head">
+          <div>
+            <h2 class="section-title">Пульт розыгрышей</h2>
+            <div class="section-meta">Очереди действий, дедлайны, подозрительные условия и закрытые исходы</div>
+          </div>
+          <button class="btn" id="refresh-giveaways-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+        </div>
+        <div class="grid stats" id="giveaway-board-stats"></div>
+        <div class="diagnostics-strip" id="giveaway-board-strip"></div>
+        <div class="giveaway-board-grid">
+          <div class="panel board-panel board-need-action">
+            <h2>Забрать / проверить</h2>
+            <div id="giveaway-need-action" class="board-list"></div>
+          </div>
+          <div class="panel board-panel board-waiting">
+            <h2>Ждут итогов</h2>
+            <div id="giveaway-waiting-result" class="board-list"></div>
+          </div>
+          <div class="panel board-panel board-no-deadline">
+            <h2>Нужна дата</h2>
+            <div id="giveaway-no-deadline" class="board-list"></div>
+          </div>
+          <div class="panel board-panel board-suspicious">
+            <h2>Подозрительно</h2>
+            <div id="giveaway-suspicious" class="board-list"></div>
+          </div>
+          <div class="panel board-panel board-done">
+            <h2>Закрыто</h2>
+            <div id="giveaway-done" class="board-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tasks" class="tabs">
+        <div class="grid stats" id="tasks-stats"></div>
+        <div class="grid two">
+          <div class="panel">
+            <h2>Просрочено</h2>
+            <div id="tasks-overdue" class="task-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Сегодня</h2>
+            <div id="tasks-today" class="task-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Завтра</h2>
+            <div id="tasks-tomorrow" class="task-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Без дедлайна в описании</h2>
+            <div id="tasks-no-deadline" class="task-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Ждут результата</h2>
+            <div id="tasks-waiting" class="task-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Все открытые</h2>
+            <div id="tasks-open" class="task-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="market" class="tabs">
+        <div id="market-cards" class="grid stats"></div>
+        <div class="grid two">
+          <div class="panel chart-panel"><h2>BTC / USD</h2><canvas id="btcChart" height="180"></canvas></div>
+          <div class="panel chart-panel"><h2>TON / USD</h2><canvas id="tonChart" height="180"></canvas></div>
+          <div class="panel chart-panel"><h2>ETH / USD</h2><canvas id="ethChart" height="180"></canvas></div>
+          <div class="panel chart-panel"><h2>SOL / USD</h2><canvas id="solChart" height="180"></canvas></div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <h2>Текущие котировки</h2>
+          <div style="overflow:auto"><table class="table" id="market-table"></table></div>
+        </div>
+      </section>
+
+      <section id="analytics" class="tabs">
+        <div class="grid stats analytics-stats" id="analytics-stats-row"></div>
+        <div class="grid two">
+          <div class="panel chart-panel"><h2>Активность по дням</h2><canvas id="dailyChart" height="180"></canvas></div>
+          <div class="panel chart-panel"><h2>Активность по часам</h2><canvas id="hourlyChart" height="180"></canvas></div>
+          <div class="panel chart-panel"><h2>Типы источников</h2><canvas id="typeChart" height="180"></canvas></div>
+          <div class="panel"><h2>Каналы по аккаунтам</h2><div id="channels-by-account-list"></div></div>
+          <div class="panel"><h2>Ценность авторов</h2><div id="senders-list"></div></div>
+          <div class="panel"><h2>Ценные чаты</h2><div id="valuable-chats-list"></div></div>
+          <div class="panel"><h2>Репутация источников</h2><div id="sources-list"></div></div>
+          <div class="panel"><h2>Приоритеты</h2><div id="priority-list"></div></div>
+          <div class="panel"><h2>Трекинг usernames</h2><div id="mentions-list"></div></div>
+          <div class="panel"><h2>Статусы обработки</h2><div id="status-flow-list"></div></div>
+        </div>
+        <div class="actions" style="margin-top:16px">
+          <button class="btn primary" id="export-json-btn"><i data-lucide="download"></i>Экспорт аналитики JSON</button>
+        </div>
+      </section>
+
+      <section id="accounts" class="tabs">
+        <div class="grid two">
+          <div class="panel">
+            <h2>Подключенные аккаунты</h2>
+            <div id="accounts-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Здоровье аккаунтов</h2>
+            <div id="account-health-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Добавить аккаунт</h2>
+            <div class="grid">
+              <input class="input" id="auth-phone" placeholder="+79991234567">
+              <input class="input" id="auth-session-name" placeholder="Имя сессии, например MuverGT">
+              <button class="btn primary" id="send-code-btn">Отправить код</button>
+              <input class="input hidden" id="auth-code" placeholder="Код из Telegram">
+              <input class="input hidden" id="auth-password" type="password" placeholder="Пароль 2FA, если есть">
+              <button class="btn good hidden" id="sign-in-btn">Войти</button>
+              <div class="muted" id="auth-status"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="share" class="tabs">
+        <div class="grid two share-grid">
+          <div class="panel">
+            <h2>Бесплатная ссылка для друзей</h2>
+            <div id="share-status" class="grid"></div>
+          </div>
+          <div class="panel">
+            <h2>Что отправить другу</h2>
+            <label class="field"><span>HTTPS-ссылка tunnel</span><input class="input" id="share-url-input" placeholder="https://....trycloudflare.com"></label>
+            <label class="field"><span>Сообщение</span><textarea class="textarea" id="friend-message" readonly></textarea></label>
+            <div class="actions" style="margin-top:10px">
+              <button class="btn primary" id="copy-friend-message-btn"><i data-lucide="copy"></i>Копировать сообщение</button>
+              <button class="btn" id="refresh-share-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+            </div>
+            <div class="muted" id="share-copy-status"></div>
+          </div>
+          <div class="panel">
+            <h2>Порядок запуска</h2>
+            <div class="share-wizard" id="share-steps"></div>
+          </div>
+          <div class="panel">
+            <h2>Нельзя отправлять</h2>
+            <div id="share-never" class="badges"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings" class="tabs settings-shell">
+        <div class="settings-hero">
+          <div>
+            <div class="kicker">Control room</div>
+            <h2>Настройки приложения</h2>
+            <div class="section-meta" id="settings-summary-line">Загрузка текущей конфигурации...</div>
+          </div>
+          <div class="settings-summary" id="settings-summary">
+            <div class="summary-tile"><span>Usernames</span><strong>...</strong></div>
+            <div class="summary-tile"><span>Скан</span><strong>...</strong></div>
+            <div class="summary-tile"><span>Розыгрыши</span><strong>...</strong></div>
+          </div>
+        </div>
+
+        <div class="settings-tabs" id="settings-tabs">
+          <button class="btn chip primary" data-settings-tab="tracking" title="Отслеживание"><i data-lucide="at-sign"></i>Трекинг</button>
+          <button class="btn chip" data-settings-tab="runtime"><i data-lucide="sliders-horizontal"></i>Работа</button>
+          <button class="btn chip" data-settings-tab="notifications" title="Уведомления"><i data-lucide="bell-ring"></i>Уведом.</button>
+          <button class="btn chip" data-settings-tab="backups"><i data-lucide="archive"></i>Бэкапы</button>
+          <button class="btn chip" data-settings-tab="health"><i data-lucide="activity"></i>Здоровье</button>
+          <button class="btn chip" data-settings-tab="logs"><i data-lucide="terminal"></i>Логи</button>
+        </div>
+
+        <div class="grid settings-grid">
+          <div class="panel settings-panel active settings-card-wide" data-settings-section="tracking">
+            <div class="settings-card-head">
+              <div>
+                <h2>Отслеживаемые usernames</h2>
+                <div class="section-meta" id="tracking-source">runtime</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="radar"></i></span>
+            </div>
+            <textarea class="textarea settings-textarea" id="usernames-input" placeholder="username"></textarea>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="save-usernames-btn"><i data-lucide="save"></i>Сохранить</button>
+              <div class="muted" id="settings-status"></div>
+            </div>
+          </div>
+
+          <div class="panel settings-panel active settings-card-wide" data-settings-section="tracking">
+            <div class="settings-card-head">
+              <div>
+                <h2>Ключевые слова</h2>
+                <div class="section-meta">Победы, розыгрыши и приоритет ленты</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="list-filter"></i></span>
+            </div>
+            <div class="settings-form-grid">
+              <label class="field"><span>Победы</span><textarea class="textarea" id="kw-win"></textarea></label>
+              <label class="field"><span>Розыгрыши</span><textarea class="textarea" id="kw-giveaway"></textarea></label>
+              <label class="field"><span>Выше приоритет</span><textarea class="textarea" id="kw-priority"></textarea></label>
+              <label class="field"><span>Ниже приоритет</span><textarea class="textarea" id="kw-ignore"></textarea></label>
+            </div>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="save-keywords-btn"><i data-lucide="save"></i>Сохранить ключевые слова</button>
+              <div class="muted" id="keywords-status"></div>
+            </div>
+          </div>
+
+          <div class="panel settings-panel settings-card-wide" data-settings-section="runtime">
+            <div class="settings-card-head">
+              <div>
+                <h2>Фоновые задачи</h2>
+                <div class="section-meta">Интервалы скана, рынка и хранения данных</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="timer-reset"></i></span>
+            </div>
+            <div class="settings-form-grid compact">
+              <label class="field"><span>Скан, сек.</span><input class="input" id="runtime-scan-interval" type="number" min="60" max="86400"></label>
+              <label class="field"><span>Аккаунтов параллельно</span><input class="input" id="runtime-scan-concurrency" type="number" min="1" max="8"></label>
+              <label class="field"><span>Лимит истории</span><input class="input" id="runtime-scan-limit" type="number" min="0"></label>
+              <label class="field"><span>Проверка правок</span><input class="input" id="runtime-edit-scan-recent" type="number" min="0" max="500"></label>
+              <label class="field"><span>Задержка старта, сек.</span><input class="input" id="runtime-startup-delay" type="number" min="0" max="300"></label>
+              <label class="field"><span>Маркет, сек.</span><input class="input" id="runtime-market-poll" type="number" min="60" max="86400"></label>
+              <label class="field"><span>Алерт рынка, %</span><input class="input" id="runtime-market-alert" type="number" min="0.1" max="100" step="0.1"></label>
+              <label class="field"><span>История рынка, дней</span><input class="input" id="runtime-market-retention" type="number" min="1" max="365"></label>
+            </div>
+          </div>
+
+          <div class="panel settings-panel settings-card-wide" data-settings-section="runtime">
+            <div class="settings-card-head">
+              <div>
+                <h2>Розыгрыши</h2>
+                <div class="section-meta">Аккаунт действия, dry-run и безопасные задержки</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="shield-check"></i></span>
+            </div>
+            <div class="settings-form-grid compact">
+              <label class="field"><span>Аккаунт действия</span><input class="input" id="runtime-action-account" placeholder="username"></label>
+              <label class="field"><span>Режим проверки</span><select class="select" id="runtime-review-mode">
+                <option value="manual">manual</option>
+                <option value="assisted">assisted</option>
+                <option value="strict">strict</option>
+              </select></label>
+              <label class="field"><span>Сообщений для анализа</span><input class="input" id="runtime-analyze-recent" type="number" min="5" max="300"></label>
+              <label class="field"><span>Неактивность канала, дней</span><input class="input" id="runtime-inactive-days" type="number" min="1" max="365"></label>
+              <label class="field"><span>Задержка действия, сек.</span><input class="input" id="runtime-action-delay" type="number" min="0" max="3600"></label>
+              <label class="toggle-row settings-toggle"><input type="checkbox" id="runtime-dry-run"> <span>Dry-run без клика в Telegram</span></label>
+            </div>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="save-runtime-btn"><i data-lucide="save"></i>Сохранить работу</button>
+              <div class="muted" id="runtime-status"></div>
+            </div>
+          </div>
+
+          <div class="panel settings-panel settings-card-wide" data-settings-section="notifications">
+            <div class="settings-card-head">
+              <div>
+                <h2>Правила уведомлений</h2>
+                <div class="section-meta">Фильтры, тихие часы и антиспам</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="bell"></i></span>
+            </div>
+            <div class="settings-form-grid">
+              <label class="field"><span>Ключевые слова</span><textarea class="textarea" id="notify-keywords" placeholder="TON, winner, prize"></textarea></label>
+              <label class="field"><span>Usernames</span><textarea class="textarea" id="notify-usernames" placeholder="username"></textarea></label>
+              <label class="field"><span>Чаты</span><textarea class="textarea" id="notify-chats" placeholder="название чата"></textarea></label>
+              <div class="rules-builder">
+                <h3>Визуальные правила</h3>
+                <div class="settings-form-grid compact">
+                  <label class="field"><span>Название</span><input class="input" id="rule-name" placeholder="TON winners"></label>
+                  <label class="field"><span>Тип события</span><select class="select" id="rule-event">
+                    <option value="any">Любое</option>
+                    <option value="giveaway">Розыгрыш</option>
+                    <option value="win">Победа</option>
+                    <option value="priority">Важное</option>
+                  </select></label>
+                  <label class="field"><span>Ключевые слова</span><input class="input" id="rule-keywords" placeholder="ton, prize"></label>
+                  <label class="field"><span>Usernames</span><input class="input" id="rule-usernames" placeholder="username1, username2"></label>
+                  <label class="field"><span>Чаты</span><input class="input" id="rule-chats" placeholder="часть названия"></label>
+                  <label class="toggle-row settings-toggle"><input type="checkbox" id="rule-notify" checked> <span>Уведомлять</span></label>
+                </div>
+                <div class="actions settings-actions">
+                  <button class="btn" id="add-rule-btn" type="button"><i data-lucide="plus"></i>Добавить правило</button>
+                  <div id="rules-ui-list" class="badges"></div>
+                </div>
+                <textarea class="textarea hidden" id="notify-rules"></textarea>
+              </div>
+              <label class="toggle-row settings-toggle"><input type="checkbox" id="quiet-enabled"> <span>Не будить ночью</span></label>
+              <label class="field"><span>Тихие часы</span><input class="input" id="quiet-hours" placeholder="23:00-08:00"></label>
+              <label class="field"><span>Антиспам, сек.</span><input class="input" id="notify-cooldown" type="number" min="0" max="3600" value="120"></label>
+              <label class="toggle-row settings-toggle"><input type="checkbox" id="notify-enabled"> <span>Уведомления включены</span></label>
+              <label class="toggle-row settings-toggle"><input type="checkbox" id="notify-giveaways"> <span>Писать о розыгрышах</span></label>
+              <label class="toggle-row settings-toggle"><input type="checkbox" id="notify-wins"> <span>Писать о победах</span></label>
+            </div>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="save-notifications-btn"><i data-lucide="save"></i>Сохранить правила</button>
+              <div class="muted" id="notifications-status"></div>
+            </div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="backups">
+            <h2>Бэкапы базы</h2>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="create-backup-btn"><i data-lucide="archive"></i>Создать бэкап</button>
+              <button class="btn" id="refresh-backups-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+            </div>
+            <div id="backups-list"></div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="health">
+            <h2>Здоровье приложения</h2>
+            <div class="actions settings-actions">
+              <button class="btn" id="refresh-diagnostics-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+            </div>
+            <div id="diagnostics-panel"></div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="health">
+            <h2>Сканирование</h2>
+            <div id="scan-status"></div>
+            <div class="actions settings-actions">
+              <button class="btn bad" id="cancel-scan-btn"><i data-lucide="circle-stop"></i>Остановить скан</button>
+            </div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="health">
+            <h2>Мастер запуска</h2>
+            <div id="setup-check-list"></div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="health">
+            <h2>История сканов</h2>
+            <div id="scan-runs-list"></div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="logs">
+            <h2>Логи</h2>
+            <div class="filters">
+              <select class="select" id="log-level">
+                <option value="">Все уровни</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+              <button class="btn" id="copy-logs-btn">Копировать</button>
+            </div>
+            <div class="log-box" id="logs-box">Загрузка...</div>
+          </div>
+
+          <div class="panel settings-panel" data-settings-section="logs">
+            <h2>Журнал событий</h2>
+            <div class="filters">
+              <select class="select" id="event-level">
+                <option value="">Все уровни</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+              <button class="btn" id="refresh-events-btn">Обновить</button>
+            </div>
+            <div class="log-box" id="events-box">Загрузка...</div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="mobile-nav" aria-label="Основная навигация">
+    <button class="active" data-tab="dashboard"><i data-lucide="layout-dashboard"></i><span>Пульт</span></button>
+    <button data-tab="market"><i data-lucide="line-chart"></i><span>Маркет</span></button>
+    <button data-tab="analytics"><i data-lucide="bar-chart-3"></i><span>Аналитика</span></button>
+    <button data-tab="share" class="admin-only"><i data-lucide="share-2"></i><span>Доступ</span></button>
+    <button data-tab="settings" class="admin-only mobile-extra"><i data-lucide="settings"></i><span>Настройки</span></button>
+  </nav>
+
+  <div class="modal" id="modal">
+    <div class="modal-card ping-modal">
+      <div class="modal-head ping-modal-head">
+        <div>
+          <h2 id="modal-title"></h2>
+          <div class="muted" id="modal-meta"></div>
+        </div>
+        <button class="btn" id="modal-close"><i data-lucide="x"></i></button>
+      </div>
+      <div class="ping-text panel modal-text" id="modal-text"></div>
+      <label class="field modal-field"><span>Статус</span><select class="select" id="modal-status">
+        <option value="new">Новое</option>
+        <option value="read">Прочитано</option>
+        <option value="important">Важное</option>
+        <option value="ignored">Скрыто</option>
+        <option value="resolved">Решено</option>
+      </select></label>
+      <label class="field hidden modal-field" id="modal-giveaway-status-wrap"><span>Розыгрыш</span><select class="select" id="modal-giveaway-status">
+        <option value="pending">Ожидаю выдачи</option>
+        <option value="claimed">Забрал приз</option>
+        <option value="missed">Не успел</option>
+        <option value="scam">Скам</option>
+        <option value="missed_unsubscribe">Не успел по отписке</option>
+        <option value="missed_reply">Не успел отписать</option>
+        <option value="closed">Закрыто</option>
+      </select></label>
+      <label class="field modal-field"><span>Статус действия</span><select class="select" id="modal-action-status">
+        <option value="new">Новое</option>
+        <option value="to_check">Проверить</option>
+        <option value="waiting_result">Ждет результата</option>
+        <option value="claim_prize">Забрать приз</option>
+        <option value="claimed">Приз забран</option>
+        <option value="scam">Скам</option>
+        <option value="missed">Пропущено</option>
+        <option value="closed">Закрыто</option>
+      </select></label>
+      <label class="field modal-field"><span>Дедлайн</span><input class="input" id="modal-deadline" type="datetime-local"></label>
+      <label class="field modal-field"><span>Напоминание</span><input class="input" id="modal-reminder" type="datetime-local"></label>
+      <label class="field modal-field"><span>Заметка</span><textarea class="textarea" id="modal-note" placeholder="Что сделал, что проверить позже"></textarea></label>
+      <div class="modal-history" id="modal-actions-history"></div>
+      <div class="actions modal-actions">
+        <a class="btn primary" id="modal-link" target="_blank" rel="noopener">Открыть в Telegram</a>
+        <button class="btn good admin-only" id="modal-save-btn">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/core.js"></script>
+  <script src="/static/js/giveaways.js"></script>
+  <script src="/static/js/diagnostics.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/js/pwa.js"></script>
+</body>
+</html>

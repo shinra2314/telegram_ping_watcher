@@ -1,0 +1,17 @@
+.env
+*.session
+*.session-journal
+*.db
+*.db-*
+app.log
+app.log.*
+mentions*.jsonl
+backups/
+data/
+logs/
+sessions/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.git/

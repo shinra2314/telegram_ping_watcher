@@ -1,0 +1,17 @@
+{
+  "name": "Pulse Desk Monitor",
+  "short_name": "Pulse",
+  "description": "Telegram Mention and Giveaway Monitor",
+  "start_url": "/?pwa=1",
+  "display": "standalone",
+  "background_color": "#080b10",
+  "theme_color": "#29d3c2",
+  "icons": [
+    {
+      "src": "/static/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

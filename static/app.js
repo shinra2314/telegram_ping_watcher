@@ -2076,7 +2076,8 @@
         btn.disabled = true;
         btn.textContent = 'Отправляю…';
         try {
-            const res = await api('/api/export/telegram-digest?hours=24', { method: 'POST' });
+            const hours = document.getElementById('digest-hours')?.value || '24';
+            const res = await api(`/api/export/telegram-digest?hours=${hours}`, { method: 'POST' });
             btn.textContent = `✅ Отправлено (${res.pings_count} пингов)`;
         } catch (e) {
             btn.textContent = '❌ Ошибка';

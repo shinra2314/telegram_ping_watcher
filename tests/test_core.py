@@ -398,7 +398,8 @@ class CoreParsingTests(unittest.TestCase):
         result = format_digest(pings)
         self.assertIn("channel1", result)
         self.assertIn("🏆", result)
-        self.assertIn("2", result)
+        self.assertIn("Побед: 1", result)
+        self.assertIn("Всего: 2", result)
 
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):

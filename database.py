@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - keeps parser tests independent from opti
     DB_PATH = Path(os.getenv("PULSE_DB_PATH", BASE_DIR / "pulse_desk.db"))
     BACKUP_DIR = DB_PATH.parent / "backups"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _now_iso() -> str:
@@ -146,6 +146,47 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+async def add_ping_tag(ping_id: int, tag: str) -> list[str]:
+    tag = tag.strip()
+    if not tag:
+        return []
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT tags FROM pings WHERE id = ?", (ping_id,))).fetchone()
+        if not row:
+            return []
+        tags: list[str] = _json_loads(row["tags"], [])
+        if tag not in tags:
+            tags.append(tag)
+        await db.execute("UPDATE pings SET tags = ? WHERE id = ?", (json.dumps(tags, ensure_ascii=False), ping_id))
+        await db.commit()
+        return tags
+
+
+async def remove_ping_tag(ping_id: int, tag: str) -> list[str]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT tags FROM pings WHERE id = ?", (ping_id,))).fetchone()
+        if not row:
+            return []
+        tags: list[str] = _json_loads(row["tags"], [])
+        tags = [t for t in tags if t != tag]
+        await db.execute("UPDATE pings SET tags = ? WHERE id = ?", (json.dumps(tags, ensure_ascii=False), ping_id))
+        await db.commit()
+        return tags
+
+
+async def get_all_tags() -> list[str]:
+    async with _connect() as db:
+        rows = await (await db.execute("SELECT DISTINCT tags FROM pings WHERE tags IS NOT NULL AND tags != '[]'")).fetchall()
+    seen: set[str] = set()
+    for (raw,) in rows:
+        for t in _json_loads(raw, []):
+            if t:
+                seen.add(t)
+    return sorted(seen)
+
+
 def backup_db_if_present(retention: Optional[int] = None) -> None:
     if not DB_PATH.exists():
         return
@@ -213,6 +254,7 @@ async def init_db() -> None:
             "reminder_at": "ALTER TABLE pings ADD COLUMN reminder_at TEXT",
             "reminder_sent_at": "ALTER TABLE pings ADD COLUMN reminder_sent_at TEXT",
             "action_status": "ALTER TABLE pings ADD COLUMN action_status TEXT DEFAULT 'new'",
+            "tags": "ALTER TABLE pings ADD COLUMN tags TEXT DEFAULT '[]'",
         }
         for column, sql in migrations.items():
             if column not in pings_columns:
@@ -226,7 +268,8 @@ async def init_db() -> None:
         await db.execute("UPDATE pings SET action_status = 'new' WHERE action_status IS NULL OR action_status = ''")
         await db.execute("UPDATE pings SET is_giveaway = COALESCE(is_giveaway, 0)")
         await db.execute("UPDATE pings SET giveaway_status = '' WHERE is_giveaway = 0 AND (giveaway_status IS NULL OR giveaway_status = '')")
-        await db.execute("UPDATE pings SET giveaway_status = 'pending' WHERE is_giveaway = 1 AND (giveaway_status IS NULL OR giveaway_status = '')")
+        await db.execute("UPDATE pings SET giveaway_status = 'pending' WHERE (is_giveaway = 1 OR is_win = 1) AND (giveaway_status IS NULL OR giveaway_status = '')")
+        await db.execute("UPDATE pings SET tags = '[]' WHERE tags IS NULL OR tags = ''")
 
         await db.execute(
             """
@@ -490,7 +533,7 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                     1 if record.get("is_win") else 0,
                     1 if record.get("auto_joined") else 0,
                     1 if record.get("is_giveaway") else 0,
-                    record.get("giveaway_status") or ("pending" if record.get("is_giveaway") else ""),
+                    record.get("giveaway_status") or ("pending" if (record.get("is_giveaway") or record.get("is_win")) else ""),
                     int(record.get("priority_score") or 0),
                     record.get("priority_label") or "normal",
                     record.get("note") or "",
@@ -567,8 +610,8 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         record.get("chat_type"),
                         1 if record.get("is_win") else 0,
                         1 if record.get("auto_joined") else 0,
-                        1 if record.get("is_giveaway") else 0,
-                        1 if record.get("is_giveaway") else 0,
+                        1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
+                        1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
                         1 if record.get("is_giveaway") else 0,
                         int(record.get("priority_score") or 0),
                         record.get("priority_label") or "",
@@ -615,6 +658,7 @@ def _build_pings_filters(
     deadline_to: Optional[str] = None,
     has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
+    tag: Optional[str] = None,
 ) -> tuple[list[str], list[Any]]:
     where: list[str] = []
     params: list[Any] = []
@@ -698,6 +742,8 @@ def _build_pings_filters(
             "chat_id IN (SELECT chat_id FROM source_scores WHERE score >= ?)",
             source_score_min,
         )
+    if tag:
+        _add_where(where, params, "tags LIKE ?", f'%"{tag}"%')
     return where, params
 
 
@@ -932,6 +978,7 @@ async def get_pings(
     deadline_to: Optional[str] = None,
     has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
+    tag: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
@@ -950,6 +997,7 @@ async def get_pings(
             deadline_to=deadline_to,
             has_deadline=has_deadline,
             source_score_min=source_score_min,
+            tag=tag,
         )
 
         if where:
@@ -2074,6 +2122,107 @@ async def get_giveaway_board(limit: int = 80) -> dict[str, Any]:
             "buckets": buckets,
             "bucket_counts": {key: len(value) for key, value in buckets.items()},
         }
+
+
+async def get_debt_board(tracked_usernames: Sequence[str], limit: int = 160) -> dict[str, Any]:
+    now = _now_iso()
+    now_dt = _parse_iso_datetime(now) or datetime.now()
+    safe_limit = max(10, min(int(limit or 160), 500))
+    select_sql = """
+        SELECT
+            p.*,
+            c.status AS candidate_status,
+            c.score AS candidate_score,
+            c.reasons AS candidate_reasons,
+            c.required_channels,
+            c.join_buttons,
+            c.external_requirements,
+            c.blocked_reason,
+            c.estimated_value,
+            c.analyzed_at,
+            c.updated_at AS candidate_updated_at
+        FROM pings p
+        LEFT JOIN giveaway_candidates c ON c.ping_id = p.id
+        WHERE (p.is_win = 1 OR COALESCE(p.action_status, '') = 'claim_prize')
+          AND COALESCE(p.chat_type, '') = 'channel'
+          AND COALESCE(NULLIF(p.giveaway_status, ''), 'pending') = 'pending'
+          AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')
+        ORDER BY
+            CASE WHEN COALESCE(p.status, '') = 'new' THEN 0 ELSE 1 END,
+            COALESCE(p.priority_score, 0) DESC,
+            p.detected_at DESC,
+            p.id DESC
+        LIMIT ?
+    """
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(select_sql, (safe_limit,))).fetchall()
+    debts = [_giveaway_board_row(row, now_dt) for row in rows]
+    for item in debts:
+        item["debt_status"] = "pending_prize"
+        item["giveaway_status"] = item.get("giveaway_status") or "pending"
+        item["action_status"] = item.get("action_status") or "claim_prize"
+
+    ordered_usernames: list[str] = []
+    seen: set[str] = set()
+    for username in tracked_usernames:
+        normalized = str(username or "").strip().lstrip("@")
+        key = normalized.lower()
+        if key and key not in seen:
+            seen.add(key)
+            ordered_usernames.append(normalized)
+
+    profile_rows: dict[str, list[dict[str, Any]]] = {username.lower(): [] for username in ordered_usernames}
+    unassigned: list[dict[str, Any]] = []
+    for item in debts:
+        mentions = [str(value).strip().lstrip("@") for value in item.get("mentions") or []]
+        mention_keys = {value.lower() for value in mentions if value}
+        matched = False
+        for username in ordered_usernames:
+            key = username.lower()
+            if key in mention_keys:
+                profile_rows[key].append(item)
+                matched = True
+        if not matched:
+            unassigned.append(item)
+
+    profiles = []
+    for username in ordered_usernames:
+        rows_for_user = profile_rows.get(username.lower(), [])
+        profiles.append({
+            "key": username.lower(),
+            "username": username,
+            "count": len(rows_for_user),
+            "new_count": sum(1 for row in rows_for_user if row.get("status") == "new"),
+            "critical_count": sum(1 for row in rows_for_user if int(row.get("priority_score") or 0) >= 90),
+            "max_priority": max((int(row.get("priority_score") or 0) for row in rows_for_user), default=0),
+            "last_detected_at": max((row.get("detected_at") or "" for row in rows_for_user), default=""),
+            "rows": rows_for_user[:safe_limit],
+        })
+    if unassigned:
+        profiles.append({
+            "key": "_unassigned",
+            "username": "без username",
+            "count": len(unassigned),
+            "new_count": sum(1 for row in unassigned if row.get("status") == "new"),
+            "critical_count": sum(1 for row in unassigned if int(row.get("priority_score") or 0) >= 90),
+            "max_priority": max((int(row.get("priority_score") or 0) for row in unassigned), default=0),
+            "last_detected_at": max((row.get("detected_at") or "" for row in unassigned), default=""),
+            "rows": unassigned[:safe_limit],
+        })
+
+    return {
+        "generated_at": now,
+        "stats": {
+            "total": len(debts),
+            "new": sum(1 for row in debts if row.get("status") == "new"),
+            "critical": sum(1 for row in debts if int(row.get("priority_score") or 0) >= 90),
+            "profiles_with_debt": sum(1 for profile in profiles if int(profile.get("count") or 0) > 0),
+            "last_detected_at": max((row.get("detected_at") or "" for row in debts), default=""),
+        },
+        "profiles": profiles,
+        "rows": debts,
+    }
 
 
 def _effective_backup_dir() -> Path:

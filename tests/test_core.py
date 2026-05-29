@@ -37,6 +37,7 @@ from pulse_desk.runtime import AppState
 from pulse_desk.scan import channel_sweep_start_id, normalize_recent_edit_scan_limit, normalize_scan_history_limit
 from pulse_desk.simple_qr import qr_matrix, terminal_qr, write_svg_qr
 from pulse_desk.telegram_errors import auth_key_duplicated_message, is_auth_key_duplicated
+from pulse_desk.telegram_reconnect import reconnect_delay_seconds
 
 try:
     import database
@@ -47,6 +48,29 @@ except ModuleNotFoundError as exc:  # Allows parser tests to run without project
 
 
 class CoreParsingTests(unittest.TestCase):
+    def test_reconnect_delay_uses_exponential_backoff_with_cap(self):
+        delays = [
+            reconnect_delay_seconds(
+                "alpha",
+                attempt,
+                base_seconds=20,
+                max_seconds=90,
+                jitter_seconds=0,
+            )
+            for attempt in range(1, 6)
+        ]
+        self.assertEqual(delays, [20, 40, 80, 90, 90])
+
+    def test_reconnect_delay_adds_stable_per_session_jitter(self):
+        first = reconnect_delay_seconds("alpha", 2, base_seconds=20, max_seconds=300, jitter_seconds=15)
+        second = reconnect_delay_seconds("alpha", 2, base_seconds=20, max_seconds=300, jitter_seconds=15)
+        other = reconnect_delay_seconds("beta", 2, base_seconds=20, max_seconds=300, jitter_seconds=15)
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(first, 40)
+        self.assertLessEqual(first, 55)
+        self.assertGreaterEqual(other, 40)
+        self.assertLessEqual(other, 55)
+
     def test_dashboard_summary_prioritizes_operational_attention(self):
         summary = build_dashboard_summary(
             status={
@@ -293,6 +317,16 @@ class CoreParsingTests(unittest.TestCase):
     def test_parse_deadline_absent(self):
         self.assertIsNone(parse_deadline("тут нет даты", now=datetime(2026, 5, 1, 10, 0)))
 
+    def test_ping_tags_default_is_empty_list(self):
+        import json
+        raw = '[]'
+        self.assertEqual(json.loads(raw), [])
+
+    def test_ping_tags_round_trip(self):
+        import json
+        tags = ['важно', 'проверить']
+        stored = json.dumps(tags, ensure_ascii=False)
+        self.assertEqual(json.loads(stored), tags)
 
     def test_giveaway_extracts_required_channels(self):
         text = "Subscribe to @smallskin and https://t.me/another_channel to participate"
@@ -563,6 +597,66 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         board = await database.get_giveaway_board(limit=20)
         self.assertIn(ping_id, [row["id"] for row in board["buckets"]["done"]])
         self.assertEqual(board["stats"]["missed_reply"], 1)
+
+    async def test_debt_board_groups_pending_prizes_by_tracked_username(self):
+        alpha_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Prize Channel",
+            "chat_id": 13,
+            "sender": "Channel",
+            "sender_id": 13,
+            "message_id": 91,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/prize/91",
+            "text": "Победитель @Alpha, приз ожидает выдачи",
+            "chat_type": "channel",
+            "is_win": True,
+            "priority_score": 96,
+            "priority_label": "critical",
+            "action_status": "claim_prize",
+        })
+        beta_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Closed Prize Channel",
+            "chat_id": 14,
+            "sender": "Channel",
+            "sender_id": 14,
+            "message_id": 92,
+            "mentions": ["@Beta"],
+            "link": "https://t.me/prize/92",
+            "text": "Победитель @Beta",
+            "chat_type": "channel",
+            "is_win": True,
+            "action_status": "claim_prize",
+        })
+        await database.update_ping_meta(int(beta_id), giveaway_status="claimed", action_status="claimed")
+        private_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Private Dialog",
+            "chat_id": 15,
+            "sender": "Friend",
+            "sender_id": 150,
+            "message_id": 93,
+            "mentions": ["@Alpha"],
+            "link": "",
+            "text": "Winner @Alpha, but this is not a channel",
+            "chat_type": "private",
+            "is_win": True,
+            "priority_score": 99,
+            "priority_label": "critical",
+            "action_status": "claim_prize",
+        })
+
+        board = await database.get_debt_board(["Alpha", "Beta"])
+        self.assertEqual(board["stats"]["total"], 1)
+        self.assertEqual(board["stats"]["critical"], 1)
+        self.assertEqual(board["rows"][0]["id"], alpha_id)
+        self.assertNotIn(private_id, [row["id"] for row in board["rows"]])
+        self.assertEqual(board["rows"][0]["giveaway_status"], "pending")
+        alpha_profile = next(profile for profile in board["profiles"] if profile["username"] == "Alpha")
+        beta_profile = next(profile for profile in board["profiles"] if profile["username"] == "Beta")
+        self.assertEqual([row["id"] for row in alpha_profile["rows"]], [alpha_id])
+        self.assertEqual(beta_profile["rows"], [])
 
     async def test_market_history_uses_fetched_at_iso(self):
         await database.save_market_snapshot({"bitcoin": {"usd": 100}, "fetched_at_iso": "2026-05-07T10:00:00"})

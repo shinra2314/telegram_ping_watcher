@@ -98,7 +98,7 @@
         const source = new EventSource("/api/live");
         state.liveSource = source;
         const onChange = () => {
-          if (["dashboard", "analytics"].includes(state.tab)) refreshData({ silent: true, preserveScroll: true });
+          if (["dashboard", "analytics", "debts"].includes(state.tab)) refreshData({ silent: true, preserveScroll: true });
         };
         source.addEventListener("ping", onChange);
         source.addEventListener("ping-updated", onChange);
@@ -122,8 +122,7 @@
     function setTab(tab) {
       const titles = {
         dashboard: ["Дашборд", "Упоминания, фильтры и быстрые действия"],
-        giveaways: ["Розыгрыши", "Очереди действий, дедлайны и безопасный разбор"],
-        tasks: ["Задачи", "Дедлайны, напоминания и открытые розыгрыши"],
+        debts: ["Долги", "Победы, где приз еще ожидает выдачи"],
         market: ["Маркет", "Курсы и история рынка"],
         analytics: ["Аналитика", "Статистика по источникам, часам и авторам"],
         share: ["Доступ друзьям", "Бесплатная HTTPS-ссылка через Cloudflare Quick Tunnel"],
@@ -164,6 +163,7 @@
       if ($("favorite-filter").value) p.set("favorite", $("favorite-filter").value);
       if ($("mention-filter").value.trim()) p.set("mention", $("mention-filter").value.trim());
       if ($("search-input").value.trim()) p.set("search", $("search-input").value.trim());
+      if ($("tag-filter") && $("tag-filter").value) p.set("tag", $("tag-filter").value);
       return p.toString();
     }
 
@@ -192,6 +192,19 @@
       Object.entries(mapping).forEach(([key, id]) => { if ($(id) && query[key] !== undefined) $(id).value = query[key]; });
       saveFilters();
       loadPings(false);
+    }
+
+    async function loadTagFilter() {
+      const select = $("tag-filter");
+      if (!select) return;
+      try {
+        const tags = await api("/api/tags");
+        if (!Array.isArray(tags) || !tags.length) { select.style.display = "none"; return; }
+        const current = select.value;
+        select.innerHTML = '<option value="">Все теги</option>' + tags.map(t => `<option value="${esc(t)}"${t === current ? " selected" : ""}>${esc(t)}</option>`).join("");
+        select.style.display = "";
+        select.parentElement && (select.parentElement.style.display = "");
+      } catch { select.style.display = "none"; }
     }
 
     async function loadSavedFilters() {
@@ -322,13 +335,13 @@
     }
 
     const giveawayStatuses = {
-      pending: { label: "ожидаю выдачи", className: "pending", icon: "hourglass", color: "#f6c453" },
-      claimed: { label: "забрал приз", className: "claimed", icon: "badge-check", color: "#4ade80" },
-      missed: { label: "не успел", className: "missed", icon: "clock-alert", color: "#a1a1aa" },
-      scam: { label: "скам", className: "scam", icon: "shield-alert", color: "#fb7185" },
-      missed_unsubscribe: { label: "не успел по отписке", className: "missed", icon: "user-x", color: "#a1a1aa" },
-      missed_reply: { label: "не успел отписать", className: "missed", icon: "message-square-x", color: "#a1a1aa" },
-      closed: { label: "закрыто", className: "claimed", icon: "archive", color: "#94a3b8" }
+      pending: { label: "ожидаю выдачи", shortLabel: "ожидаю", className: "pending", icon: "hourglass", color: "#f6c453" },
+      claimed: { label: "забрал приз", shortLabel: "забрал", className: "claimed", icon: "badge-check", color: "#4ade80" },
+      missed: { label: "не успел", shortLabel: "не успел", className: "missed", icon: "clock-alert", color: "#a1a1aa" },
+      scam: { label: "скам", shortLabel: "скам", className: "scam", icon: "shield-alert", color: "#fb7185" },
+      missed_unsubscribe: { label: "не успел по отписке", shortLabel: "отписка", className: "missed", icon: "user-x", color: "#a1a1aa" },
+      missed_reply: { label: "не успел отписать", shortLabel: "ответ", className: "missed", icon: "message-square-x", color: "#a1a1aa" },
+      closed: { label: "закрыто", shortLabel: "закрыто", className: "claimed", icon: "archive", color: "#94a3b8" }
     };
 
     function giveawayStatusMeta(value) {
@@ -383,8 +396,102 @@
       closed: "закрыто"
     };
 
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, Number(value || 0)));
+    }
+
+    function compactDate(value) {
+      if (!value) return "нет даты";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "нет даты";
+      return date.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function relativeTime(value) {
+      if (!value) return "нет даты";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "нет даты";
+      const diffSeconds = Math.round((Date.now() - date.getTime()) / 1000);
+      const future = diffSeconds < 0;
+      const seconds = Math.abs(diffSeconds);
+      if (seconds < 60) return future ? "скоро" : "только что";
+      const units = [
+        [31536000, "г"],
+        [2592000, "мес"],
+        [86400, "д"],
+        [3600, "ч"],
+        [60, "мин"]
+      ];
+      const unit = units.find(([size]) => seconds >= size) || units[units.length - 1];
+      const amount = Math.max(1, Math.floor(seconds / unit[0]));
+      return future ? `через ${amount} ${unit[1]}` : `${amount} ${unit[1]} назад`;
+    }
+
+    function safeExternalLink(value) {
+      const link = String(value || "").trim();
+      if (!link || link.toLowerCase().startsWith("нет ")) return "";
+      try {
+        const parsed = new URL(link, window.location.origin);
+        return ["http:", "https:", "tg:"].includes(parsed.protocol) ? parsed.href : "";
+      } catch {
+        return "";
+      }
+    }
+
+    function initials(value) {
+      const cleaned = String(value || "").replace(/^@/, "").trim();
+      const parts = cleaned.split(/[\s._-]+/).filter(Boolean);
+      const raw = parts.length > 1 ? `${parts[0][0] || ""}${parts[1][0] || ""}` : cleaned.slice(0, 2);
+      return raw.toUpperCase() || "?";
+    }
+
+    function priorityMeta(priority, status) {
+      const score = clamp(priority, 0, 100);
+      if (score >= 90) return { label: "Критично", className: "bad", icon: "siren", hint: "Проверь первым" };
+      if (score >= 60) return { label: "Важно", className: "warn", icon: "flame", hint: "Есть сильный сигнал" };
+      if (status === "new") return { label: "Новое", className: "good", icon: "sparkles", hint: "Еще не разобрано" };
+      return { label: "Обычное", className: "info", icon: "message-circle", hint: "Можно разобрать позже" };
+    }
+
+    function actionStatusMeta(value, fallbackLabel = "новое") {
+      const labels = {
+        new: { label: "Нужно разобрать", hint: "Открой карточку и реши, что делать", icon: "inbox", className: "info" },
+        to_check: { label: "Проверить", hint: "Высокий сигнал или ручная проверка", icon: "search-check", className: "warn" },
+        waiting_result: { label: "Ждет итогов", hint: "Следи за результатом розыгрыша", icon: "hourglass", className: "pending" },
+        claim_prize: { label: "Забрать приз", hint: "Похоже на победу или окно выдачи", icon: "gift", className: "warn" },
+        claimed: { label: "Приз забран", hint: "Закрыто успешно", icon: "badge-check", className: "claimed" },
+        scam: { label: "Скам", hint: "Не тратить время", icon: "shield-alert", className: "scam" },
+        missed: { label: "Пропущено", hint: "Срок или действие уже упущены", icon: "clock-alert", className: "missed" },
+        closed: { label: "Закрыто", hint: "Работа по карточке завершена", icon: "archive", className: "claimed" }
+      };
+      return labels[value] || { label: actionStatuses[value] || fallbackLabel, hint: "Статус действия", icon: "list-checks", className: "info" };
+    }
+
+    function deadlineMeta(ping) {
+      if (!ping.deadline_at) {
+        return { label: "Дедлайн не найден", hint: deadlineSourceLabel(ping.deadline_source), icon: "calendar-x", className: "bad" };
+      }
+      const deadline = new Date(ping.deadline_at);
+      if (Number.isNaN(deadline.getTime())) {
+        return { label: compactDate(ping.deadline_at), hint: "Дата выглядит нестандартно", icon: "calendar-alert", className: "warn" };
+      }
+      const hoursLeft = (deadline.getTime() - Date.now()) / 3600000;
+      if (hoursLeft < 0) return { label: "Просрочено", hint: compactDate(ping.deadline_at), icon: "calendar-x", className: "bad" };
+      if (hoursLeft <= 6) return { label: "Скоро", hint: `${compactDate(ping.deadline_at)} · ${relativeTime(ping.deadline_at)}`, icon: "alarm-clock", className: "bad" };
+      if (hoursLeft <= 24) return { label: "Сегодня", hint: `${compactDate(ping.deadline_at)} · ${relativeTime(ping.deadline_at)}`, icon: "calendar-clock", className: "warn" };
+      return { label: compactDate(ping.deadline_at), hint: relativeTime(ping.deadline_at), icon: "calendar-check", className: "good" };
+    }
+
+    function renderMentionChips(mentions, limit = 5) {
+      const safeMentions = Array.isArray(mentions) ? mentions : [];
+      if (!safeMentions.length) return `<span class="muted">Нет username-меток</span>`;
+      const chips = safeMentions.slice(0, limit).map(name => `<span class="badge mention">${esc(name)}</span>`).join("");
+      const extra = safeMentions.length > limit ? `<span class="badge">+${safeMentions.length - limit}</span>` : "";
+      return `${chips}${extra}`;
+    }
+
     function renderGiveawayStatusControl(pingId, currentStatus) {
-      const current = giveawayStatusMeta(currentStatus).className;
+      const current = currentStatus || "pending";
       if (state.role !== "admin") {
         const meta = giveawayStatusMeta(currentStatus);
         return `<span class="badge ${meta.className}"><i data-lucide="${meta.icon}"></i>${meta.label}</span>`;
@@ -392,8 +499,8 @@
       return `
         <div class="giveaway-status-control" aria-label="Статус розыгрыша">
           ${Object.entries(giveawayStatuses).map(([value, meta]) => `
-            <button class="btn ${meta.className} ${current === meta.className ? "active" : ""}" data-action="giveaway-status" data-id="${pingId}" data-status="${value}" title="${meta.label}">
-              <i data-lucide="${meta.icon}"></i>${meta.label}
+            <button class="btn ${meta.className} ${current === value ? "active" : ""}" data-action="giveaway-status" data-id="${pingId}" data-status="${value}" title="${meta.label}" aria-label="${meta.label}">
+              <i data-lucide="${meta.icon}"></i>${meta.shortLabel || meta.label}
             </button>
           `).join("")}
         </div>
@@ -407,11 +514,18 @@
       const isFavorite = Number(ping.is_favorite);
       const status = statusMeta(ping.status);
       const priority = Number(ping.priority_score || 0);
+      const priorityInfo = priorityMeta(priority, ping.status);
       const text = ping.text || "Нет текста";
       const chat = ping.chat || "Неизвестный чат";
-      const avatar = chat.replace(/^@/, "").trim().slice(0, 2) || "?";
+      const avatar = initials(chat);
       const giveawayStatus = ping.giveaway_status || "pending";
       const giveawayMeta = giveawayStatusMeta(giveawayStatus);
+      const actionInfo = actionStatusMeta(
+        ping.action_status || (isWin ? "claim_prize" : isGiveaway ? "waiting_result" : priority >= 60 ? "to_check" : "new"),
+        actionStatuses[ping.action_status] || "новое"
+      );
+      const deadline = deadlineMeta(ping);
+      const openLink = safeExternalLink(ping.link);
       const reason = isWin
         ? "Похоже на победу или выдачу приза"
         : isGiveaway
@@ -422,17 +536,10 @@
               ? "Высокий приоритет по ключевым словам"
               : "Обычное упоминание в ленте";
       const priorityColor = isGiveaway ? giveawayMeta.color : isWin ? "#4ade80" : priority >= 60 ? "#fb7185" : "#29d3c2";
-      const clippedText = text.length > 260 ? text.slice(0, 260) + "..." : text;
-      const mentionBadges = mentions.slice(0, 4).map(m => `<span class="badge">${esc(m)}</span>`).join("");
-      const extraMentions = mentions.length > 4 ? `<span class="badge">+${mentions.length - 4}</span>` : "";
-      const deadline = ping.deadline_at ? fmtDate(ping.deadline_at) : "";
-      const deadlineInfo = isGiveaway
-        ? `<div class="deadline-row">
-            <span class="badge ${ping.deadline_at ? "warn" : "bad"}"><i data-lucide="calendar-clock"></i>${deadline || "дедлайн не найден"}</span>
-            <span class="badge">${esc(deadlineSourceLabel(ping.deadline_source))}</span>
-            ${ping.reminder_at ? `<span class="badge info"><i data-lucide="bell"></i>${fmtDate(ping.reminder_at)}</span>` : ""}
-          </div>`
-        : "";
+      const clippedText = text.length > 360 ? text.slice(0, 360).trimEnd() + "..." : text;
+      const groupCount = Number(ping.group_count || 0);
+      const detectedAt = ping.detected_at || ping.date;
+      const messageDate = ping.date && ping.date !== detectedAt ? compactDate(ping.date) : "";
       const cardClasses = [
         "card",
         "ping",
@@ -445,44 +552,221 @@
         isGiveaway && isFavorite ? "is-favorite-giveaway" : ""
       ].filter(Boolean).join(" ");
       const actionButtons = state.role === "admin" ? `
-        <div class="actions">
-          <button class="btn ping-action" data-action="favorite" data-id="${ping.id}" title="Избранное" aria-label="Избранное"><i data-lucide="star"></i></button>
-          <button class="btn ping-action" data-action="read" data-id="${ping.id}" title="Прочитано" aria-label="Прочитано"><i data-lucide="check"></i></button>
-        </div>` : "";
+          <button class="btn ping-action ${isFavorite ? "active" : ""}" data-action="favorite" data-id="${ping.id}" title="${isFavorite ? "Убрать из избранного" : "В избранное"}" aria-label="${isFavorite ? "Убрать из избранного" : "В избранное"}"><i data-lucide="star"></i></button>
+          <button class="btn ping-action ${ping.status === "read" ? "active" : ""}" data-action="read" data-id="${ping.id}" title="Отметить прочитанным" aria-label="Отметить прочитанным"><i data-lucide="check"></i></button>
+        ` : "";
+      const openButton = openLink
+        ? `<a class="btn ping-action ping-open" href="${esc(openLink)}" target="_blank" rel="noopener" title="Открыть в Telegram" aria-label="Открыть в Telegram"><i data-lucide="external-link"></i></a>`
+        : "";
       return `
-        <article class="${cardClasses}" style="--metric-color:${priorityColor}" data-ping='${esc(JSON.stringify(ping))}'>
-          <div class="ping-head">
+        <article class="${cardClasses}" style="--metric-color:${priorityColor};--priority-width:${clamp(priority, 0, 100)}%" data-ping='${esc(JSON.stringify(ping))}'>
+          <div class="ping-topline">
             <div class="ping-identity">
               <span class="ping-avatar">${esc(avatar)}</span>
               <div>
                 <div class="ping-title-row">
                   <div class="ping-title">${esc(chat)}</div>
-                  <span class="badge ${status.className} ping-status"><i data-lucide="${status.icon}"></i>${esc(status.label)}</span>
+                  <span class="badge ${isWin ? "good" : isGiveaway ? giveawayMeta.className : status.className} ping-status"><i data-lucide="${isWin ? "trophy" : isGiveaway ? giveawayMeta.icon : status.icon}"></i>${esc(isWin ? "победа" : isGiveaway ? "giveaway" : status.label)}</span>
                 </div>
-                <div class="ping-meta"><span>${esc(ping.sender || "неизвестно")}</span><span>${fmtDate(ping.detected_at || ping.date)}</span></div>
+                <div class="ping-meta">
+                  <span><i data-lucide="user-round"></i>${esc(ping.sender || "неизвестно")}</span>
+                  <span><i data-lucide="radio"></i>${esc(compactDate(detectedAt))}</span>
+                  <span>${esc(relativeTime(detectedAt))}</span>
+                </div>
               </div>
             </div>
-            ${actionButtons}
+            <div class="ping-actions">${actionButtons}${openButton}</div>
           </div>
+
+          <div class="ping-signal-row">
+            <div class="ping-priority ${priorityInfo.className}">
+              <span class="metric-icon"><i data-lucide="${priorityInfo.icon}"></i></span>
+              <div>
+                <span>Приоритет</span>
+                <strong>${priority}/100 · ${priorityInfo.label}</strong>
+                <div class="priority-meter"><span></span></div>
+              </div>
+            </div>
+            <div class="ping-next-step ${actionInfo.className}">
+              <span class="metric-icon"><i data-lucide="${actionInfo.icon}"></i></span>
+              <div>
+                <span>Следующее действие</span>
+                <strong>${esc(actionInfo.label)}</strong>
+                <small>${esc(actionInfo.hint)}</small>
+              </div>
+            </div>
+          </div>
+
           <div class="ping-reason"><i data-lucide="${isWin ? "trophy" : isGiveaway ? giveawayMeta.icon : priority >= 60 ? "flame" : "message-circle"}"></i>${esc(reason)}</div>
-          ${isGiveaway ? renderGiveawayStatusControl(ping.id, giveawayStatus) : ""}
-          ${deadlineInfo}
-          <div class="ping-text">${esc(clippedText)}</div>
-          <div class="badges">
+
+          <div class="ping-message">${esc(clippedText)}</div>
+
+          <div class="ping-detail-grid">
+            <div class="ping-detail">
+              <span>Источник</span>
+              <strong>${esc(chatTypeLabel(ping.chat_type))}</strong>
+              <small>${messageDate ? `Пост: ${esc(messageDate)}` : "Дата сообщения совпадает"}</small>
+            </div>
+            <div class="ping-detail">
+              <span>Упоминания</span>
+              <div class="ping-mentions">${renderMentionChips(mentions)}</div>
+            </div>
+            ${isGiveaway ? `
+              <div class="ping-detail ping-deadline ${deadline.className}">
+                <span>${ping.reminder_at ? "Дедлайн и напоминание" : "Дедлайн"}</span>
+                <strong><i data-lucide="${deadline.icon}"></i>${esc(deadline.label)}</strong>
+                <small>${esc(deadline.hint)}${ping.reminder_at ? ` · напомнить ${esc(compactDate(ping.reminder_at))}` : ""}</small>
+              </div>
+            ` : ""}
+          </div>
+
+          ${isGiveaway ? `<div class="ping-giveaway-control">${renderGiveawayStatusControl(ping.id, giveawayStatus)}</div>` : ""}
+
+          <div class="badges ping-tags">
             <span class="badge info">${esc(chatTypeLabel(ping.chat_type))}</span>
             ${isGiveaway ? `<span class="badge ${giveawayMeta.className}"><i data-lucide="${giveawayMeta.icon}"></i>${giveawayMeta.label}</span>` : `<span class="badge ${priority >= 60 ? "warn" : "good"}">приоритет ${priority}</span>`}
             ${isFavorite ? `<span class="badge warn"><i data-lucide="star"></i>избранное</span>` : ""}
             ${isGiveaway ? `<span class="badge warn">розыгрыш</span>` : ""}
+            ${groupCount > 1 ? `<span class="badge info"><i data-lucide="layers"></i>${groupCount} в чате</span>` : ""}
             ${ping.note ? `<span class="badge">заметка</span>` : ""}
             ${ping.action_status ? `<span class="badge info">${esc(actionStatuses[ping.action_status] || ping.action_status)}</span>` : ""}
             ${ping.auto_joined ? `<span class="badge good">вступил</span>` : ""}
-            ${mentionBadges}${extraMentions}
           </div>
         </article>`;
     }
 
     function safeJson(value, fallback) {
       try { return typeof value === "string" ? JSON.parse(value) : value || fallback; } catch { return fallback; }
+    }
+
+    function formatCount(value) {
+      return Number(value || 0).toLocaleString("ru-RU");
+    }
+
+    function percentOf(part, total) {
+      const top = Number(part || 0);
+      const base = Number(total || 0);
+      return base > 0 ? Math.max(0, Math.min(100, (top / base) * 100)) : 0;
+    }
+
+    function pctLabel(value, digits = 1) {
+      return `${Number(value || 0).toFixed(digits)}%`;
+    }
+
+    function toneByNumber(value, goodAt = 0) {
+      const num = Number(value || 0);
+      if (num > goodAt) return "good";
+      if (num < goodAt) return "bad";
+      return "info";
+    }
+
+    function renderBriefTile(label, value, hint, icon, tone = "info") {
+      return `
+        <div class="brief-tile ${tone}">
+          <span><i data-lucide="${icon}"></i>${esc(label)}</span>
+          <strong>${esc(value ?? "")}</strong>
+          <em>${esc(hint || "")}</em>
+        </div>
+      `;
+    }
+
+    function renderProgressItem(label, value, hint, percent, tone = "info") {
+      return `
+        <div class="progress-item ${tone}">
+          <div class="progress-head"><strong>${esc(label)}</strong><span>${esc(value ?? "")}</span></div>
+          <div class="mini-bar"><i style="width:${Math.max(3, Math.min(100, Number(percent || 0)))}%"></i></div>
+          <small>${esc(hint || "")}</small>
+        </div>
+      `;
+    }
+
+    function renderAnalyticsBrief(data, detailed) {
+      const total = Number(data.total_pings || 0);
+      const newCount = Number(data.new_pings || 0);
+      const important = Number(data.important || 0);
+      const wins = Number(data.wins || 0);
+      const resolved = Number(data.resolved || 0);
+      const channels = Number(data.total_channels || data.channel_chats_total || 0);
+      const resolutionRate = percentOf(resolved, total);
+      const focusValue = important || newCount;
+      const focusLabel = important ? "важных" : "новых";
+      const joined = Number(detailed?.conversion?.joined || 0);
+      const giveaways = Number(data.giveaways || detailed?.conversion?.total || 0);
+      setHtmlIfChanged("analytics-brief", `
+        ${renderBriefTile("Фокус", `${formatCount(focusValue)} ${focusLabel}`, `${formatCount(newCount)} новых в ленте`, important ? "flame" : "sparkles", important ? "warn" : "info")}
+        ${renderBriefTile("Результат", `${pctLabel(data.win_rate)} win rate`, `${formatCount(wins)} побед из ${formatCount(total)}`, "trophy", wins ? "good" : "info")}
+        ${renderBriefTile("Покрытие", `${formatCount(channels)} каналов`, `${formatCount(data.accounts_online)} аккаунтов онлайн`, "radio-tower", channels ? "good" : "warn")}
+        ${renderBriefTile("Разбор", `${pctLabel(resolutionRate)} решено`, `${formatCount(resolved)} закрыто, ${formatCount(data.favorites)} в избранном`, "check-check", resolutionRate >= 50 ? "good" : "warn")}
+        ${renderBriefTile("Giveaway", `${pctLabel(data.giveaway_rate)} ленты`, `${formatCount(joined)} авто-вступлений из ${formatCount(giveaways)}`, "gift", giveaways ? "info" : "warn")}
+      `);
+    }
+
+    function renderAnalyticsFlow(data, detailed) {
+      const total = Number(data.total_pings || 0);
+      const flow = [
+        ["Новые", data.new_pings, "не разобрано", percentOf(data.new_pings, total), "sparkles", Number(data.new_pings || 0) ? "warn" : "good"],
+        ["Важные", data.important, "высокий приоритет", percentOf(data.important, total), "flame", Number(data.important || 0) ? "bad" : "info"],
+        ["Победы", data.wins, "похожие на win", percentOf(data.wins, total), "trophy", Number(data.wins || 0) ? "good" : "info"],
+        ["Розыгрыши", data.giveaways, "giveaway поток", percentOf(data.giveaways, total), "gift", Number(data.giveaways || 0) ? "info" : "warn"],
+        ["Решено", data.resolved, "закрытый хвост", percentOf(data.resolved, total), "check-circle", percentOf(data.resolved, total) >= 50 ? "good" : "warn"]
+      ];
+      const dailyQuality = (detailed.daily_quality || []).slice(0, 7);
+      const dayTotal = dailyQuality.reduce((sum, row) => sum + Number(row.total || 0), 0);
+      const dayWins = dailyQuality.reduce((sum, row) => sum + Number(row.wins || 0), 0);
+      setHtmlIfChanged("analytics-flow", `
+        <div class="flow-card flow-summary">
+          <span class="metric-icon"><i data-lucide="radar"></i></span>
+          <div><strong>${formatCount(total)} упоминаний в базе</strong><span>За последние 7 дней: ${formatCount(dayTotal)} записей, ${formatCount(dayWins)} побед.</span></div>
+        </div>
+        ${flow.map(([label, value, hint, percent, icon, tone]) => `
+          <div class="flow-card ${tone}">
+            <span class="metric-icon"><i data-lucide="${icon}"></i></span>
+            <div><strong>${formatCount(value)}</strong><span>${esc(label)} · ${esc(hint)}</span></div>
+            <div class="mini-bar"><i style="width:${Math.max(3, Math.min(100, Number(percent || 0)))}%"></i></div>
+          </div>
+        `).join("")}
+      `);
+    }
+
+    function renderRankList(id, rows, options = {}) {
+      const el = $(id);
+      if (!el) return;
+      const values = rows || [];
+      const max = Math.max(...values.map(row => Number(options.value ? options.value(row) : row.count || 0)), 1);
+      setHtmlIfChanged(el, values.length ? values.map((row, index) => {
+        const value = Number(options.value ? options.value(row) : row.count || 0);
+        const title = options.title ? options.title(row) : row.title;
+        const meta = options.meta ? options.meta(row) : "";
+        const badges = options.badges ? options.badges(row) : "";
+        const icon = options.icon ? options.icon(row) : "bar-chart-3";
+        return `
+          <div class="rank-item">
+            <span class="rank-index">${index + 1}</span>
+            <span class="metric-icon"><i data-lucide="${icon}"></i></span>
+            <div class="rank-body">
+              <div class="rank-title"><strong>${esc(title || "неизвестно")}</strong><span>${formatCount(value)}</span></div>
+              <div class="mini-bar"><i style="width:${Math.max(4, value / max * 100)}%"></i></div>
+              <div class="rank-meta">${meta}</div>
+            </div>
+            <div class="rank-badges">${badges}</div>
+          </div>
+        `;
+      }).join("") : `<div class='muted'>${esc(options.empty || "Данных пока нет.")}</div>`);
+    }
+
+    function renderDailyQuality(rows) {
+      renderRankList("daily-quality-list", rows || [], {
+        title: row => row.day,
+        value: row => row.total,
+        icon: row => Number(row.wins || 0) ? "trophy" : "calendar-days",
+        meta: row => `${formatCount(row.resolved)} решено · ${formatCount(row.important)} важных`,
+        badges: row => `
+          <span class="badge">${formatCount(row.total)} всего</span>
+          <span class="badge good">${formatCount(row.wins)} win</span>
+          <span class="badge warn">${formatCount(row.giveaways)} giveaway</span>
+        `,
+        empty: "Качество по дням появится после накопления истории."
+      });
     }
 
     function renderDashboardInsight(data) {
@@ -665,8 +949,148 @@
       lucide.createIcons();
     }
 
+    function debtProfileRows(data, profileKey) {
+      if (!profileKey || profileKey === "all") return data.rows || [];
+      const profile = (data.profiles || []).find(item => item.key === profileKey);
+      return profile ? profile.rows || [] : data.rows || [];
+    }
+
+    function renderDebtStats(data) {
+      const stats = data.stats || {};
+      setHtmlIfChanged("debts-stats", [
+        ["Ждут выдачи", stats.total, "receipt-text", "#f6c453"],
+        ["Новые", stats.new, "sparkles", "#45d483"],
+        ["Критично", stats.critical, "siren", "#fb7185"],
+        ["Профилей с долгом", stats.profiles_with_debt, "at-sign", "#29d3c2"]
+      ].map(([label, value, icon, color]) => `
+        <div class="panel metric-card" style="--metric-color:${color}">
+          <div class="metric-top"><div class="metric-label">${label}</div><span class="metric-icon"><i data-lucide="${icon}"></i></span></div>
+          <div class="metric-value">${value ?? 0}</div>
+        </div>
+      `).join(""));
+    }
+
+    function renderDebtProfiles(data) {
+      const profiles = data.profiles || [];
+      const active = state.debtProfile || "all";
+      const allCount = Number(data.stats?.total || 0);
+      const allNew = Number(data.stats?.new || 0);
+      const buttons = [`
+        <button class="${active === "all" ? "active" : ""}" data-debt-profile="all">
+          <span class="profile-name"><i data-lucide="layers"></i>Все долги</span>
+          <span class="profile-count">${allCount}</span>
+          ${allNew ? `<small>${allNew} новых</small>` : "<small>общая очередь</small>"}
+        </button>
+      `].concat(profiles.map(profile => {
+        const selected = active === profile.key;
+        const count = Number(profile.count || 0);
+        const critical = Number(profile.critical_count || 0);
+        return `
+          <button class="${selected ? "active" : ""} ${count ? "has-debt" : ""}" data-debt-profile="${esc(profile.key)}">
+            <span class="profile-name"><i data-lucide="${count ? "trophy" : "at-sign"}"></i>@${esc(profile.username)}</span>
+            <span class="profile-count">${count}</span>
+            <small>${critical ? `${critical} критично` : `prio ${Number(profile.max_priority || 0)}`}</small>
+          </button>
+        `;
+      })).join("");
+      setHtmlIfChanged("debt-profile-tabs", buttons);
+    }
+
+    function debtItem(row) {
+      const mentions = safeJson(row.mentions, []);
+      const priority = Number(row.priority_score || 0);
+      const priorityInfo = priorityMeta(priority, row.status);
+      const deadline = deadlineMeta(row);
+      const status = giveawayStatusMeta(row.giveaway_status || "pending");
+      const text = (row.text || "").replace(/\s+/g, " ").trim();
+      const clipped = text.length > 260 ? text.slice(0, 260) + "..." : text;
+      const openLink = safeExternalLink(row.link);
+      const source = row.chat || "Неизвестный источник";
+      const primaryMention = mentions[0] ? `@${String(mentions[0]).replace(/^@/, "")}` : "username не найден";
+      const detected = row.detected_at ? fmtDate(row.detected_at) : "";
+      const deadlineLabel = row.deadline_at ? deadline.label : "Срок выдачи не найден";
+      const actions = state.role === "admin" ? `
+        <div class="board-actions debt-actions">
+          <button class="btn good" data-debt-status="claimed" data-id="${row.id}"><i data-lucide="badge-check"></i>Забрал</button>
+          <button class="btn" data-debt-status="missed_reply" data-id="${row.id}"><i data-lucide="message-square-x"></i>Не отписал</button>
+          <button class="btn" data-debt-status="missed" data-id="${row.id}"><i data-lucide="clock-alert"></i>Не успел</button>
+          <button class="btn bad" data-debt-status="scam" data-id="${row.id}"><i data-lucide="shield-alert"></i>Скам</button>
+        </div>
+      ` : "";
+      return `
+        <div class="board-item debt-item" data-ping='${esc(JSON.stringify(row))}'>
+          <div class="debt-card-head">
+            <span class="debt-source-mark">${esc(initials(source))}</span>
+            <div class="debt-title-block">
+              <span>Победа · ${esc(primaryMention)}</span>
+              <strong>${esc(source)}</strong>
+              ${detected ? `<small>${esc(detected)}</small>` : ""}
+            </div>
+            <span class="debt-status-pill ${status.className}"><i data-lucide="${status.icon}"></i>${esc(status.shortLabel || status.label)}</span>
+          </div>
+          <div class="debt-signal-grid">
+            <div class="debt-signal priority ${priorityInfo.className}" style="--priority-width:${clamp(priority, 0, 100)}%">
+              <span class="metric-icon"><i data-lucide="${priorityInfo.icon}"></i></span>
+              <div>
+                <span>Приоритет</span>
+                <strong>${priority}/100 · ${esc(priorityInfo.label)}</strong>
+                <div class="priority-meter"><span></span></div>
+              </div>
+            </div>
+            <div class="debt-signal deadline ${deadline.className}">
+              <span class="metric-icon"><i data-lucide="${deadline.icon}"></i></span>
+              <div>
+                <span>Выдача</span>
+                <strong>${esc(deadlineLabel)}</strong>
+                <small>${esc(deadline.hint || "проверь вручную")}</small>
+              </div>
+            </div>
+          </div>
+          <div class="debt-meta-row">
+            <div class="ping-mentions">${renderMentionChips(mentions, 6)}</div>
+            ${openLink ? `<a class="badge debt-telegram-link" href="${openLink}" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Telegram</a>` : ""}
+          </div>
+          <div class="debt-preview">
+            <span>Текст результата</span>
+            <p>${esc(clipped || "Нет текста")}</p>
+          </div>
+          <div class="debt-footer">
+            <div class="debt-context-badges">
+              <span class="badge info"><i data-lucide="trophy"></i>победа</span>
+              <span class="badge ${row.status === "new" ? "good" : "info"}">${esc(statusMeta(row.status).label)}</span>
+            </div>
+            ${actions}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDebts(data) {
+      state.debtBoard = data;
+      const validKeys = new Set(["all"].concat((data.profiles || []).map(item => item.key)));
+      if (!validKeys.has(state.debtProfile)) state.debtProfile = "all";
+      const activeProfile = (data.profiles || []).find(item => item.key === state.debtProfile);
+      const rows = debtProfileRows(data, state.debtProfile);
+      renderDebtStats(data);
+      renderDebtProfiles(data);
+      $("debts-active-kicker").textContent = activeProfile ? `@${activeProfile.username}` : "Все профили";
+      $("debts-active-title").textContent = activeProfile ? "Победы этого username" : "Ожидают выдачи";
+      $("debts-active-count").textContent = rows.length;
+      setHtmlIfChanged("debts-list", rows.length
+        ? rows.map(debtItem).join("")
+        : emptyState("badge-check", "Долгов нет", "Все найденные призы закрыты или еще не появились в статусе “ожидаю выдачи”."));
+      lucide.createIcons();
+    }
+
+    async function loadDebts() {
+      const data = await api("/api/debts?limit=180");
+      renderDebts(data);
+    }
+
     async function loadAnalytics() {
       const data = await api("/api/analytics");
+      const shouldLoadDetailed = state.tab === "analytics";
+      const detailed = shouldLoadDetailed ? await api("/api/analytics/detailed") : null;
       const metrics = [
         ["Всего", data.total_pings, "inbox", "#2dd4bf"],
         ["Новые", data.new_pings, "sparkles", "#45d483"],
@@ -694,7 +1118,8 @@
       setHtmlIfChanged("analytics-stats-row", metricsHtml);
       renderDashboardInsight(data);
       if (state.tab !== "analytics") return;
-      const detailed = await api("/api/analytics/detailed");
+      renderAnalyticsBrief(data, detailed);
+      renderAnalyticsFlow(data, detailed);
       drawChart("dailyChart", "bar", data.daily.slice().reverse().map(x => x.day), data.daily.slice().reverse().map(x => x.count), "#2dd4bf");
       const hours = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, "0"));
       drawChart("hourlyChart", "bar", hours, hours.map(h => data.hourly[h] || 0), "#f4b44d");
@@ -702,35 +1127,78 @@
       const channelAccounts = detailed.channels_by_account || data.channels_by_account || [];
       const channelAccountTotal = Number(detailed.channel_memberships_total || data.channel_memberships_total || 0);
       setHtmlIfChanged("channels-by-account-list", channelAccounts.length ? `
-        <div class="source-item">
+        <div class="source-item analytics-source-summary">
           <div class="row"><strong>Всего каналов по аккаунтам</strong><span class="badge good">${channelAccountTotal}</span></div>
           <div class="deadline-row"><span class="badge">уникальных в базе: ${Number(data.channel_chats_total || 0)}</span><span class="badge">учтено аккаунтов: ${channelAccounts.length}</span></div>
         </div>
         ${channelAccounts.map(a => `
-        <div class="row panel">
-          <strong>${esc(a.display || a.session_name || "аккаунт")}</strong>
+        <div class="rank-item compact">
+          <span class="metric-icon"><i data-lucide="${a.status === "online" ? "radio" : "radio-receiver"}"></i></span>
+          <div class="rank-body">
+            <div class="rank-title"><strong>${esc(a.display || a.session_name || "аккаунт")}</strong><span>${formatCount(a.channels)} каналов</span></div>
+            <div class="rank-meta">${a.last_channel_scan_at ? fmtDate(a.last_channel_scan_at) : "скан еще не считал каналы"}</div>
+          </div>
           <span class="badge ${a.status === "online" ? "good" : "warn"}">${esc(a.status || "unknown")}</span>
-          <span class="badge">${Number(a.channels || 0)} каналов</span>
-          <span class="muted">${a.last_channel_scan_at ? fmtDate(a.last_channel_scan_at) : "скан еще не считал каналы"}</span>
         </div>
       `).join("")}
       ` : "<div class='muted'>Каналы по аккаунтам появятся после ближайшего скана истории.</div>");
-      setHtmlIfChanged("senders-list", detailed.senders.map(s => `<div class="row panel"><strong>${esc(s.sender || "неизвестно")}</strong><span class="badge">${s.count} всего</span><span class="badge warn">${s.wins} побед</span></div>`).join("") || "<div class='muted'>Данных пока нет.</div>");
-      setHtmlIfChanged("valuable-chats-list", (detailed.chats || []).map(c => `<div class="row panel"><strong>${esc(c.chat || "неизвестно")}</strong><span class="badge">${c.count} всего</span><span class="badge warn">${c.wins} побед</span><span class="badge">prio ${Number(c.avg_priority || 0).toFixed(1)}</span></div>`).join("") || "<div class='muted'>Данных пока нет.</div>");
-      setHtmlIfChanged("sources-list", (detailed.sources || []).map(s => `
-        <div class="source-item">
-          <div class="row"><strong>${esc(s.chat || "неизвестно")}</strong><span class="badge good">score ${Number(s.score || 0).toFixed(1)}</span></div>
-          <div class="deadline-row"><span class="badge">${s.total_pings || 0} всего</span><span class="badge warn">${s.giveaways || 0} розыгрышей</span><span class="badge good">${s.wins || 0} побед</span><span class="badge bad">${s.noise || 0} шум</span></div>
-        </div>
-      `).join("") || "<div class='muted'>Источники еще не рассчитаны.</div>");
-      setHtmlIfChanged("priority-list", (detailed.priorities || []).map(p => `<div class="row panel"><strong>${esc(p.priority_label || "normal")}</strong><span class="badge">${p.count}</span></div>`).join("") || "<div class='muted'>Данных пока нет.</div>");
-      setHtmlIfChanged("mentions-list", (detailed.top_mentions || []).map(m => `<div class="row panel"><strong>@${esc(m.username || "")}</strong><span class="badge">${m.count} упоминаний</span></div>`).join("") || "<div class='muted'>Упоминаний пока нет.</div>");
-      setHtmlIfChanged("status-flow-list", (detailed.status_flow || []).map(s => `<div class="row panel"><strong>${esc(s.status || "unknown")}</strong><span class="badge info">${esc(s.action_status || "new")}</span><span class="badge">${s.count}</span></div>`).join("") || "<div class='muted'>Статусов пока нет.</div>");
+      renderDailyQuality(detailed.daily_quality || []);
+      renderRankList("senders-list", detailed.senders || [], {
+        title: row => row.sender || "неизвестно",
+        value: row => row.count,
+        icon: row => Number(row.wins || 0) ? "trophy" : "user",
+        meta: row => `${formatCount(row.wins)} побед · ${pctLabel(percentOf(row.wins, row.count))} результативность`,
+        badges: row => `<span class="badge">${formatCount(row.count)} всего</span><span class="badge good">${formatCount(row.wins)} побед</span>`
+      });
+      renderRankList("valuable-chats-list", detailed.chats || [], {
+        title: row => row.chat || "неизвестно",
+        value: row => row.avg_priority || row.count,
+        icon: row => Number(row.wins || 0) ? "trophy" : "message-square",
+        meta: row => `${formatCount(row.count)} упоминаний · ${formatCount(row.giveaways)} розыгрышей`,
+        badges: row => `<span class="badge good">${formatCount(row.wins)} win</span><span class="badge">prio ${Number(row.avg_priority || 0).toFixed(1)}</span>`
+      });
+      renderRankList("sources-list", detailed.sources || [], {
+        title: row => row.chat || "неизвестно",
+        value: row => row.score,
+        icon: row => Number(row.wins || 0) ? "badge-check" : "radio-tower",
+        meta: row => `${formatCount(row.total_pings)} всего · ${formatCount(row.noise)} шум`,
+        badges: row => `<span class="badge good">score ${Number(row.score || 0).toFixed(1)}</span><span class="badge warn">${formatCount(row.giveaways)} giveaway</span><span class="badge good">${formatCount(row.wins)} win</span>`,
+        empty: "Источники еще не рассчитаны."
+      });
+      renderRankList("priority-list", detailed.priorities || [], {
+        title: row => row.priority_label || "normal",
+        value: row => row.count,
+        icon: () => "gauge",
+        badges: row => `<span class="badge">${formatCount(row.count)}</span>`
+      });
+      renderRankList("mentions-list", detailed.top_mentions || [], {
+        title: row => `@${row.username || ""}`,
+        value: row => row.count,
+        icon: () => "at-sign",
+        badges: row => `<span class="badge info">${formatCount(row.count)} упоминаний</span>`,
+        empty: "Упоминаний пока нет."
+      });
+      renderRankList("status-flow-list", detailed.status_flow || [], {
+        title: row => row.status || "unknown",
+        value: row => row.count,
+        icon: row => row.action_status === "claimed" ? "badge-check" : "git-branch",
+        meta: row => actionStatuses[row.action_status] || row.action_status || "new",
+        badges: row => `<span class="badge info">${esc(actionStatuses[row.action_status] || row.action_status || "new")}</span><span class="badge">${formatCount(row.count)}</span>`,
+        empty: "Статусов пока нет."
+      });
     }
 
     async function loadMarket() {
       const latest = await api("/api/market");
       if (!latest.length) {
+        setHtmlIfChanged("market-brief", `
+          <div>
+            <div class="kicker">Market pulse</div>
+            <h2>Котировки пока не загружены</h2>
+            <div class="section-meta">Фоновая задача рынка заполнит эту панель после первого успешного запроса.</div>
+          </div>
+          <div class="brief-grid">${renderBriefTile("Статус", "нет данных", "ожидаю snapshot", "cloud-off", "warn")}</div>
+        `);
         $("market-cards").innerHTML = `<div class="panel muted">Котировки пока не загружены.</div>`;
         return;
       }
@@ -741,8 +1209,9 @@
       ];
       const history = (await api("/api/market-history-full?limit=48")).reverse();
       const baseline = history.length > 1 ? history[0] : null;
-      $("market-cards").innerHTML = coins.map(([id, label]) => marketCard(m, id, label, baseline)).join("");
-      $("market-table").innerHTML = `<thead><tr><th>Актив</th><th>USD</th><th>UAH</th><th>24h</th><th>Период</th><th>Обновлено</th></tr></thead><tbody>${coins.map(([id, label]) => marketRow(m, id, label, baseline)).join("")}</tbody>`;
+      renderMarketBrief(m, coins, baseline, history);
+      setHtmlIfChanged("market-cards", coins.map(([id, label]) => marketCard(m, id, label, baseline)).join(""));
+      setHtmlIfChanged("market-table", `<thead><tr><th>Актив</th><th>USD</th><th>UAH</th><th>24h</th><th>Период</th><th>Обновлено</th></tr></thead><tbody>${coins.map(([id, label]) => marketRow(m, id, label, baseline)).join("")}</tbody>`);
       const labels = history.map(x => new Date(x.fetched_at_iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
       drawChart("btcChart", "line", labels, history.map(x => x.bitcoin?.usd || 0), "#f4b44d");
       drawChart("tonChart", "line", labels, history.map(x => x["the-open-network"]?.usd || 0), "#2dd4bf");
@@ -757,11 +1226,54 @@
       return ((now - before) / before) * 100;
     }
 
+    function renderMarketBrief(m, coins, baseline, history) {
+      const moves = coins.map(([id, label]) => {
+        const item = m[id] || {};
+        const change24 = Number(item.usd_24h_change || 0);
+        const period = marketChange(item, baseline?.[id]);
+        return { id, label, item, change24, period };
+      });
+      const sorted = moves.slice().sort((a, b) => b.change24 - a.change24);
+      const leader = sorted[0] || {};
+      const laggard = sorted[sorted.length - 1] || {};
+      const volatile = moves.filter(row => Math.abs(row.change24) >= 5).length;
+      const stable = moves.find(row => row.label === "USDT") || moves[moves.length - 1] || {};
+      setHtmlIfChanged("market-brief", `
+        <div>
+          <div class="kicker">Market pulse</div>
+          <h2>${leader.label || "Рынок"} ${leader.change24 >= 0 ? "держит импульс" : "под давлением"}</h2>
+          <div class="section-meta">История: ${history.length} snapshot · обновлено ${fmtDate(m.fetched_at_iso)}</div>
+        </div>
+        <div class="brief-grid">
+          ${renderBriefTile("Лидер 24h", `${leader.label || "-"} ${leader.change24 >= 0 ? "+" : ""}${Number(leader.change24 || 0).toFixed(2)}%`, `период ${Number(leader.period || 0).toFixed(2)}%`, "trending-up", "good")}
+          ${renderBriefTile("Слабее рынка", `${laggard.label || "-"} ${laggard.change24 >= 0 ? "+" : ""}${Number(laggard.change24 || 0).toFixed(2)}%`, `период ${Number(laggard.period || 0).toFixed(2)}%`, "trending-down", Number(laggard.change24 || 0) < 0 ? "bad" : "info")}
+          ${renderBriefTile("Волатильность", `${volatile} активов`, "движение 5%+ за сутки", "activity", volatile ? "warn" : "good")}
+          ${renderBriefTile("Стейбл", `$${Number(stable.item?.usd || 0).toLocaleString()}`, `${stable.label || "USDT"} · ${Number(stable.change24 || 0).toFixed(2)}%`, "badge-dollar-sign", "info")}
+        </div>
+      `);
+    }
+
     function marketCard(m, id, label, baseline) {
       const d = m[id] || {};
       const c = d.usd_24h_change || 0;
       const period = marketChange(d, baseline?.[id]);
-      return `<div class="panel metric-card" style="--metric-color:${c >= 0 ? "#45d483" : "#f97373"}"><div class="metric-top"><div class="metric-label">${label} / USD</div><span class="badge ${c >= 0 ? "good" : "bad"}">${c >= 0 ? "+" : ""}${c.toFixed(2)}%</span></div><div class="metric-value">$${Number(d.usd || 0).toLocaleString()}</div><div class="deadline-row"><span class="badge ${period >= 0 ? "good" : "bad"}">период ${period >= 0 ? "+" : ""}${period.toFixed(2)}%</span><span class="badge">${Number(d.uah || 0).toLocaleString()} UAH</span></div></div>`;
+      const tone = c >= 0 ? "good" : "bad";
+      return `
+        <div class="panel metric-card market-card ${tone}" style="--metric-color:${c >= 0 ? "#45d483" : "#f97373"}">
+          <div class="metric-top">
+            <div>
+              <div class="metric-label">${label} / USD</div>
+              <div class="market-subtitle">период ${period >= 0 ? "+" : ""}${period.toFixed(2)}%</div>
+            </div>
+            <span class="badge ${tone}">${c >= 0 ? "+" : ""}${c.toFixed(2)}%</span>
+          </div>
+          <div class="metric-value">$${Number(d.usd || 0).toLocaleString()}</div>
+          <div class="deadline-row">
+            <span class="badge ${period >= 0 ? "good" : "bad"}">${period >= 0 ? "рост" : "снижение"}</span>
+            <span class="badge">${Number(d.uah || 0).toLocaleString()} UAH</span>
+          </div>
+        </div>
+      `;
     }
 
     function marketRow(m, id, label, baseline) {
@@ -782,12 +1294,40 @@
       const primary = Array.isArray(color) ? color[0] : color;
       state.charts[id] = new Chart(canvas, {
         type,
-        data: { labels, datasets: [{ data, borderColor: Array.isArray(color) ? undefined : color, backgroundColor: type === "line" ? hexToRgba(primary, .15) : color, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: .35, fill: type === "line" }] },
+        data: {
+          labels,
+          datasets: [{
+            data,
+            borderColor: type === "doughnut" ? "#101720" : primary,
+            backgroundColor: type === "line" ? hexToRgba(primary, .18) : color,
+            borderWidth: type === "doughnut" ? 3 : 2,
+            borderRadius: type === "bar" ? 5 : 0,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            tension: .35,
+            fill: type === "line"
+          }]
+        },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           resizeDelay: 120,
-          plugins: { legend: { display: false }, tooltip: { backgroundColor: "#101720", borderColor: "rgba(207,219,232,.18)", borderWidth: 1, titleColor: "#ffffff", bodyColor: "#dce6ec", displayColors: false } },
+          cutout: type === "doughnut" ? "58%" : undefined,
+          plugins: {
+            legend: {
+              display: type === "doughnut",
+              position: "bottom",
+              labels: { color: "#9caab8", boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 14 }
+            },
+            tooltip: {
+              backgroundColor: "#101720",
+              borderColor: "rgba(207,219,232,.18)",
+              borderWidth: 1,
+              titleColor: "#ffffff",
+              bodyColor: "#dce6ec",
+              displayColors: type === "doughnut"
+            }
+          },
           scales: type === "doughnut" ? {} : {
             x: { ticks: { color: "#9caab8" }, grid: { display: false } },
             y: { ticks: { color: "#9caab8" }, grid: { color: "rgba(207,219,232,.08)" } }
@@ -1053,6 +1593,7 @@
         `);
           } catch {}
           if (state.tab === "dashboard") { await Promise.all([loadPings(false, { silent, preserveScroll: options.preserveScroll }), loadAnalytics(), loadDashboardSummary()]); }
+          if (state.tab === "debts") await loadDebts();
           if (state.tab === "market" && !silent) await loadMarket();
           if (state.tab === "analytics") await loadAnalytics();
           if (state.tab === "share" && !silent) await loadShareGuide();
@@ -1104,9 +1645,7 @@
         return;
       }
       if (["giveaway-action", "no-deadline", "manual"].includes(kind)) {
-        $("type-filter").value = "giveaway";
-        setTab("dashboard");
-        loadPings(false);
+        setTab("debts");
         return;
       }
       if (kind === "accounts" && state.role === "admin") {
@@ -1182,6 +1721,8 @@
     });
     $("read-all-btn").addEventListener("click", markFilteredPingsRead);
     ["search-input", "type-filter", "status-filter", "favorite-filter", "mention-filter", "sort-by", "sort-order"].forEach(id => $(id).addEventListener("input", () => { saveFilters(); loadPings(false); }));
+    if ($("tag-filter")) $("tag-filter").addEventListener("input", () => { loadPings(false); });
+    loadTagFilter();
     $("group-btn").addEventListener("click", () => { state.grouped = !state.grouped; $("group-btn").classList.toggle("primary", state.grouped); loadPings(false); });
     $("load-more-btn").addEventListener("click", () => { if (state.limit > 0) { state.offset += state.limit; loadPings(true); } });
     $("pings-list").addEventListener("click", async (e) => {
@@ -1201,8 +1742,34 @@
         }
         return loadPings(false);
       }
+      if (e.target.closest("a")) return;
       const card = e.target.closest(".card[data-ping]");
       if (card) openModal(JSON.parse(card.dataset.ping));
+    });
+    $("debt-profile-tabs").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-debt-profile]");
+      if (!btn) return;
+      state.debtProfile = btn.dataset.debtProfile || "all";
+      if (state.debtBoard) renderDebts(state.debtBoard);
+    });
+    $("debts-list").addEventListener("click", async (e) => {
+      const statusBtn = e.target.closest("button[data-debt-status]");
+      if (statusBtn) {
+        e.stopPropagation();
+        const status = statusBtn.dataset.debtStatus;
+        const mappedAction = { claimed: "claimed", scam: "scam", missed: "missed", missed_reply: "missed" }[status] || "missed";
+        await api(`/api/pings/${statusBtn.dataset.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ giveaway_status: status, action_status: mappedAction })
+        });
+        await loadDebts();
+        await loadDashboardSummary();
+        return;
+      }
+      if (e.target.closest("a")) return;
+      const item = e.target.closest(".debt-item[data-ping]");
+      if (item) openModal(JSON.parse(item.dataset.ping));
     });
     ["tasks-overdue", "tasks-today", "tasks-tomorrow", "tasks-no-deadline", "tasks-waiting", "tasks-open"].forEach(id => {
       $(id).addEventListener("click", (e) => {
@@ -1297,6 +1864,40 @@
       if (window.lucide) lucide.createIcons();
     }
 
+    function renderModalTags(ping) {
+      const el = $("modal-tags-row");
+      if (!el) return;
+      const tags = Array.isArray(ping.tags) ? ping.tags : (ping.tags ? (() => { try { return JSON.parse(ping.tags); } catch { return []; } })() : []);
+      const tagsRow = `<div class="tags-row" style="margin-top:0.5rem">
+        ${tags.map(t => `<span class="tag-chip">${esc(t)} <button class="tag-remove" onclick="window._removePingTag(${ping.id},'${esc(t)}')" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:0.9rem">×</button></span>`).join('')}
+        <input id="tag-input-${ping.id}" placeholder="добавить тег…" maxlength="40" style="width:120px;font-size:0.8rem">
+        <button onclick="window._addPingTag(${ping.id})" style="font-size:0.8rem">+</button>
+      </div>`;
+      el.innerHTML = tagsRow;
+    }
+
+    window._addPingTag = async function addPingTag(pingId) {
+      const input = document.getElementById(`tag-input-${pingId}`);
+      const tag = (input?.value || '').trim();
+      if (!tag) return;
+      const result = await api(`/api/pings/${pingId}/tags/${encodeURIComponent(tag)}`, { method: 'POST' });
+      input.value = '';
+      if (state.currentPing && state.currentPing.id === pingId) {
+        state.currentPing = Object.assign({}, state.currentPing, { tags: result.tags });
+        renderModalTags(state.currentPing);
+      }
+      await loadTagFilter();
+    };
+
+    window._removePingTag = async function removePingTag(pingId, tag) {
+      const result = await api(`/api/pings/${pingId}/tags/${encodeURIComponent(tag)}`, { method: 'DELETE' });
+      if (state.currentPing && state.currentPing.id === pingId) {
+        state.currentPing = Object.assign({}, state.currentPing, { tags: result.tags });
+        renderModalTags(state.currentPing);
+      }
+      await loadTagFilter();
+    };
+
     function openModal(ping) {
       state.currentPing = ping;
       $("modal-title").textContent = ping.chat || "Упоминание";
@@ -1311,6 +1912,7 @@
       $("modal-giveaway-status-wrap").classList.toggle("hidden", !isGiveaway);
       $("modal-giveaway-status").value = ping.giveaway_status || "pending";
       $("modal-note").value = ping.note || "";
+      renderModalTags(ping);
       document.body.classList.add("modal-open");
       $("modal").classList.add("active");
       loadActionHistory(ping);
@@ -1422,6 +2024,7 @@
     $("log-level").addEventListener("change", loadLogs);
     $("event-level").addEventListener("change", loadEvents);
     $("refresh-events-btn").addEventListener("click", loadEvents);
+    $("refresh-debts-btn").addEventListener("click", loadDebts);
     $("refresh-giveaways-btn").addEventListener("click", loadGiveawayBoard);
     $("refresh-diagnostics-btn").addEventListener("click", loadDiagnostics);
     $("refresh-backups-btn").addEventListener("click", loadBackups);

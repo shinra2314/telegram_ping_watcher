@@ -43,6 +43,7 @@ from database import (
     get_checkpoints,
     get_events,
     get_db_stats,
+    get_debt_board,
     get_giveaway_actions,
     get_giveaway_board,
     get_giveaway_candidate,
@@ -90,6 +91,9 @@ from database import (
     seed_giveaway_candidates_from_pings,
     set_setting,
     start_scan_run,
+    add_ping_tag,
+    remove_ping_tag,
+    get_all_tags,
     toggle_favorite,
     update_giveaway_candidate_status,
     update_ping_deadline,
@@ -138,6 +142,7 @@ from pulse_desk.telegram_errors import (
     auth_key_duplicated_message,
     is_auth_key_duplicated,
 )
+from pulse_desk.telegram_reconnect import reconnect_delay_seconds as calculate_reconnect_delay_seconds
 
 
 settings = get_settings()
@@ -167,6 +172,11 @@ SCAN_HISTORY_LIMIT = normalize_scan_history_limit(settings.scan_history_limit)
 EDIT_SCAN_RECENT_MESSAGES = normalize_recent_edit_scan_limit(settings.edit_scan_recent_messages)
 STARTUP_SCAN_DELAY_SECONDS = max(0, min(300, settings.startup_scan_delay_seconds))
 STARTUP_SCAN_WAIT_SECONDS = max(0, min(300, settings.startup_scan_wait_seconds))
+TELEGRAM_CONNECT_TIMEOUT_SECONDS = max(5, min(120, settings.telegram_connect_timeout_seconds))
+TELEGRAM_RETRY_DELAY_SECONDS = max(1, min(60, settings.telegram_retry_delay_seconds))
+TELEGRAM_RECONNECT_BASE_SECONDS = max(5, min(600, settings.telegram_reconnect_base_seconds))
+TELEGRAM_RECONNECT_MAX_SECONDS = max(TELEGRAM_RECONNECT_BASE_SECONDS, min(1800, settings.telegram_reconnect_max_seconds))
+TELEGRAM_RECONNECT_JITTER_SECONDS = max(0, min(120, settings.telegram_reconnect_jitter_seconds))
 MARKET_POLL_SECONDS = settings.market_poll_seconds
 MARKET_ALERT_CHANGE_PCT = settings.market_alert_change_pct
 MARKET_RETENTION_DAYS = settings.market_retention_days
@@ -230,6 +240,29 @@ def now_iso() -> str:
 
 def start_background_task(name: str, coro) -> asyncio.Task:
     return start_tracked_task(state, logger, name, coro)
+
+
+def telegram_client_for_session(session_name: str) -> TelegramClient:
+    return TelegramClient(
+        str(settings.session_path(session_name)),
+        int(API_ID),
+        API_HASH,
+        auto_reconnect=True,
+        connection_retries=5,
+        retry_delay=TELEGRAM_RETRY_DELAY_SECONDS,
+        request_retries=3,
+        timeout=TELEGRAM_CONNECT_TIMEOUT_SECONDS,
+    )
+
+
+def reconnect_delay_seconds(session_name: str, attempt: int) -> int:
+    return calculate_reconnect_delay_seconds(
+        session_name,
+        attempt,
+        base_seconds=TELEGRAM_RECONNECT_BASE_SECONDS,
+        max_seconds=TELEGRAM_RECONNECT_MAX_SECONDS,
+        jitter_seconds=TELEGRAM_RECONNECT_JITTER_SECONDS,
+    )
 
 
 async def record_app_event(level: str, source: str, message: str, context: Optional[dict[str, Any]] = None) -> None:
@@ -1131,12 +1164,14 @@ async def process_ping_message(
 
 
 async def monitor_client_disconnect(client: TelegramClient, session_name: str) -> None:
+    disconnect_error: Optional[str] = None
     try:
         await client.disconnected
     except Exception as exc:
         if is_auth_key_duplicated(exc):
             await mark_auth_key_duplicated(session_name, client, exc)
             return
+        disconnect_error = str(exc)
         logger.warning("Telegram client %s disconnected with error: %s", session_name, exc)
     finally:
         if client in clients:
@@ -1150,9 +1185,23 @@ async def monitor_client_disconnect(client: TelegramClient, session_name: str) -
         if state.shutting_down or account.get("manual_disconnect"):
             account.update({"status": "disconnected", "disconnected_at": now_iso()})
             return
-        account.update({"status": "reconnecting", "last_error": "Telegram connection dropped", "disconnected_at": now_iso()})
-        await record_app_event("WARNING", "telegram", "Telegram account disconnected; reconnecting", {"session_name": session_name})
-        await asyncio.sleep(10)
+        attempt = int(account.get("reconnect_attempts") or 0) + 1
+        delay = reconnect_delay_seconds(session_name, attempt)
+        account.update({
+            "status": "reconnecting",
+            "last_error": disconnect_error or "Telegram connection dropped",
+            "disconnected_at": now_iso(),
+            "reconnect_attempts": attempt,
+            "next_reconnect_in_seconds": delay,
+        })
+        await record_app_event(
+            "WARNING",
+            "telegram",
+            "Telegram account disconnected; reconnect scheduled",
+            {"session_name": session_name, "attempt": attempt, "delay_seconds": delay, "error": disconnect_error},
+        )
+        await asyncio.sleep(delay)
+        account["next_reconnect_in_seconds"] = 0
         await start_client(session_name)
 
 
@@ -1167,8 +1216,8 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
         return
 
     account = accounts_state.setdefault(clean_name, {"session_name": clean_name})
-    account.update({"status": "connecting", "last_error": None, "manual_disconnect": False})
-    client = TelegramClient(str(settings.session_path(clean_name)), int(API_ID), API_HASH)
+    account.update({"status": "connecting", "last_error": None, "manual_disconnect": False, "connecting_at": now_iso()})
+    client = telegram_client_for_session(clean_name)
 
     try:
         await client.connect()
@@ -1193,6 +1242,8 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
             "username": me.username,
             "display": f"@{me.username}" if me.username else str(me.id),
             "connected_at": now_iso(),
+            "reconnect_attempts": 0,
+            "next_reconnect_in_seconds": 0,
         })
 
         @client.on(events.NewMessage())
@@ -1244,8 +1295,10 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
         except Exception:
             logger.debug("Failed to disconnect broken client %s", clean_name, exc_info=True)
         if retry_count < 5:
-            wait = min((retry_count + 1) * 30, 300)
+            wait = reconnect_delay_seconds(clean_name, retry_count + 1)
+            account.update({"reconnect_attempts": retry_count + 1, "next_reconnect_in_seconds": wait})
             await asyncio.sleep(wait)
+            account["next_reconnect_in_seconds"] = 0
             await start_client(session_name, retry_count + 1)
 
 
@@ -1272,7 +1325,7 @@ async def init_bot() -> None:
         logger.info("Telegram bot is not configured.")
         return
     try:
-        bot_client = TelegramClient(str(settings.session_path("pulse_bot")), int(API_ID), API_HASH)
+        bot_client = telegram_client_for_session("pulse_bot")
         await bot_client.start(bot_token=BOT_TOKEN)
         bot_me = await bot_client.get_me()
         bot_id = bot_me.id
@@ -1769,7 +1822,7 @@ async def send_code(data: AuthRequest):
             logger.debug("Failed to close previous pending auth client", exc_info=True)
     account = accounts_state.setdefault(session_name, {"session_name": session_name})
     account.update({"status": "auth_requesting", "last_error": None, "manual_disconnect": False})
-    client = TelegramClient(str(settings.session_path(session_name)), int(API_ID), API_HASH)
+    client = telegram_client_for_session(session_name)
     try:
         await client.connect()
         result = await client.send_code_request(phone, force_sms=data.force_sms)
@@ -1902,6 +1955,7 @@ async def read_pings(
     deadline_to: Optional[str] = None,
     has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
+    tag: Optional[str] = Query(None),
 ):
     if grouped:
         return await get_pings_grouped(limit=limit, chat_type=chat_type, search=search, mention=mention)
@@ -1923,6 +1977,7 @@ async def read_pings(
         deadline_to=deadline_to,
         has_deadline=has_deadline,
         source_score_min=source_score_min,
+        tag=tag,
     )
 
 
@@ -2025,12 +2080,14 @@ async def get_analytics(role: str = Depends(get_current_role)):
 async def get_dashboard_summary(role: str = Depends(get_current_role)):
     status_payload = await status(role)
     analytics = await build_analytics()
+    tasks = await get_task_overview(limit=120)
+    giveaway_board = await get_giveaway_board(limit=120)
     problem_events = await get_recent_problem_events(limit=5) if role == "admin" else []
     return build_dashboard_summary(
         status=status_payload,
         analytics=analytics,
-        tasks={},
-        giveaway_board={"stats": {}, "bucket_counts": {}},
+        tasks=tasks,
+        giveaway_board=giveaway_board,
         problem_events=problem_events,
     )
 
@@ -2141,6 +2198,11 @@ async def get_stats_detailed_alias(role: str = Depends(get_current_role)):
 @app.get("/api/tasks")
 async def read_tasks(role: str = Depends(get_current_role), limit: int = Query(300, ge=1, le=1000)):
     return await get_task_overview(limit=limit)
+
+
+@app.get("/api/debts")
+async def read_debts(role: str = Depends(get_current_role), limit: int = Query(160, ge=10, le=500)):
+    return await get_debt_board(ping_usernames, limit=limit)
 
 
 @app.get("/api/giveaways/board")
@@ -2396,6 +2458,23 @@ async def mark_filtered_pings_read(
 async def toggle_ping_favorite(ping_id: int):
     await toggle_favorite(ping_id)
     return {"status": "ok"}
+
+
+@app.get("/api/tags")
+async def list_all_tags(token_valid: str = Depends(get_current_role)):
+    return await get_all_tags()
+
+
+@app.post("/api/pings/{ping_id}/tags/{tag}")
+async def ping_add_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
+    tags = await add_ping_tag(ping_id, tag.strip())
+    return {"tags": tags}
+
+
+@app.delete("/api/pings/{ping_id}/tags/{tag}")
+async def ping_remove_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
+    tags = await remove_ping_tag(ping_id, tag.strip())
+    return {"tags": tags}
 
 
 @app.put("/api/pings/{ping_id}", dependencies=[Depends(require_admin)])

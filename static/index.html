@@ -28,6 +28,7 @@
       <div class="brand"><span class="brand-icon"><i data-lucide="zap"></i></span>Pulse Desk</div>
       <nav class="nav">
         <button class="active" data-tab="dashboard"><i data-lucide="layout-dashboard"></i>Дашборд</button>
+        <button data-tab="debts"><i data-lucide="receipt-text"></i>Долги</button>
         <button data-tab="market"><i data-lucide="line-chart"></i>Маркет</button>
         <button data-tab="analytics"><i data-lucide="bar-chart-3"></i>Аналитика</button>
         <button data-tab="share" class="admin-only"><i data-lucide="share-2"></i>Друзьям</button>
@@ -137,6 +138,9 @@
                 <option value="false">Не избранное</option>
               </select></label>
             <label class="field"><span>Username</span><input class="input" id="mention-filter" placeholder="Без @"></label>
+            <label class="field"><span>Тег</span><select class="select" id="tag-filter" style="display:none">
+                <option value="">Все теги</option>
+              </select></label>
           </div>
           <div class="filters filter-row filter-sort">
             <label class="field"><span>Сортировка</span><select class="select" id="sort-by">
@@ -170,6 +174,40 @@
         <div id="pings-list" class="grid cards"></div>
         <div class="actions" style="justify-content:center;margin-top:18px">
           <button class="btn" id="load-more-btn">Показать еще</button>
+        </div>
+      </section>
+
+      <section id="debts" class="tabs debts-shell">
+        <div class="debts-head">
+          <div>
+            <div class="kicker">Prize debts</div>
+            <h2 class="section-title">Долги по призам</h2>
+            <div class="section-meta">Автоматическая очередь побед, где статус розыгрыша еще “ожидаю выдачи”.</div>
+          </div>
+          <button class="btn" id="refresh-debts-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+        </div>
+        <div class="grid stats" id="debts-stats"></div>
+        <div class="debts-layout">
+          <div class="panel debts-main-panel">
+            <div class="ops-panel-head">
+              <div>
+                <div class="kicker" id="debts-active-kicker">Все профили</div>
+                <h2 id="debts-active-title">Ожидают выдачи</h2>
+              </div>
+              <span class="badge warn" id="debts-active-count">0</span>
+            </div>
+            <div id="debts-list" class="board-list debts-list"></div>
+          </div>
+          <aside class="panel debt-profiles-panel">
+            <div class="ops-panel-head">
+              <div>
+                <div class="kicker">Monitoring profiles</div>
+                <h2>Профили</h2>
+              </div>
+              <span class="metric-icon"><i data-lucide="at-sign"></i></span>
+            </div>
+            <div id="debt-profile-tabs" class="debt-profile-tabs"></div>
+          </aside>
         </div>
       </section>
 
@@ -238,26 +276,52 @@
       </section>
 
       <section id="market" class="tabs">
-        <div id="market-cards" class="grid stats"></div>
-        <div class="grid two">
+        <div class="market-brief panel" id="market-brief">
+          <div>
+            <div class="kicker">Market pulse</div>
+            <h2>Рыночная сводка</h2>
+            <div class="section-meta">Последние котировки, движение за 24 часа и изменение за доступную историю</div>
+          </div>
+          <div class="brief-grid">
+            <div class="brief-tile"><span>Лидер</span><strong>...</strong></div>
+            <div class="brief-tile"><span>Просадка</span><strong>...</strong></div>
+            <div class="brief-tile"><span>Обновлено</span><strong>...</strong></div>
+          </div>
+        </div>
+        <div id="market-cards" class="grid stats market-stats"></div>
+        <div class="grid two market-chart-grid">
           <div class="panel chart-panel"><h2>BTC / USD</h2><canvas id="btcChart" height="180"></canvas></div>
           <div class="panel chart-panel"><h2>TON / USD</h2><canvas id="tonChart" height="180"></canvas></div>
           <div class="panel chart-panel"><h2>ETH / USD</h2><canvas id="ethChart" height="180"></canvas></div>
           <div class="panel chart-panel"><h2>SOL / USD</h2><canvas id="solChart" height="180"></canvas></div>
         </div>
-        <div class="panel" style="margin-top:16px">
+        <div class="panel market-table-panel">
           <h2>Текущие котировки</h2>
           <div style="overflow:auto"><table class="table" id="market-table"></table></div>
         </div>
       </section>
 
       <section id="analytics" class="tabs">
+        <div class="analytics-hero panel">
+          <div>
+            <div class="kicker">Signal analytics</div>
+            <h2>Где появляются полезные пинги</h2>
+            <div class="section-meta">Обзор качества источников, нагрузки и результата без изменения процесса поиска</div>
+          </div>
+          <div class="analytics-brief" id="analytics-brief">
+            <div class="brief-tile"><span>Фокус</span><strong>...</strong></div>
+            <div class="brief-tile"><span>Результат</span><strong>...</strong></div>
+            <div class="brief-tile"><span>Покрытие</span><strong>...</strong></div>
+          </div>
+        </div>
+        <div class="analytics-flow" id="analytics-flow"></div>
         <div class="grid stats analytics-stats" id="analytics-stats-row"></div>
-        <div class="grid two">
+        <div class="grid two analytics-grid">
           <div class="panel chart-panel"><h2>Активность по дням</h2><canvas id="dailyChart" height="180"></canvas></div>
           <div class="panel chart-panel"><h2>Активность по часам</h2><canvas id="hourlyChart" height="180"></canvas></div>
           <div class="panel chart-panel"><h2>Типы источников</h2><canvas id="typeChart" height="180"></canvas></div>
           <div class="panel"><h2>Каналы по аккаунтам</h2><div id="channels-by-account-list"></div></div>
+          <div class="panel analytics-wide"><h2>Качество по дням</h2><div id="daily-quality-list"></div></div>
           <div class="panel"><h2>Ценность авторов</h2><div id="senders-list"></div></div>
           <div class="panel"><h2>Ценные чаты</h2><div id="valuable-chats-list"></div></div>
           <div class="panel"><h2>Репутация источников</h2><div id="sources-list"></div></div>
@@ -542,9 +606,9 @@
 
   <nav class="mobile-nav" aria-label="Основная навигация">
     <button class="active" data-tab="dashboard"><i data-lucide="layout-dashboard"></i><span>Пульт</span></button>
+    <button data-tab="debts"><i data-lucide="receipt-text"></i><span>Долги</span></button>
     <button data-tab="market"><i data-lucide="line-chart"></i><span>Маркет</span></button>
     <button data-tab="analytics"><i data-lucide="bar-chart-3"></i><span>Аналитика</span></button>
-    <button data-tab="share" class="admin-only"><i data-lucide="share-2"></i><span>Доступ</span></button>
     <button data-tab="settings" class="admin-only mobile-extra"><i data-lucide="settings"></i><span>Настройки</span></button>
   </nav>
 
@@ -587,6 +651,7 @@
       <label class="field modal-field"><span>Дедлайн</span><input class="input" id="modal-deadline" type="datetime-local"></label>
       <label class="field modal-field"><span>Напоминание</span><input class="input" id="modal-reminder" type="datetime-local"></label>
       <label class="field modal-field"><span>Заметка</span><textarea class="textarea" id="modal-note" placeholder="Что сделал, что проверить позже"></textarea></label>
+      <div id="modal-tags-row"></div>
       <div class="modal-history" id="modal-actions-history"></div>
       <div class="actions modal-actions">
         <a class="btn primary" id="modal-link" target="_blank" rel="noopener">Открыть в Telegram</a>

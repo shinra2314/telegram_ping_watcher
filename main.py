@@ -130,6 +130,7 @@ from pulse_desk.api_models import (
 )
 from pulse_desk.config import get_settings
 from pulse_desk.dashboard import build_dashboard_summary
+from pulse_desk.digest import format_digest
 from pulse_desk.deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from pulse_desk.giveaways import analyze_giveaway, giveaway_outcome_resolution, inactive_channel_candidate, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
 from pulse_desk.jobs import runtime_health, start_tracked_task
@@ -2572,6 +2573,26 @@ async def export_json(
         "count": len(rows),
         "rows": rows,
     }
+
+
+@app.post("/api/export/telegram-digest")
+async def export_telegram_digest(
+    hours: int = Query(24, ge=1, le=168),
+    _: str = Depends(require_admin),
+):
+    if not state.bot_client or not settings.admin_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Бот не настроен: нужны TELEGRAM_BOT_TOKEN и ADMIN_ID в .env",
+        )
+    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    pings = await get_pings(limit=200, date_from=since)
+    text = format_digest(pings, period_label=f"за {hours} ч")
+    try:
+        await state.bot_client.send_message(settings.admin_id, text, parse_mode="md")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка отправки: {exc}") from exc
+    return {"ok": True, "pings_count": len(pings)}
 
 
 @app.post("/api/scan-history", dependencies=[Depends(require_admin)])

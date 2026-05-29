@@ -2071,6 +2071,23 @@
       downloadJson(`pulse_pings_${new Date().toISOString().slice(0, 10)}.json`, data);
     });
 
+    document.getElementById('btn-tg-digest')?.addEventListener('click', async () => {
+        const btn = document.getElementById('btn-tg-digest');
+        btn.disabled = true;
+        btn.textContent = 'Отправляю…';
+        try {
+            const res = await api('/api/export/telegram-digest?hours=24', { method: 'POST' });
+            btn.textContent = `✅ Отправлено (${res.pings_count} пингов)`;
+        } catch (e) {
+            btn.textContent = '❌ Ошибка';
+            console.error(e);
+        }
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.textContent = '📤 Дайджест в Telegram';
+        }, 4000);
+    });
+
     async function initApp() {
       restoreFilters();
       applyRole();

@@ -1649,13 +1649,16 @@ async def _fan_push_ping(ping: dict) -> None:
 async def lifespan(app: FastAPI):
     await init_db()
     # VAPID key lifecycle for web push
-    _vapid_pem = await get_setting("vapid_private_pem", "")
-    if not _vapid_pem:
-        _vapid_keys = generate_vapid_keys()
-        await set_setting("vapid_private_pem", _vapid_keys["private_key"])
-        _vapid_pem = _vapid_keys["private_key"]
-        logger.info("Generated new VAPID key pair for web push")
-    state.vapid_private_pem = _vapid_pem
+    try:
+        _vapid_pem = await get_setting("vapid_private_pem", "")
+        if not _vapid_pem:
+            _vapid_keys = generate_vapid_keys()
+            await set_setting("vapid_private_pem", _vapid_keys["private_key"])
+            _vapid_pem = _vapid_keys["private_key"]
+            logger.info("Generated new VAPID key pair for web push")
+        state.vapid_private_pem = _vapid_pem
+    except Exception:
+        logger.warning("Could not initialise VAPID keys — web push will be disabled", exc_info=True)
     interrupted_scans = await interrupt_stale_scan_runs()
     if interrupted_scans:
         await record_app_event(

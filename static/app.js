@@ -1869,7 +1869,7 @@
       if (!el) return;
       const tags = Array.isArray(ping.tags) ? ping.tags : (ping.tags ? (() => { try { return JSON.parse(ping.tags); } catch { return []; } })() : []);
       const tagsRow = `<div class="tags-row" style="margin-top:0.5rem">
-        ${tags.map(t => `<span class="tag-chip">${esc(t)} <button class="tag-remove" onclick="window._removePingTag(${ping.id},'${esc(t)}')" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:0.9rem">×</button></span>`).join('')}
+        ${tags.map(t => `<span class="tag-chip">${esc(t)} <button class="tag-remove" onclick="window._removePingTag(${ping.id}, ${JSON.stringify(t)})" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:0.9rem">×</button></span>`).join('')}
         <input id="tag-input-${ping.id}" placeholder="добавить тег…" maxlength="40" style="width:120px;font-size:0.8rem">
         <button onclick="window._addPingTag(${ping.id})" style="font-size:0.8rem">+</button>
       </div>`;

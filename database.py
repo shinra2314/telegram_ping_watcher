@@ -148,6 +148,7 @@ def _env_int(name: str, default: int) -> int:
 
 async def add_ping_tag(ping_id: int, tag: str) -> list[str]:
     tag = tag.strip()
+    tag = tag.replace('"', '')
     if not tag:
         return []
     async with _connect() as db:
@@ -164,6 +165,9 @@ async def add_ping_tag(ping_id: int, tag: str) -> list[str]:
 
 
 async def remove_ping_tag(ping_id: int, tag: str) -> list[str]:
+    tag = tag.strip().replace('"', '')
+    if not tag:
+        return []
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT tags FROM pings WHERE id = ?", (ping_id,))).fetchone()

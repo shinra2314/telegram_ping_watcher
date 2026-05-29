@@ -2467,13 +2467,13 @@ async def list_all_tags(token_valid: str = Depends(get_current_role)):
 
 @app.post("/api/pings/{ping_id}/tags/{tag}")
 async def ping_add_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
-    tags = await add_ping_tag(ping_id, tag.strip())
+    tags = await add_ping_tag(ping_id, tag.strip().replace('"', ''))
     return {"tags": tags}
 
 
 @app.delete("/api/pings/{ping_id}/tags/{tag}")
 async def ping_remove_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
-    tags = await remove_ping_tag(ping_id, tag.strip())
+    tags = await remove_ping_tag(ping_id, tag.strip().replace('"', ''))
     return {"tags": tags}
 
 

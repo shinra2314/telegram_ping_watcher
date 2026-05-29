@@ -384,6 +384,22 @@ class CoreParsingTests(unittest.TestCase):
         self.assertIn("old_value", row)
         self.assertIn("new_value", row)
 
+    def test_digest_formats_empty(self):
+        from pulse_desk.digest import format_digest
+        result = format_digest([])
+        self.assertIn("Нет", result)
+
+    def test_digest_formats_pings(self):
+        from pulse_desk.digest import format_digest
+        pings = [
+            {"chat": "channel1", "text": "Победитель @alice!", "is_win": True, "link": "https://t.me/c/1/1", "date": "2026-05-29T12:00:00"},
+            {"chat": "channel2", "text": "Просто упоминание", "is_win": False, "link": "https://t.me/c/2/2", "date": "2026-05-29T11:00:00"},
+        ]
+        result = format_digest(pings)
+        self.assertIn("channel1", result)
+        self.assertIn("🏆", result)
+        self.assertIn("2", result)
+
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -131,17 +131,14 @@ from pulse_desk.api_models import (
     SignInRequest,
     UsernamesRequest,
 )
-from pulse_desk.config import get_settings
 from pulse_desk.dashboard import build_dashboard_summary
 from pulse_desk.digest import format_digest
 from pulse_desk.deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from pulse_desk.giveaways import analyze_giveaway, giveaway_outcome_resolution, inactive_channel_candidate, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
 from pulse_desk.jobs import runtime_health, start_tracked_task
-from pulse_desk.logging_config import configure_logging
 from pulse_desk.push import generate_vapid_keys, send_push, vapid_public_key_b64
-from pulse_desk.runtime import AppState
 from pulse_desk.scan import channel_sweep_start_id, normalize_recent_edit_scan_limit, normalize_scan_history_limit
-from pulse_desk.security import is_weak_token, mask_secret, token_matches
+from pulse_desk.security import is_weak_token, mask_secret
 from pulse_desk.statuses import ACTION_STATUSES, GIVEAWAY_STATUSES, PING_STATUSES
 from pulse_desk.telegram_errors import (
     AUTH_KEY_DUPLICATED_STATUS,
@@ -151,46 +148,51 @@ from pulse_desk.telegram_errors import (
 from pulse_desk.telegram_reconnect import reconnect_delay_seconds as calculate_reconnect_delay_seconds
 
 
-settings = get_settings()
+from pulse_desk.app_ctx import (
+    ADMIN_ID,
+    ADMIN_TOKEN,
+    ALLOW_QUERY_TOKEN,
+    AUTO_JOIN_GIVEAWAYS,
+    DRY_RUN_GIVEAWAYS,
+    EDIT_SCAN_RECENT_MESSAGES,
+    GIVEAWAY_ACTION_ACCOUNT,
+    GIVEAWAY_ANALYZE_RECENT_MESSAGES,
+    GIVEAWAY_INACTIVE_CHANNEL_DAYS,
+    GIVEAWAY_MIN_ACTION_DELAY_SECONDS,
+    GIVEAWAY_REVIEW_MODE,
+    MARKET_ALERT_CHANGE_PCT,
+    MARKET_POLL_SECONDS,
+    MARKET_RETENTION_DAYS,
+    PENDING_AUTH_TTL_SECONDS,
+    PUBLIC_SHARE_MODE,
+    SCAN_ACCOUNT_CONCURRENCY,
+    SCAN_HISTORY_LIMIT,
+    SCAN_INTERVAL_SECONDS,
+    STARTUP_SCAN_DELAY_SECONDS,
+    STARTUP_SCAN_WAIT_SECONDS,
+    TELEGRAM_CONNECT_TIMEOUT_SECONDS,
+    TELEGRAM_RECONNECT_BASE_SECONDS,
+    TELEGRAM_RECONNECT_JITTER_SECONDS,
+    TELEGRAM_RECONNECT_MAX_SECONDS,
+    TELEGRAM_RETRY_DELAY_SECONDS,
+    VIEWER_TOKEN,
+    WEB_AUTH_TOKEN,
+    app_base_url,
+    get_current_role,
+    logger,
+    require_admin,
+    require_viewer,
+    settings,
+    state,
+)
+
 BASE_DIR = settings.base_dir
 STATIC_DIR = settings.static_dir
 LOG_FILE = settings.log_file
-
-logger = configure_logging(LOG_FILE, settings.log_level, settings.telethon_log_level)
-
 API_ID = settings.api_id
 API_HASH = settings.api_hash
 BOT_TOKEN = settings.bot_token
-WEB_AUTH_TOKEN = settings.web_auth_token.strip()
-ADMIN_TOKEN = settings.effective_admin_token
-VIEWER_TOKEN = settings.viewer_token.strip()
-PUBLIC_SHARE_MODE = settings.public_share_mode
-AUTO_JOIN_GIVEAWAYS = settings.auto_join_giveaways
-DRY_RUN_GIVEAWAYS = settings.dry_run_giveaways
-GIVEAWAY_ACTION_ACCOUNT = settings.giveaway_action_account.strip().lstrip("@")
-GIVEAWAY_REVIEW_MODE = settings.giveaway_review_mode.strip().lower() or "manual"
-GIVEAWAY_ANALYZE_RECENT_MESSAGES = settings.giveaway_analyze_recent_messages
-GIVEAWAY_INACTIVE_CHANNEL_DAYS = settings.giveaway_inactive_channel_days
-GIVEAWAY_MIN_ACTION_DELAY_SECONDS = settings.giveaway_min_action_delay_seconds
-SCAN_INTERVAL_SECONDS = settings.scan_interval_seconds
-SCAN_ACCOUNT_CONCURRENCY = max(1, min(8, settings.scan_account_concurrency))
-SCAN_HISTORY_LIMIT = normalize_scan_history_limit(settings.scan_history_limit)
-EDIT_SCAN_RECENT_MESSAGES = normalize_recent_edit_scan_limit(settings.edit_scan_recent_messages)
-STARTUP_SCAN_DELAY_SECONDS = max(0, min(300, settings.startup_scan_delay_seconds))
-STARTUP_SCAN_WAIT_SECONDS = max(0, min(300, settings.startup_scan_wait_seconds))
-TELEGRAM_CONNECT_TIMEOUT_SECONDS = max(5, min(120, settings.telegram_connect_timeout_seconds))
-TELEGRAM_RETRY_DELAY_SECONDS = max(1, min(60, settings.telegram_retry_delay_seconds))
-TELEGRAM_RECONNECT_BASE_SECONDS = max(5, min(600, settings.telegram_reconnect_base_seconds))
-TELEGRAM_RECONNECT_MAX_SECONDS = max(TELEGRAM_RECONNECT_BASE_SECONDS, min(1800, settings.telegram_reconnect_max_seconds))
-TELEGRAM_RECONNECT_JITTER_SECONDS = max(0, min(120, settings.telegram_reconnect_jitter_seconds))
-MARKET_POLL_SECONDS = settings.market_poll_seconds
-MARKET_ALERT_CHANGE_PCT = settings.market_alert_change_pct
-MARKET_RETENTION_DAYS = settings.market_retention_days
-PENDING_AUTH_TTL_SECONDS = settings.pending_auth_ttl_seconds
-ALLOW_QUERY_TOKEN = settings.allow_query_token
-ADMIN_ID = settings.admin_id
 
-state = AppState()
 clients = state.clients
 bot_client: Optional[TelegramClient] = None
 bot_id: Optional[int] = None
@@ -231,13 +233,6 @@ last_giveaway_action_at: Optional[datetime] = None
 
 
 CHANNEL_PROFILE_TTL_SECONDS = 6 * 60 * 60
-
-
-def app_base_url() -> str:
-    host = settings.host
-    port = settings.port
-    shown_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    return f"http://{shown_host}:{port}"
 
 
 def now_iso() -> str:
@@ -356,32 +351,6 @@ def describe_sent_code_type(result: Any) -> tuple[str, str]:
         "SentCodeTypeEmailCode": ("email", "Код отправлен на почту, привязанную к аккаунту."),
     }
     return labels.get(type_name, (type_name or "unknown", "Код запрошен у Telegram. Проверьте Telegram, SMS, звонки и почту."))
-
-
-def get_current_role(
-    request: Request,
-    x_pulse_token: Optional[str] = Header(default=None),
-) -> str:
-    if not ADMIN_TOKEN and not VIEWER_TOKEN:
-        return "admin"
-    provided = x_pulse_token or request.cookies.get("pulse_token")
-    if not provided and ALLOW_QUERY_TOKEN:
-        provided = request.query_params.get("token")
-        if provided:
-            logger.warning("Access token was provided through URL query; prefer X-Pulse-Token header.")
-    if token_matches(provided, ADMIN_TOKEN):
-        return "admin"
-    if token_matches(provided, WEB_AUTH_TOKEN):
-        return "admin"
-    if token_matches(provided, VIEWER_TOKEN):
-        return "viewer"
-    raise HTTPException(status_code=401, detail="Invalid or missing access token")
-
-
-def require_admin(role: str = Depends(get_current_role)) -> str:
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="Admin token required")
-    return role
 
 
 def check_is_win(text: str) -> bool:

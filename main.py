@@ -62,6 +62,7 @@ from database import (
     get_source_score,
     get_source_scores,
     get_setting,
+    get_settings_history,
     get_task_overview,
     get_latest_scan_run,
     get_latest_checkpoints,
@@ -2969,6 +2970,15 @@ async def update_runtime_settings(data: RuntimeSettingsRequest):
     await record_app_event("INFO", "settings", "Runtime settings updated", cleaned)
     await publish_live_event("settings-updated", {"scope": "runtime"})
     return {"status": "ok", "settings": cleaned}
+
+
+@app.get("/api/settings/history")
+async def get_settings_change_history(
+    key: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    _: str = Depends(require_admin),
+):
+    return await get_settings_history(key=key, limit=limit)
 
 
 @app.get("/api/settings/notifications", dependencies=[Depends(require_admin)])

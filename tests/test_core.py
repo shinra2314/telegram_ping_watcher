@@ -371,6 +371,19 @@ class CoreParsingTests(unittest.TestCase):
         self.assertEqual(status, "manual_required")
         self.assertIn("twitch.tv", blocked)
 
+    def test_settings_history_schema(self):
+        from datetime import datetime
+        row = {
+            "id": 1,
+            "key": "usernames",
+            "old_value": "alice",
+            "new_value": "alice,bob",
+            "changed_at": datetime.now().isoformat(),
+        }
+        self.assertIn("key", row)
+        self.assertIn("old_value", row)
+        self.assertIn("new_value", row)
+
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

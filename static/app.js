@@ -1504,6 +1504,37 @@
       lucide.createIcons();
     }
 
+    async function renderSettingsHistory(container) {
+      try {
+        const history = await api('/api/settings/history?limit=30');
+        if (!history || !history.length) {
+          container.innerHTML = '<p style="color:#888;font-size:0.85rem">Изменений пока нет.</p>';
+          return;
+        }
+        const rows = history.map(h => `
+            <tr>
+                <td style="padding:4px 8px">${esc(h.key)}</td>
+                <td style="padding:4px 8px;color:#888">${esc(h.old_value ?? '—')}</td>
+                <td style="padding:4px 8px">${esc(h.new_value ?? '—')}</td>
+                <td style="padding:4px 8px;white-space:nowrap;color:#888">${esc((h.changed_at || '').slice(0, 16))}</td>
+            </tr>
+        `).join('');
+        container.innerHTML = `
+            <table style="width:100%;font-size:0.8rem;border-collapse:collapse">
+                <thead><tr style="text-align:left;border-bottom:1px solid var(--border,#333)">
+                    <th style="padding:4px 8px">Ключ</th>
+                    <th style="padding:4px 8px">Было</th>
+                    <th style="padding:4px 8px">Стало</th>
+                    <th style="padding:4px 8px">Когда</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+      } catch (e) {
+        container.innerHTML = '<p style="color:#888;font-size:0.85rem">Недоступно.</p>';
+      }
+    }
+
     async function loadSettings() {
       const data = await api("/api/settings/usernames");
       $("usernames-input").value = data.usernames.join("\n");
@@ -1549,6 +1580,8 @@
       await loadDiagnostics();
       await loadLogs();
       await loadEvents();
+      const histContainer = document.getElementById('settings-history-content');
+      if (histContainer) renderSettingsHistory(histContainer);
     }
 
     async function loadLogs() {

@@ -24,6 +24,7 @@ class AppState:
     background_task_names: set[str] = field(default_factory=set)
     background_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     shutting_down: bool = False
+    vapid_private_pem: str = ""
     scan_status: dict[str, Any] = field(default_factory=lambda: {
         "running": False,
         "started_at": None,

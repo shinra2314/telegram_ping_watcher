@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - keeps parser tests independent from opti
     DB_PATH = Path(os.getenv("PULSE_DB_PATH", BASE_DIR / "pulse_desk.db"))
     BACKUP_DIR = DB_PATH.parent / "backups"
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def _now_iso() -> str:
@@ -391,6 +391,17 @@ async def init_db() -> None:
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_settings_history_key ON settings_history(key)"
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
         await db.execute(
             """
@@ -2548,6 +2559,32 @@ async def get_settings_history(*, key: Optional[str] = None, limit: int = 50) ->
                     (limit,),
                 )
             ).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def save_push_subscription(endpoint: str, p256dh: str, auth: str) -> None:
+    async with _connect() as db:
+        await db.execute(
+            """
+            INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth
+            """,
+            (endpoint, p256dh, auth, _now_iso()),
+        )
+        await db.commit()
+
+
+async def delete_push_subscription(endpoint: str) -> None:
+    async with _connect() as db:
+        await db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+        await db.commit()
+
+
+async def get_push_subscriptions() -> list[dict]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions")).fetchall()
     return [dict(r) for r in rows]
 
 

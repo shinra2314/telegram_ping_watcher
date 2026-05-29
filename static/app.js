@@ -2104,3 +2104,71 @@
     initApp();
     setInterval(() => refreshData({ silent: true, preserveScroll: true }), 20000);
     lucide.createIcons();
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const raw = atob(base64);
+        return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+    }
+
+    async function subscribeToPush() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            alert('Push-уведомления не поддерживаются в этом браузере');
+            return;
+        }
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') return;
+        const reg = await navigator.serviceWorker.ready;
+        let publicKey;
+        try {
+            const res = await api('/api/push/vapid-public-key');
+            publicKey = res.key;
+        } catch { return; }
+        const subscription = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+        await api('/api/push/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(subscription.toJSON()),
+        });
+        const btn = document.getElementById('btn-push-subscribe');
+        if (btn) btn.textContent = '🔕 Отписаться';
+    }
+
+    async function unsubscribeFromPush() {
+        if (!('serviceWorker' in navigator)) return;
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (sub) {
+            await api('/api/push/subscribe', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: sub.endpoint }),
+            });
+            await sub.unsubscribe();
+        }
+        const btn = document.getElementById('btn-push-subscribe');
+        if (btn) btn.textContent = '🔔 Уведомления';
+    }
+
+    document.getElementById('btn-push-subscribe')?.addEventListener('click', async () => {
+        if (!('serviceWorker' in navigator)) return;
+        const reg = await navigator.serviceWorker.ready;
+        const existing = await reg.pushManager.getSubscription();
+        if (existing) await unsubscribeFromPush();
+        else await subscribeToPush();
+    });
+
+    // Update button state on page load
+    (async () => {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+        try {
+            const reg = await navigator.serviceWorker.ready;
+            const sub = await reg.pushManager.getSubscription();
+            const btn = document.getElementById('btn-push-subscribe');
+            if (btn && sub) btn.textContent = '🔕 Отписаться';
+        } catch {}
+    })();

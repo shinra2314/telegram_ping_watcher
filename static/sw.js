@@ -1,4 +1,4 @@
-const CACHE_NAME = "pulse-desk-v26-edited-post-scan";
+const CACHE_NAME = "pulse-desk-v30-debt-cards";
 const ASSETS = [
   "/",
   "/static/index.html",
@@ -34,19 +34,21 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(caches.match(request).then((response) => response || fetch(request)));
 });
 
-self.addEventListener("push", (event) => {
-  const data = event.data ? event.data.json() : { title: "Pulse Desk", body: "Новое упоминание!" };
-  const options = {
-    body: data.body,
-    icon: "/static/favicon.svg",
-    badge: "/static/favicon.svg",
-    vibrate: [200, 100, 200],
-    data: { url: data.link || "/" }
-  };
-  event.waitUntil(self.registration.showNotification(data.title, options));
+self.addEventListener('push', event => {
+    const data = event.data ? event.data.json() : {};
+    event.waitUntil(
+        self.registration.showNotification(data.title || 'Pulse Desk', {
+            body: data.body || '',
+            icon: '/favicon.svg',
+            badge: '/favicon.svg',
+            tag: data.tag || 'pulse-ping',
+            data: { url: data.url || '/' },
+        })
+    );
 });
 
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  event.waitUntil(clients.openWindow(event.notification.data.url));
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    const url = (event.notification.data || {}).url || '/';
+    event.waitUntil(clients.openWindow(url));
 });

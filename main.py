@@ -89,6 +89,9 @@ from database import (
     save_checkpoints,
     save_market_snapshot,
     save_ping,
+    save_push_subscription,
+    delete_push_subscription,
+    get_push_subscriptions,
     seed_giveaway_candidates_from_pings,
     set_setting,
     start_scan_run,
@@ -135,6 +138,7 @@ from pulse_desk.deadlines import iso_or_none, parse_claim_deadline, parse_deadli
 from pulse_desk.giveaways import analyze_giveaway, giveaway_outcome_resolution, inactive_channel_candidate, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
 from pulse_desk.jobs import runtime_health, start_tracked_task
 from pulse_desk.logging_config import configure_logging
+from pulse_desk.push import generate_vapid_keys, send_push, vapid_public_key_b64
 from pulse_desk.runtime import AppState
 from pulse_desk.scan import channel_sweep_start_id, normalize_recent_edit_scan_limit, normalize_scan_history_limit
 from pulse_desk.security import is_weak_token, mask_secret, token_matches
@@ -1162,6 +1166,9 @@ async def process_ping_message(
         )
     if notify and existing is None:
         await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
+    if existing is None and ping_id:
+        saved_record = {**record, "id": ping_id}
+        asyncio.create_task(_fan_push_ping(saved_record))
     return int(ping_id) if existing is None else None
 
 
@@ -1617,9 +1624,38 @@ async def startup_maintenance() -> None:
         await record_app_event("ERROR", "app", "Startup maintenance failed", {"error": str(exc)})
 
 
+async def _fan_push_ping(ping: dict) -> None:
+    if not state.vapid_private_pem:
+        return
+    subscriptions = await get_push_subscriptions()
+    if not subscriptions:
+        return
+    payload = {
+        "title": f"Ping: {ping.get('chat', '?')}",
+        "body": (ping.get("text") or "")[:100],
+        "url": ping.get("link") or "/",
+        "tag": f"ping-{ping.get('id', '')}",
+    }
+    claims = {"sub": "mailto:push@pulse.local"}
+    for sub in subscriptions:
+        subscription_info = {
+            "endpoint": sub["endpoint"],
+            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+        }
+        await send_push(subscription_info, payload, state.vapid_private_pem, claims)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # VAPID key lifecycle for web push
+    _vapid_pem = await get_setting("vapid_private_pem", "")
+    if not _vapid_pem:
+        _vapid_keys = generate_vapid_keys()
+        await set_setting("vapid_private_pem", _vapid_keys["private_key"])
+        _vapid_pem = _vapid_keys["private_key"]
+        logger.info("Generated new VAPID key pair for web push")
+    state.vapid_private_pem = _vapid_pem
     interrupted_scans = await interrupt_stale_scan_runs()
     if interrupted_scans:
         await record_app_event(
@@ -1681,6 +1717,34 @@ async def read_index():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": now_iso()}
+
+
+@app.get("/api/push/vapid-public-key")
+async def push_vapid_public_key():
+    if not state.vapid_private_pem:
+        raise HTTPException(status_code=503, detail="Push not initialised")
+    return {"key": vapid_public_key_b64(state.vapid_private_pem)}
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(request: Request, _: str = Depends(get_current_role)):
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    keys = body.get("keys", {})
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        raise HTTPException(status_code=400, detail="endpoint, keys.p256dh and keys.auth required")
+    await save_push_subscription(endpoint, keys["p256dh"], keys["auth"])
+    return {"ok": True}
+
+
+@app.delete("/api/push/subscribe")
+async def push_unsubscribe(request: Request, _: str = Depends(get_current_role)):
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="endpoint required")
+    await delete_push_subscription(endpoint)
+    return {"ok": True}
 
 
 @app.get("/api/session")

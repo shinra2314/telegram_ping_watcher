@@ -401,6 +401,13 @@ class CoreParsingTests(unittest.TestCase):
         self.assertIn("Побед: 1", result)
         self.assertIn("Всего: 2", result)
 
+    def test_push_module_imports(self):
+        from pulse_desk.push import generate_vapid_keys
+        keys = generate_vapid_keys()
+        self.assertIn("private_key", keys)
+        self.assertIn("public_key", keys)
+        self.assertTrue(len(keys["public_key"]) > 20)
+
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

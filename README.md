@@ -96,6 +96,7 @@ PORT=8000
 - `SCAN_HISTORY_LIMIT` - сколько найденных сообщений брать на проход `канал x username`; `0` означает без лимита.
 - `EDIT_SCAN_RECENT_MESSAGES` - сколько последних постов канала перепроверять в фоновом скане, чтобы ловить правки с победителями; `0` отключает эту проверку.
 - `STARTUP_SCAN_DELAY_SECONDS` - пауза перед первым фоновым сканом после запуска.
+- `TELEGRAM_CONNECT_TIMEOUT_SECONDS`, `TELEGRAM_RETRY_DELAY_SECONDS`, `TELEGRAM_RECONNECT_BASE_SECONDS`, `TELEGRAM_RECONNECT_MAX_SECONDS`, `TELEGRAM_RECONNECT_JITTER_SECONDS` - настройки сетевого timeout/backoff для Telethon; помогают не засыпать лог при временных `WinError 121` и переподключать аккаунты с паузой.
 - `PULSE_DB_PATH`, `PULSE_SESSION_DIR`, `PULSE_LOG_DIR` - необязательные пути для базы, сессий и логов.
 
 Не отправляйте друзьям `.env`, `.session`, `.db`, `app.log` и содержимое `backups/`.

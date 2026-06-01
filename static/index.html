@@ -4,8 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Desk</title>
-  <meta name="theme-color" content="#080b10">
+  <meta name="theme-color" content="#eef0f8">
   <link rel="manifest" href="/static/manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="/static/app.css">
@@ -26,14 +28,14 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand"><span class="brand-icon"><i data-lucide="zap"></i></span>Pulse Desk</div>
-      <nav class="nav">
-        <button class="active" data-tab="dashboard"><i data-lucide="layout-dashboard"></i>Дашборд</button>
-        <button data-tab="debts"><i data-lucide="receipt-text"></i>Долги</button>
-        <button data-tab="market"><i data-lucide="line-chart"></i>Маркет</button>
-        <button data-tab="analytics"><i data-lucide="bar-chart-3"></i>Аналитика</button>
-        <button data-tab="share" class="admin-only"><i data-lucide="share-2"></i>Друзьям</button>
-        <button data-tab="accounts" class="admin-only"><i data-lucide="users"></i>Аккаунты</button>
-        <button data-tab="settings" class="admin-only"><i data-lucide="settings"></i>Настройки</button>
+      <nav class="nav" role="tablist" aria-label="Основные разделы">
+        <button class="active" data-tab="dashboard" role="tab" aria-selected="true" aria-controls="dashboard"><i data-lucide="layout-dashboard"></i>Дашборд</button>
+        <button data-tab="debts" role="tab" aria-selected="false" aria-controls="debts"><i data-lucide="receipt-text"></i>Долги</button>
+        <button data-tab="market" role="tab" aria-selected="false" aria-controls="market"><i data-lucide="line-chart"></i>Маркет</button>
+        <button data-tab="analytics" role="tab" aria-selected="false" aria-controls="analytics"><i data-lucide="bar-chart-3"></i>Аналитика</button>
+        <button data-tab="share" role="tab" aria-selected="false" aria-controls="share" class="admin-only"><i data-lucide="share-2"></i>Друзьям</button>
+        <button data-tab="accounts" role="tab" aria-selected="false" aria-controls="accounts" class="admin-only"><i data-lucide="users"></i>Аккаунты</button>
+        <button data-tab="settings" role="tab" aria-selected="false" aria-controls="settings" class="admin-only"><i data-lucide="settings"></i>Настройки</button>
       </nav>
       <div class="side-status" id="side-status">Загрузка статуса...</div>
     </aside>
@@ -41,7 +43,7 @@
     <main class="workspace">
       <header class="command-header dashboard-command">
         <div class="command-title">
-          <div class="kicker">Live monitor</div>
+          <div class="kicker">Live monitor <span id="live-status" class="live-status" data-status="offline" title="Live-обновления оффлайн" aria-live="polite"></span></div>
           <h1 id="page-title">Дашборд</h1>
           <div class="subtitle" id="page-subtitle">Мониторинг Telegram-упоминаний в реальном времени</div>
         </div>
@@ -53,6 +55,8 @@
             🔔 Уведомления
           </button>
           <button class="btn" id="refresh-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <button class="btn" id="cmdk-open" aria-label="Командная палитра" title="Командная палитра (Ctrl+K)"><i data-lucide="command"></i>Команды<kbd style="margin-left:auto">Ctrl K</kbd></button>
+          <button class="btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><i data-lucide="sun-moon"></i></button>
           <button class="btn" id="logout-btn"><i data-lucide="log-out"></i>Выйти</button>
         </div>
         <div class="command-metrics" id="command-metrics">
@@ -678,10 +682,47 @@
     </div>
   </div>
 
+  <div class="cmdk" id="cmdk" aria-hidden="true">
+    <div class="cmdk-box" role="dialog" aria-modal="true" aria-label="Командная палитра">
+      <div class="cmdk-search">
+        <i data-lucide="search"></i>
+        <input id="cmdk-input" type="text" placeholder="Перейти к разделу или выполнить действие…" autocomplete="off" spellcheck="false">
+        <kbd>Esc</kbd>
+      </div>
+      <div class="cmdk-list" id="cmdk-list" role="listbox"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="shortcuts-modal">
+    <div class="modal-card" style="width:min(560px,100%)">
+      <div class="modal-head">
+        <div>
+          <div class="kicker">Keyboard</div>
+          <h2>Горячие клавиши</h2>
+        </div>
+        <button class="btn" id="shortcuts-close"><i data-lucide="x"></i></button>
+      </div>
+      <div class="shortcuts-grid" style="margin-top:14px">
+        <div class="shortcut-row"><span>Командная палитра</span><span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>K</kbd></span></div>
+        <div class="shortcut-row"><span>Поиск по ленте</span><span class="shortcut-keys"><kbd>/</kbd></span></div>
+        <div class="shortcut-row"><span>Обновить данные</span><span class="shortcut-keys"><kbd>R</kbd></span></div>
+        <div class="shortcut-row"><span>Сменить тему</span><span class="shortcut-keys"><kbd>T</kbd></span></div>
+        <div class="shortcut-row"><span>Дашборд</span><span class="shortcut-keys"><kbd>G</kbd><kbd>D</kbd></span></div>
+        <div class="shortcut-row"><span>Долги</span><span class="shortcut-keys"><kbd>G</kbd><kbd>B</kbd></span></div>
+        <div class="shortcut-row"><span>Маркет</span><span class="shortcut-keys"><kbd>G</kbd><kbd>M</kbd></span></div>
+        <div class="shortcut-row"><span>Аналитика</span><span class="shortcut-keys"><kbd>G</kbd><kbd>A</kbd></span></div>
+        <div class="shortcut-row"><span>Настройки</span><span class="shortcut-keys"><kbd>G</kbd><kbd>S</kbd></span></div>
+        <div class="shortcut-row"><span>Эта подсказка</span><span class="shortcut-keys"><kbd>?</kbd></span></div>
+        <div class="shortcut-row"><span>Закрыть оверлеи</span><span class="shortcut-keys"><kbd>Esc</kbd></span></div>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/js/core.js"></script>
   <script src="/static/js/giveaways.js"></script>
   <script src="/static/js/diagnostics.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/js/command-palette.js"></script>
   <script src="/static/js/pwa.js"></script>
 </body>
 </html>

@@ -1313,6 +1313,11 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
 
 
 async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -> dict[str, int]:
+    enabled = 0
+    disabled = 0
+    final_statuses = {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"}
+    enable_updates: list[tuple[Any, ...]] = []
+    disable_updates: list[tuple[Any, ...]] = []
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
@@ -1325,31 +1330,17 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
             (limit,),
         )).fetchall()
 
-    enabled = 0
-    disabled = 0
-    final_statuses = {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"}
-    for row in rows:
-        should_be_win = is_win_text(row["text"] or "", win_keywords)
-        current = bool(row["is_win"])
-        if should_be_win == current:
-            continue
-        current_action = row["action_status"] or "new"
-        current_giveaway_status = row["giveaway_status"] or ""
-        is_final = current_action in {"claimed", "missed", "scam", "closed"} or current_giveaway_status in final_statuses
-        async with _connect() as db:
+        for row in rows:
+            should_be_win = is_win_text(row["text"] or "", win_keywords)
+            current = bool(row["is_win"])
+            if should_be_win == current:
+                continue
+            current_action = row["action_status"] or "new"
+            current_giveaway_status = row["giveaway_status"] or ""
+            is_final = current_action in {"claimed", "missed", "scam", "closed"} or current_giveaway_status in final_statuses
             if should_be_win:
                 next_action = "claim_prize" if not is_final and current_action in {"", "new", "to_check", "waiting_result"} else current_action
-                await db.execute(
-                    """
-                    UPDATE pings
-                    SET is_win = 1,
-                        action_status = ?,
-                        priority_score = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 90 ELSE priority_score END,
-                        priority_label = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 'critical' ELSE priority_label END
-                    WHERE id = ?
-                    """,
-                    (next_action, int(row["id"])),
-                )
+                enable_updates.append((next_action, int(row["id"])))
                 enabled += 1
             else:
                 if is_final:
@@ -1358,30 +1349,51 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
                     next_action = "waiting_result" if current_action in {"claim_prize", "to_check", "new", ""} else current_action
                 else:
                     next_action = "to_check" if int(row["priority_score"] or 0) >= 60 else "new"
-                await db.execute(
-                    """
-                    UPDATE pings
-                    SET is_win = 0,
-                        action_status = ?,
-                        priority_score = CASE
-                            WHEN is_giveaway = 1 THEN MIN(COALESCE(priority_score, 0), 65)
-                            ELSE MIN(COALESCE(priority_score, 0), 55)
-                        END,
-                        priority_label = CASE
-                            WHEN is_giveaway = 1 THEN 'high'
-                            ELSE 'medium'
-                        END
-                    WHERE id = ?
-                    """,
-                    (next_action, int(row["id"])),
-                )
+                disable_updates.append((next_action, int(row["id"])))
                 disabled += 1
-            await db.commit()
+
+        if enable_updates:
+            await db.executemany(
+                """
+                UPDATE pings
+                SET is_win = 1,
+                    action_status = ?,
+                    priority_score = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 90 ELSE priority_score END,
+                    priority_label = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 'critical' ELSE priority_label END
+                WHERE id = ?
+                """,
+                enable_updates,
+            )
+        if disable_updates:
+            await db.executemany(
+                """
+                UPDATE pings
+                SET is_win = 0,
+                    action_status = ?,
+                    priority_score = CASE
+                        WHEN is_giveaway = 1 THEN MIN(COALESCE(priority_score, 0), 65)
+                        ELSE MIN(COALESCE(priority_score, 0), 55)
+                    END,
+                    priority_label = CASE
+                        WHEN is_giveaway = 1 THEN 'high'
+                        ELSE 'medium'
+                    END
+                WHERE id = ?
+                """,
+                disable_updates,
+            )
+        await db.commit()
     return {"enabled": enabled, "disabled": disabled}
 
 
 async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) -> dict[str, int]:
     """Align stored rows with the channel+keyword giveaway rule used for new scans."""
+    enabled = 0
+    disabled = 0
+    enable_updates: list[tuple[Any, ...]] = []
+    disable_keep_deadline: list[tuple[Any, ...]] = []
+    disable_clear_deadline: list[tuple[Any, ...]] = []
+    delete_reminders_for: list[tuple[int]] = []
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
@@ -1394,73 +1406,80 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
             (limit,),
         )).fetchall()
 
-    enabled = 0
-    disabled = 0
-    for row in rows:
-        should_be_giveaway = _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
-        is_giveaway = bool(row["is_giveaway"])
-        if should_be_giveaway == is_giveaway:
-            continue
-        ping_id = int(row["id"])
-        current_action = row["action_status"] or "new"
-        if should_be_giveaway:
-            next_action = "waiting_result" if current_action in {"", "new"} else current_action
-            async with _connect() as db:
-                await db.execute(
-                    """
-                    UPDATE pings
-                    SET is_giveaway = 1,
-                        giveaway_status = CASE
-                            WHEN COALESCE(giveaway_status, '') = '' THEN 'pending'
-                            ELSE giveaway_status
-                        END,
-                        action_status = ?
-                    WHERE id = ?
-                    """,
-                    (next_action, ping_id),
-                )
-                await db.commit()
-            enabled += 1
-            continue
+        for row in rows:
+            should_be_giveaway = _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
+            is_giveaway = bool(row["is_giveaway"])
+            if should_be_giveaway == is_giveaway:
+                continue
+            ping_id = int(row["id"])
+            current_action = row["action_status"] or "new"
+            if should_be_giveaway:
+                next_action = "waiting_result" if current_action in {"", "new"} else current_action
+                enable_updates.append((next_action, ping_id))
+                enabled += 1
+                continue
 
-        if row["is_win"]:
-            next_action = "claim_prize" if current_action in {"", "new", "waiting_result"} else current_action
-        elif current_action in {"", "new", "waiting_result"}:
-            next_action = "to_check" if int(row["priority_score"] or 0) >= 60 else "new"
-        else:
-            next_action = current_action
-        keep_manual_deadline = (row["deadline_source"] or "") == "manual"
-        async with _connect() as db:
-            if keep_manual_deadline:
-                await db.execute(
-                    """
-                    UPDATE pings
-                    SET is_giveaway = 0,
-                        giveaway_status = '',
-                        action_status = ?
-                    WHERE id = ?
-                    """,
-                    (next_action, ping_id),
-                )
+            if row["is_win"]:
+                next_action = "claim_prize" if current_action in {"", "new", "waiting_result"} else current_action
+            elif current_action in {"", "new", "waiting_result"}:
+                next_action = "to_check" if int(row["priority_score"] or 0) >= 60 else "new"
             else:
-                await db.execute(
-                    """
-                    UPDATE pings
-                    SET is_giveaway = 0,
-                        giveaway_status = '',
-                        action_status = ?,
-                        deadline_at = NULL,
-                        deadline_source = '',
-                        deadline_text = '',
-                        reminder_at = NULL,
-                        reminder_sent_at = NULL
-                    WHERE id = ?
-                    """,
-                    (next_action, ping_id),
-                )
-                await db.execute("DELETE FROM reminders WHERE ping_id = ? AND sent_at IS NULL", (ping_id,))
-            await db.commit()
-        disabled += 1
+                next_action = current_action
+            keep_manual_deadline = (row["deadline_source"] or "") == "manual"
+            if keep_manual_deadline:
+                disable_keep_deadline.append((next_action, ping_id))
+            else:
+                disable_clear_deadline.append((next_action, ping_id))
+                delete_reminders_for.append((ping_id,))
+            disabled += 1
+
+        if enable_updates:
+            await db.executemany(
+                """
+                UPDATE pings
+                SET is_giveaway = 1,
+                    giveaway_status = CASE
+                        WHEN COALESCE(giveaway_status, '') = '' THEN 'pending'
+                        ELSE giveaway_status
+                    END,
+                    action_status = ?
+                WHERE id = ?
+                """,
+                enable_updates,
+            )
+        if disable_keep_deadline:
+            await db.executemany(
+                """
+                UPDATE pings
+                SET is_giveaway = 0,
+                    giveaway_status = '',
+                    action_status = ?
+                WHERE id = ?
+                """,
+                disable_keep_deadline,
+            )
+        if disable_clear_deadline:
+            await db.executemany(
+                """
+                UPDATE pings
+                SET is_giveaway = 0,
+                    giveaway_status = '',
+                    action_status = ?,
+                    deadline_at = NULL,
+                    deadline_source = '',
+                    deadline_text = '',
+                    reminder_at = NULL,
+                    reminder_sent_at = NULL
+                WHERE id = ?
+                """,
+                disable_clear_deadline,
+            )
+        if delete_reminders_for:
+            await db.executemany(
+                "DELETE FROM reminders WHERE ping_id = ? AND sent_at IS NULL",
+                delete_reminders_for,
+            )
+        await db.commit()
     return {"enabled": enabled, "disabled": disabled}
 
 
@@ -2619,9 +2638,79 @@ async def get_detailed_stats() -> dict[str, Any]:
         return {"top_chats": top_chats, "top_senders": top_senders, "monthly": monthly}
 
 
-async def cleanup_old_data(days: int = 7) -> None:
+async def search_pings_fts(
+    query: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    snippet_chars: int = 30,
+) -> list[dict[str, Any]]:
+    """Full-text search across pings using FTS5 with bm25 ranking.
+
+    Returns rows with a `snippet` field highlighting matches via <mark>.
+    Falls back to empty list if the query has no tokens.
+    """
+    fts_query = _fts_query(query)
+    if not fts_query:
+        return []
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
     async with _connect() as db:
-        await db.execute("DELETE FROM market_history WHERE fetched_at_iso < datetime('now', '-' || ? || ' days')", (days,))
+        db.row_factory = aiosqlite.Row
+        sql = """
+            SELECT pings.*,
+                   bm25(pings_fts) AS _rank,
+                   snippet(pings_fts, 3, '<mark>', '</mark>', '…', ?) AS snippet
+            FROM pings_fts
+            JOIN pings ON pings.id = pings_fts.rowid
+            WHERE pings_fts MATCH ?
+            ORDER BY _rank
+            LIMIT ? OFFSET ?
+        """
+        async with db.execute(sql, (snippet_chars, fts_query, limit, offset)) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def cleanup_old_data(
+    days: int = 7,
+    *,
+    pings_retention_days: int = 0,
+    vacuum: bool = False,
+) -> dict[str, int]:
+    """Remove old market history, app events, and (optionally) old pings.
+
+    Returns a small stats dict with deletion counts.
+    """
+    stats = {"market_history": 0, "app_events": 0, "pings": 0, "vacuumed": 0}
+    async with _connect() as db:
+        cur = await db.execute(
+            "DELETE FROM market_history WHERE fetched_at_iso < datetime('now', '-' || ? || ' days')",
+            (days,),
+        )
+        stats["market_history"] = cur.rowcount or 0
         events_cutoff = (datetime.now() - timedelta(days=max(days, 7))).replace(microsecond=0).isoformat()
-        await db.execute("DELETE FROM app_events WHERE created_at < ?", (events_cutoff,))
+        cur = await db.execute("DELETE FROM app_events WHERE created_at < ?", (events_cutoff,))
+        stats["app_events"] = cur.rowcount or 0
+        if pings_retention_days and pings_retention_days > 0:
+            cutoff = (datetime.now() - timedelta(days=pings_retention_days)).replace(microsecond=0).isoformat()
+            # Delete in batches to keep WAL small
+            total = 0
+            while True:
+                cur = await db.execute(
+                    "DELETE FROM pings WHERE id IN (SELECT id FROM pings WHERE detected_at < ? LIMIT 1000)",
+                    (cutoff,),
+                )
+                deleted = cur.rowcount or 0
+                total += deleted
+                if deleted < 1000:
+                    break
+            stats["pings"] = total
         await db.commit()
+        if vacuum:
+            try:
+                await db.execute("VACUUM")
+                stats["vacuumed"] = 1
+            except Exception:
+                pass
+    return stats

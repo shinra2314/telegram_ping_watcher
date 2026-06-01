@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-load_dotenv(BASE_DIR / ".env", override=True, encoding="utf-8-sig")
+load_dotenv(BASE_DIR / ".env", override=False, encoding="utf-8-sig")
 
 
 def _bool_from_env_default(value: str, default: bool = False) -> bool:
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     telegram_api_hash: str = Field(default="", alias="TELEGRAM_API_HASH")
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     admin_id: Optional[int] = Field(default=None, alias="ADMIN_ID")
+    bot_admin_chats: str = Field(default="", alias="BOT_ADMIN_CHATS")
 
     telegram_sessions: str = Field(default="", alias="TELEGRAM_SESSIONS")
     telegram_session_dir: Optional[Path] = Field(default=None, alias="PULSE_SESSION_DIR")
@@ -69,9 +70,17 @@ class Settings(BaseSettings):
     edit_scan_recent_messages: int = Field(default=20, alias="EDIT_SCAN_RECENT_MESSAGES")
     startup_scan_delay_seconds: int = Field(default=8, alias="STARTUP_SCAN_DELAY_SECONDS")
     startup_scan_wait_seconds: int = Field(default=30, alias="STARTUP_SCAN_WAIT_SECONDS")
+    telegram_connect_timeout_seconds: int = Field(default=30, alias="TELEGRAM_CONNECT_TIMEOUT_SECONDS")
+    telegram_retry_delay_seconds: int = Field(default=8, alias="TELEGRAM_RETRY_DELAY_SECONDS")
+    telegram_reconnect_base_seconds: int = Field(default=20, alias="TELEGRAM_RECONNECT_BASE_SECONDS")
+    telegram_reconnect_max_seconds: int = Field(default=300, alias="TELEGRAM_RECONNECT_MAX_SECONDS")
+    telegram_reconnect_jitter_seconds: int = Field(default=15, alias="TELEGRAM_RECONNECT_JITTER_SECONDS")
     market_poll_seconds: int = Field(default=300, alias="MARKET_POLL_SECONDS")
     market_alert_change_pct: float = Field(default=5.0, alias="MARKET_ALERT_CHANGE_PCT")
     market_retention_days: int = Field(default=7, alias="MARKET_RETENTION_DAYS")
+    pings_retention_days: int = Field(default=90, alias="PINGS_RETENTION_DAYS")
+    vacuum_interval_hours: int = Field(default=168, alias="VACUUM_INTERVAL_HOURS")
+    flood_wait_max_seconds: int = Field(default=1800, alias="FLOOD_WAIT_MAX_SECONDS")
     backup_retention: int = Field(default=10, alias="BACKUP_RETENTION")
     pending_auth_ttl_seconds: int = Field(default=600, alias="PENDING_AUTH_TTL_SECONDS")
 

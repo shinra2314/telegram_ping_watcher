@@ -92,6 +92,7 @@ from database import (
     save_push_subscription,
     delete_push_subscription,
     get_push_subscriptions,
+    search_pings_fts,
     seed_giveaway_candidates_from_pings,
     set_setting,
     start_scan_run,
@@ -135,7 +136,8 @@ from pulse_desk.dashboard import build_dashboard_summary
 from pulse_desk.digest import format_digest
 from pulse_desk.deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from pulse_desk.giveaways import analyze_giveaway, giveaway_outcome_resolution, inactive_channel_candidate, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
-from pulse_desk.jobs import runtime_health, start_tracked_task
+from pulse_desk.jobs import runtime_health, start_supervised_task, start_tracked_task
+from pulse_desk.live import publish_live_event, register_dashboard_invalidator
 from pulse_desk.push import generate_vapid_keys, send_push, vapid_public_key_b64
 from pulse_desk.scan import channel_sweep_start_id, normalize_recent_edit_scan_limit, normalize_scan_history_limit
 from pulse_desk.security import is_weak_token, mask_secret
@@ -160,9 +162,12 @@ from pulse_desk.app_ctx import (
     GIVEAWAY_INACTIVE_CHANNEL_DAYS,
     GIVEAWAY_MIN_ACTION_DELAY_SECONDS,
     GIVEAWAY_REVIEW_MODE,
+    FLOOD_WAIT_MAX_SECONDS,
     MARKET_ALERT_CHANGE_PCT,
     MARKET_POLL_SECONDS,
     MARKET_RETENTION_DAYS,
+    PINGS_RETENTION_DAYS,
+    VACUUM_INTERVAL_HOURS,
     PENDING_AUTH_TTL_SECONDS,
     PUBLIC_SHARE_MODE,
     SCAN_ACCOUNT_CONCURRENCY,
@@ -219,17 +224,22 @@ def load_usernames() -> list[str]:
     return normalize_usernames([*configured, *extra])
 
 
-SESSION_NAMES = get_sessions_manually()
-ping_usernames = load_usernames()
-ping_regex = build_ping_regex(ping_usernames)
+state.session_names = get_sessions_manually()
+SESSION_NAMES = state.session_names
+state.ping_usernames = load_usernames()
+ping_usernames = state.ping_usernames
+state.ping_regex = build_ping_regex(ping_usernames)
+ping_regex = state.ping_regex
 
 WIN_KEYWORDS = [item.strip() for item in settings.win_keywords.split(",") if item.strip()]
 GIVEAWAY_KEYWORDS = [item.strip() for item in settings.giveaway_keywords.split(",") if item.strip()]
 HIGH_PRIORITY_KEYWORDS = ["срочно", "важно", "winner", "победитель", "итоги", "приз", "claim", "airdrop", "ton"]
 IGNORE_KEYWORDS: list[str] = []
 JOIN_BUTTON_KEYWORDS = [item.strip() for item in settings.join_button_keywords.split(",") if item.strip()]
-notification_seen: dict[str, datetime] = {}
-last_giveaway_action_at: Optional[datetime] = None
+state.win_keywords = WIN_KEYWORDS
+state.giveaway_keywords = GIVEAWAY_KEYWORDS
+state.join_button_keywords = JOIN_BUTTON_KEYWORDS
+notification_seen = state.notification_seen
 
 
 CHANNEL_PROFILE_TTL_SECONDS = 6 * 60 * 60
@@ -241,6 +251,46 @@ def now_iso() -> str:
 
 def start_background_task(name: str, coro) -> asyncio.Task:
     return start_tracked_task(state, logger, name, coro)
+
+
+def start_supervised(name: str, coro_factory, *, backoff_base: float = 5.0, backoff_max: float = 300.0) -> asyncio.Task:
+    return start_supervised_task(
+        state, logger, name, coro_factory, backoff_base=backoff_base, backoff_max=backoff_max
+    )
+
+
+def flood_wait_seconds(raw_seconds: int) -> int:
+    """Bound a FloodWait duration so we still respect Telegram's limit but cap absurd values."""
+    try:
+        value = int(raw_seconds)
+    except (TypeError, ValueError):
+        return FLOOD_WAIT_MAX_SECONDS
+    if value <= 0:
+        return 1
+    return min(value, FLOOD_WAIT_MAX_SECONDS)
+
+
+def mark_account_cooldown(session_name: str, seconds: int) -> None:
+    if not session_name or seconds <= 0:
+        return
+    until = datetime.now() + timedelta(seconds=seconds)
+    state.account_cooldown_until[session_name] = until
+    account = accounts_state.get(session_name)
+    if account is not None:
+        account["cooldown_until"] = until.isoformat(timespec="seconds")
+
+
+def account_in_cooldown(session_name: str) -> bool:
+    until = state.account_cooldown_until.get(session_name)
+    if not until:
+        return False
+    if datetime.now() >= until:
+        state.account_cooldown_until.pop(session_name, None)
+        account = accounts_state.get(session_name)
+        if account is not None:
+            account.pop("cooldown_until", None)
+        return False
+    return True
 
 
 def telegram_client_for_session(session_name: str) -> TelegramClient:
@@ -438,11 +488,8 @@ def record_reference_datetime(record: dict[str, Any]) -> datetime:
     return datetime.now()
 
 
-async def publish_live_event(event_type: str, payload: dict[str, Any]) -> None:
-    try:
-        await enqueue_outbox_event(event_type, payload)
-    except Exception:
-        logger.debug("Could not enqueue live event", exc_info=True)
+# publish_live_event now lives in pulse_desk.live (imported above).
+# The dashboard cache invalidation hook is registered after the cache is defined.
 
 
 async def refresh_channel_profile(
@@ -906,7 +953,6 @@ async def load_giveaway_message(client: TelegramClient, ping: dict[str, Any]):
 
 
 async def confirm_safe_giveaway_join(ping_id: int, actor: str = "admin") -> dict[str, Any]:
-    global last_giveaway_action_at
     candidate = await get_giveaway_candidate(ping_id)
     if not candidate:
         raise HTTPException(404, "Giveaway candidate not found")
@@ -934,8 +980,8 @@ async def confirm_safe_giveaway_join(ping_id: int, actor: str = "admin") -> dict
             await publish_live_event("giveaway-candidate", {"ping_id": ping_id, "status": "dry_run"})
             return {"status": "dry_run", "message": dry_run_message}
         now = datetime.now()
-        if last_giveaway_action_at:
-            elapsed = (now - last_giveaway_action_at).total_seconds()
+        if state.last_giveaway_action_at:
+            elapsed = (now - state.last_giveaway_action_at).total_seconds()
             remaining = GIVEAWAY_MIN_ACTION_DELAY_SECONDS - elapsed
             if remaining > 0:
                 message = f"Safe delay is active; retry in {int(remaining) + 1}s"
@@ -944,7 +990,7 @@ async def confirm_safe_giveaway_join(ping_id: int, actor: str = "admin") -> dict
         await update_giveaway_candidate_status(ping_id, "confirmed")
         await record_giveaway_action(ping_id, "confirm", "confirmed", actor, f"Clicked button: {button_text}", {"account": GIVEAWAY_ACTION_ACCOUNT})
         await message.click(row_index, button_index)
-        last_giveaway_action_at = datetime.now()
+        state.last_giveaway_action_at = datetime.now()
         await update_giveaway_candidate_status(ping_id, "joined")
         await update_ping_meta(ping_id, giveaway_status="pending", action_status="waiting_result")
         await record_giveaway_action(ping_id, "join_button", "joined", actor, f"Clicked button: {button_text}", {"account": GIVEAWAY_ACTION_ACCOUNT})
@@ -986,7 +1032,7 @@ async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Bu
             await bot_client.send_message(ADMIN_ID, message, buttons=buttons, link_preview=False)
             return True
         except FloodWaitError as exc:
-            wait = min(int(exc.seconds), 300)
+            wait = flood_wait_seconds(exc.seconds)
             await record_app_event("WARNING", "notifications", "Telegram bot flood wait", {"seconds": exc.seconds})
             await asyncio.sleep(wait)
         except Exception as exc:
@@ -1339,12 +1385,88 @@ async def init_bot() -> None:
                 f"Избранных: `{analytics['favorites']}`"
             )
 
+        def _bot_admin_chat_ids() -> set[int]:
+            ids: set[int] = set()
+            if ADMIN_ID:
+                ids.add(int(ADMIN_ID))
+            raw = (settings.bot_admin_chats or "").strip()
+            if raw:
+                for chunk in raw.split(","):
+                    chunk = chunk.strip()
+                    if chunk:
+                        try:
+                            ids.add(int(chunk))
+                        except ValueError:
+                            pass
+            return ids
+
+        def _is_bot_admin(sender_id: int) -> bool:
+            allowed = _bot_admin_chat_ids()
+            if not allowed:
+                return True  # No restrictions configured — open
+            return sender_id in allowed
+
         @bot_client.on(events.NewMessage(pattern="/status"))
         async def status_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if not _is_bot_admin(event.sender_id):
                 return
-            account_lines = [f"{a['session_name']}: {a.get('status', 'unknown')}" for a in accounts_state.values()]
-            await event.respond("**Статус Pulse**\n\n" + "\n".join(account_lines or ["Нет аккаунтов"]))
+            accounts_online = sum(1 for acc in list(accounts_state.values()) if acc.get("status") == "online")
+            account_lines = [f"`{a.get('session_name', '?')}`: {a.get('status', 'unknown')}" for a in list(accounts_state.values())]
+            try:
+                db_size_mb = DB_PATH.stat().st_size / 1024 / 1024 if DB_PATH.exists() else 0
+            except Exception:
+                db_size_mb = 0
+            uptime_sec = int((datetime.now() - state.started_at).total_seconds())
+            uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
+            running_jobs = sorted(name for name, task in state.background_tasks.items() if not task.done())
+            last_scan = state.last_scan_finished_at.isoformat(timespec="seconds") if state.last_scan_finished_at else "—"
+            await event.respond(
+                f"**Статус Pulse Desk v{APP_VERSION}**\n\n"
+                f"⏱ Uptime: `{uptime_str}`\n"
+                f"💾 БД: `{db_size_mb:.1f} MB`\n"
+                f"🛰 Аккаунты: `{accounts_online}/{len(accounts_state)}` online\n"
+                f"🔄 Последний скан: `{last_scan}` ({state.last_scan_status or '—'})\n"
+                f"⚙️ Jobs ({len(running_jobs)}): `{', '.join(running_jobs) or '—'}`\n\n"
+                + "\n".join(account_lines or ["Нет аккаунтов"])
+            )
+
+        @bot_client.on(events.NewMessage(pattern="/giveaways"))
+        async def giveaways_handler(event):
+            if not _is_bot_admin(event.sender_id):
+                return
+            board = await get_giveaway_board(limit=10)
+            buckets = board.get("buckets") or {}
+            stats = board.get("stats") or {}
+            lines = ["**Активные розыгрыши:**", ""]
+            lines.append(f"⏳ Ожидание: `{stats.get('waiting', 0)}` · 🎁 Призы: `{stats.get('to_claim', 0)}` · ❗ Срочные: `{stats.get('urgent', 0)}`")
+            urgent = buckets.get("urgent") or []
+            for row in urgent[:5]:
+                deadline = row.get("deadline_at") or "—"
+                chat = row.get("chat") or "?"
+                lines.append(f"⚠️ `{deadline}` · {chat}\n{(row.get('text') or '')[:120]}")
+            if not urgent:
+                lines.append("\nСрочных розыгрышей нет.")
+            await event.respond("\n".join(lines), link_preview=False)
+
+        @bot_client.on(events.NewMessage(pattern="/recent"))
+        async def recent_handler(event):
+            if not _is_bot_admin(event.sender_id):
+                return
+            parts = (event.message.text or "").split(" ", 1)
+            try:
+                n = max(1, min(20, int(parts[1]))) if len(parts) > 1 else 5
+            except (ValueError, IndexError):
+                n = 5
+            rows = await get_pings(limit=n)
+            if not rows:
+                await event.respond("Упоминаний пока нет.")
+                return
+            result = [f"**Последние {len(rows)}:**"]
+            for row in rows:
+                priority = row.get("priority_label") or ""
+                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "·"
+                result.append(f"{badge} `{row['detected_at']}` | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
+            await event.respond("\n\n".join(result), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/search"))
         async def search_handler(event):
@@ -1554,20 +1676,33 @@ async def source_score_loop() -> None:
 
 
 async def auto_scan_loop() -> None:
-    start_background_task("market-volatility", monitor_market_volatility())
+    start_supervised("market-volatility", monitor_market_volatility, backoff_base=60.0, backoff_max=1800.0)
     if STARTUP_SCAN_DELAY_SECONDS:
         await asyncio.sleep(STARTUP_SCAN_DELAY_SECONDS)
     waited = 0.0
     while not clients and waited < STARTUP_SCAN_WAIT_SECONDS:
         await asyncio.sleep(1)
         waited += 1
+    last_vacuum = datetime.now()
     while True:
         try:
             if clients:
                 await full_history_scan()
-            await cleanup_old_data(days=MARKET_RETENTION_DAYS)
+                state.last_scan_finished_at = datetime.now()
+                state.last_scan_status = "ok"
+            vacuum_due = (datetime.now() - last_vacuum).total_seconds() >= VACUUM_INTERVAL_HOURS * 3600
+            stats = await cleanup_old_data(
+                days=MARKET_RETENTION_DAYS,
+                pings_retention_days=PINGS_RETENTION_DAYS,
+                vacuum=vacuum_due,
+            )
+            if vacuum_due:
+                last_vacuum = datetime.now()
+            if stats.get("pings") or stats.get("market_history") or stats.get("vacuumed"):
+                await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
         except Exception:
             logger.exception("Automatic scan loop failed")
+            state.last_scan_status = "error"
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 
@@ -1646,15 +1781,15 @@ async def lifespan(app: FastAPI):
         logger.warning("VIEWER_TOKEN looks weak: %s", mask_secret(VIEWER_TOKEN))
         await record_app_event("WARNING", "auth", "VIEWER_TOKEN looks weak", {"token": mask_secret(VIEWER_TOKEN)})
     await init_bot()
-    start_background_task("market-fetch", fetch_market_data())
-    start_background_task("reminders", reminder_loop())
-    start_background_task("source-scores", source_score_loop())
+    start_supervised("market-fetch", fetch_market_data, backoff_base=30.0, backoff_max=1800.0)
+    start_supervised("reminders", reminder_loop, backoff_base=10.0, backoff_max=600.0)
+    start_supervised("source-scores", source_score_loop, backoff_base=30.0, backoff_max=600.0)
     start_background_task("startup-maintenance", startup_maintenance())
     logger.info("Starting monitoring: %s sessions found", len(SESSION_NAMES))
     await record_app_event("INFO", "app", "Application started", {"sessions": len(SESSION_NAMES), "version": APP_VERSION})
     for name in SESSION_NAMES:
         start_background_task(f"telegram-start:{name}", start_client(name))
-    start_background_task("auto-scan", auto_scan_loop())
+    start_supervised("auto-scan", auto_scan_loop, backoff_base=30.0, backoff_max=900.0)
     yield
     state.shutting_down = True
     for task in list(state.background_tasks.values()):
@@ -1675,6 +1810,22 @@ app = FastAPI(title="Pulse Desk Multi-Account", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+from routers import backups as backups_router  # noqa: E402
+from routers import boards as boards_router  # noqa: E402
+from routers import export as export_router  # noqa: E402
+from routers import lookups as lookups_router  # noqa: E402
+from routers import market as market_router  # noqa: E402
+from routers import pings as pings_router  # noqa: E402
+from routers import push as push_router  # noqa: E402
+
+app.include_router(backups_router.router)
+app.include_router(boards_router.router)
+app.include_router(export_router.router)
+app.include_router(lookups_router.router)
+app.include_router(market_router.router)
+app.include_router(pings_router.router)
+app.include_router(push_router.router)
+
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -1688,35 +1839,35 @@ async def read_index():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "time": now_iso()}
-
-
-@app.get("/api/push/vapid-public-key")
-async def push_vapid_public_key():
-    if not state.vapid_private_pem:
-        raise HTTPException(status_code=503, detail="Push not initialised")
-    return {"key": vapid_public_key_b64(state.vapid_private_pem)}
-
-
-@app.post("/api/push/subscribe")
-async def push_subscribe(request: Request, _: str = Depends(get_current_role)):
-    body = await request.json()
-    endpoint = body.get("endpoint")
-    keys = body.get("keys", {})
-    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
-        raise HTTPException(status_code=400, detail="endpoint, keys.p256dh and keys.auth required")
-    await save_push_subscription(endpoint, keys["p256dh"], keys["auth"])
-    return {"ok": True}
-
-
-@app.delete("/api/push/subscribe")
-async def push_unsubscribe(request: Request, _: str = Depends(get_current_role)):
-    body = await request.json()
-    endpoint = body.get("endpoint")
-    if not endpoint:
-        raise HTTPException(status_code=400, detail="endpoint required")
-    await delete_push_subscription(endpoint)
-    return {"ok": True}
+    accounts_configured = len(SESSION_NAMES) or len(accounts_state)
+    accounts_online = sum(
+        1 for acc in list(accounts_state.values()) if acc.get("status") == "online"
+    )
+    info = runtime_health(
+        state,
+        accounts_online=accounts_online,
+        accounts_configured=accounts_configured,
+    )
+    try:
+        db_size_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    except Exception:
+        db_size_bytes = 0
+    info.update(
+        {
+            "status": "ok" if not info.get("missing_background_tasks") and info.get("accounts_ok") else "degraded",
+            "time": now_iso(),
+            "version": APP_VERSION,
+            "db_size_bytes": db_size_bytes,
+            "last_scan_finished_at": state.last_scan_finished_at.isoformat(timespec="seconds")
+            if state.last_scan_finished_at
+            else None,
+            "last_scan_status": state.last_scan_status,
+            "scan_running": bool(scan_status.get("running")),
+            "shutting_down": state.shutting_down,
+            "live_subscribers": state.live_hub.subscriber_count(),
+        }
+    )
+    return info
 
 
 @app.get("/api/session")
@@ -1972,63 +2123,9 @@ async def sign_in(data: SignInRequest, background_tasks: BackgroundTasks):
         return {"status": "error", "message": str(exc)}
 
 
-@app.get("/api/pings")
-async def read_pings(
-    role: str = Depends(get_current_role),
-    limit: int = Query(0, ge=0),
-    offset: int = Query(0, ge=0),
-    chat_type: str = "all",
-    sort: str = "DESC",
-    sort_by: str = "detected_at",
-    grouped: bool = False,
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    favorite: Optional[bool] = None,
-    mention: Optional[str] = None,
-    search: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    priority_min: Optional[int] = Query(default=None, ge=0, le=100),
-    action_status: Optional[str] = None,
-    deadline_from: Optional[str] = None,
-    deadline_to: Optional[str] = None,
-    has_deadline: Optional[bool] = None,
-    source_score_min: Optional[float] = None,
-    tag: Optional[str] = Query(None),
-):
-    if grouped:
-        return await get_pings_grouped(limit=limit, chat_type=chat_type, search=search, mention=mention)
-    return await get_pings(
-        limit=limit,
-        chat_type=chat_type,
-        sort_order=sort,
-        offset=offset,
-        sort_by=sort_by,
-        status=status_filter,
-        favorite=favorite,
-        mention=mention,
-        search=search,
-        date_from=date_from,
-        date_to=date_to,
-        priority_min=priority_min,
-        action_status=action_status,
-        deadline_from=deadline_from,
-        deadline_to=deadline_to,
-        has_deadline=has_deadline,
-        source_score_min=source_score_min,
-        tag=tag,
-    )
-
-
-@app.post("/api/search/rebuild", dependencies=[Depends(require_admin)])
-async def rebuild_search_api():
-    result = await rebuild_search_indexes()
-    await record_app_event("INFO", "search", "Search indexes rebuilt manually", result)
-    return {"status": "ok", **result}
-
-
 def channel_account_stats() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for session_name, account in sorted(accounts_state.items()):
+    for session_name, account in sorted(list(accounts_state.items())):
         rows.append({
             "session_name": session_name,
             "display": account.get("display") or account.get("username") or session_name,
@@ -2114,20 +2211,46 @@ async def get_analytics(role: str = Depends(get_current_role)):
     return await build_analytics()
 
 
+_dashboard_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_dashboard_cache_ttl_seconds: float = 5.0
+_dashboard_cache_lock = asyncio.Lock()
+
+
+def invalidate_dashboard_cache() -> None:
+    _dashboard_cache.clear()
+
+
+# Now that the cache is defined, wire the live-event hook to clear it.
+register_dashboard_invalidator(invalidate_dashboard_cache)
+
+
 @app.get("/api/dashboard/summary")
 async def get_dashboard_summary(role: str = Depends(get_current_role)):
-    status_payload = await status(role)
-    analytics = await build_analytics()
-    tasks = await get_task_overview(limit=120)
-    giveaway_board = await get_giveaway_board(limit=120)
-    problem_events = await get_recent_problem_events(limit=5) if role == "admin" else []
-    return build_dashboard_summary(
-        status=status_payload,
-        analytics=analytics,
-        tasks=tasks,
-        giveaway_board=giveaway_board,
-        problem_events=problem_events,
-    )
+    import time
+
+    cache_key = role
+    now = time.monotonic()
+    cached = _dashboard_cache.get(cache_key)
+    if cached and now - cached[0] < _dashboard_cache_ttl_seconds:
+        return cached[1]
+    async with _dashboard_cache_lock:
+        cached = _dashboard_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < _dashboard_cache_ttl_seconds:
+            return cached[1]
+        status_payload = await status(role)
+        analytics = await build_analytics()
+        tasks = await get_task_overview(limit=120)
+        giveaway_board = await get_giveaway_board(limit=120)
+        problem_events = await get_recent_problem_events(limit=5) if role == "admin" else []
+        result = build_dashboard_summary(
+            status=status_payload,
+            analytics=analytics,
+            tasks=tasks,
+            giveaway_board=giveaway_board,
+            problem_events=problem_events,
+        )
+        _dashboard_cache[cache_key] = (time.monotonic(), result)
+        return result
 
 
 @app.get("/api/analytics/detailed")
@@ -2233,36 +2356,6 @@ async def get_stats_detailed_alias(role: str = Depends(get_current_role)):
     return await get_detailed_analytics()
 
 
-@app.get("/api/tasks")
-async def read_tasks(role: str = Depends(get_current_role), limit: int = Query(300, ge=1, le=1000)):
-    return await get_task_overview(limit=limit)
-
-
-@app.get("/api/debts")
-async def read_debts(role: str = Depends(get_current_role), limit: int = Query(160, ge=10, le=500)):
-    return await get_debt_board(ping_usernames, limit=limit)
-
-
-@app.get("/api/giveaways/board")
-async def read_giveaway_board(role: str = Depends(get_current_role), limit: int = Query(80, ge=10, le=300)):
-    return await get_giveaway_board(limit=limit)
-
-
-@app.get("/api/giveaways/candidates")
-async def read_giveaway_candidates(
-    role: str = Depends(get_current_role),
-    status: Optional[str] = None,
-    limit: int = Query(100, ge=1, le=500),
-):
-    seeded = await seed_giveaway_candidates_from_pings(limit=limit)
-    return {
-        "action_account": f"@{GIVEAWAY_ACTION_ACCOUNT}",
-        "review_mode": GIVEAWAY_REVIEW_MODE,
-        "seeded": seeded,
-        "candidates": await get_giveaway_candidates(status=status, limit=limit),
-    }
-
-
 @app.post("/api/giveaways/{ping_id}/analyze", dependencies=[Depends(require_admin)])
 async def analyze_giveaway_api(ping_id: int):
     ping = await get_ping_by_id(ping_id)
@@ -2305,11 +2398,6 @@ async def skip_giveaway_api(ping_id: int):
     return {"status": "skipped"}
 
 
-@app.get("/api/giveaways/{ping_id}/actions")
-async def read_giveaway_actions(ping_id: int, role: str = Depends(get_current_role)):
-    return {"actions": await get_giveaway_actions(ping_id)}
-
-
 @app.get("/api/giveaways/cleanup-candidates")
 async def read_giveaway_cleanup_candidates(role: str = Depends(get_current_role), limit: int = Query(100, ge=1, le=500)):
     client = await find_giveaway_action_client()
@@ -2340,24 +2428,6 @@ async def leave_inactive_channel_api(chat_id: int):
     except Exception as exc:
         await record_giveaway_action(None, "leave_channel", "failed", "admin", str(exc), {"chat_id": chat_id})
         raise HTTPException(500, str(exc)) from exc
-
-
-@app.get("/api/sources")
-async def read_sources(role: str = Depends(get_current_role), limit: int = Query(50, ge=1, le=200)):
-    await recalculate_source_scores()
-    return {"sources": await get_source_scores(limit=limit)}
-
-
-@app.get("/api/sources/{chat_id}")
-async def read_source(chat_id: int, role: str = Depends(get_current_role)):
-    await recalculate_source_scores()
-    source = await get_source_score(chat_id)
-    if not source:
-        raise HTTPException(404, "Source not found")
-    profile = await get_channel_profile(chat_id)
-    recent = await get_pings(limit=1000, chat_type="all", sort_by="detected_at", sort_order="DESC")
-    recent = [row for row in recent if int(row.get("chat_id") or 0) == chat_id]
-    return {"source": source, "profile": profile, "recent": recent}
 
 
 @app.post("/api/channels/{chat_id}/refresh-profile", dependencies=[Depends(require_admin)])
@@ -2400,235 +2470,70 @@ async def update_rules_ui(data: RulesUiRequest):
     return payload
 
 
-@app.get("/api/backups", dependencies=[Depends(require_admin)])
-async def read_backups():
-    return {"backups": list_db_backups()}
-
-
-@app.post("/api/backups/create", dependencies=[Depends(require_admin)])
-async def create_backup_api():
-    backup = create_db_backup()
-    if not backup:
-        raise HTTPException(404, "Database file not found")
-    await record_app_event("INFO", "backup", "Manual database backup created", {"name": backup["name"], "size": backup["size"]})
-    return {"status": "ok", "backup": backup}
-
-
-@app.get("/api/backups/{name}/download", dependencies=[Depends(require_admin)])
-async def download_backup(name: str):
-    backups = {item["name"]: item for item in list_db_backups(limit=500)}
-    backup = backups.get(name)
-    if not backup:
-        raise HTTPException(404, "Backup not found")
-    return FileResponse(backup["path"], filename=name, media_type="application/octet-stream")
-
-
 @app.get("/api/live")
 async def live_events(request: Request, role: str = Depends(get_current_role)):
+    """Server-Sent Events: in-memory pub/sub with durable backfill from outbox.
+
+    On connect:
+      1. If client sent ?last_id=N, drain outbox for events with id > N (catches
+         up missed events while disconnected).
+      2. Subscribe to the live hub; new events are pushed without polling.
+
+    Keepalives are sent every 20 s of inactivity so proxies don't close the
+    connection.
+    """
     last_id = int(request.query_params.get("last_id", "0") or 0)
+    subscriber = await state.live_hub.subscribe()
 
     async def stream():
         nonlocal last_id
-        keepalive = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            rows = await get_outbox_after(last_id, limit=50)
-            for row in rows:
-                last_id = int(row["id"])
-                data = json.dumps(row["payload"], ensure_ascii=False)
-                yield f"id: {last_id}\nevent: {row['event_type']}\ndata: {data}\n\n"
-            keepalive += 1
-            if keepalive >= 10:
-                keepalive = 0
-                yield ": keepalive\n\n"
-            await asyncio.sleep(2)
+        try:
+            # Backfill missed events from durable storage
+            if last_id > 0:
+                try:
+                    backfill = await get_outbox_after(last_id, limit=200)
+                    for row in backfill:
+                        last_id = int(row["id"])
+                        data = json.dumps(row["payload"], ensure_ascii=False)
+                        yield f"id: {last_id}\nevent: {row['event_type']}\ndata: {data}\n\n"
+                except Exception:
+                    logger.debug("Outbox backfill failed", exc_info=True)
+            yield ": connected\n\n"
+            # Live phase: await pushes via the queue with periodic keepalive.
+            keepalive_after = 20.0  # seconds
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(subscriber.queue.get(), timeout=keepalive_after)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                event_id = event.get("id")
+                if event_id is not None:
+                    last_id = max(last_id, int(event_id))
+                payload = event.get("payload") or {}
+                if subscriber._lagged:
+                    payload = dict(payload)
+                    payload["_lagged"] = True
+                    subscriber._lagged = False
+                data = json.dumps(payload, ensure_ascii=False)
+                etype = event.get("event_type") or "message"
+                prefix = f"id: {event_id}\n" if event_id is not None else ""
+                yield f"{prefix}event: {etype}\ndata: {data}\n\n"
+        finally:
+            await state.live_hub.unsubscribe(subscriber)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.post("/api/pings/mark-read/{ping_id}", dependencies=[Depends(require_admin)])
-async def mark_ping_read(ping_id: int):
-    await mark_ping_read_db(ping_id)
-    await publish_live_event("ping-updated", {"ping_id": ping_id, "status": "read"})
-    return {"status": "ok"}
+@app.get("/api/export-csv-legacy", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def _export_csv_legacy_redirect():
+    return {"removed": True, "note": "use /api/export-csv"}
 
 
-@app.post("/api/pings/mark-read", dependencies=[Depends(require_admin)])
-async def mark_filtered_pings_read(
-    chat_type: str = "all",
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    favorite: Optional[bool] = None,
-    mention: Optional[str] = None,
-    search: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    priority_min: Optional[int] = Query(default=None, ge=0, le=100),
-    action_status: Optional[str] = None,
-    deadline_from: Optional[str] = None,
-    deadline_to: Optional[str] = None,
-    has_deadline: Optional[bool] = None,
-    source_score_min: Optional[float] = None,
-    only_new: bool = True,
-):
-    changed = await mark_pings_read_db(
-        chat_type=chat_type,
-        status=status_filter,
-        favorite=favorite,
-        mention=mention,
-        search=search,
-        date_from=date_from,
-        date_to=date_to,
-        priority_min=priority_min,
-        action_status=action_status,
-        deadline_from=deadline_from,
-        deadline_to=deadline_to,
-        has_deadline=has_deadline,
-        source_score_min=source_score_min,
-        only_new=only_new,
-    )
-    if changed:
-        await publish_live_event("ping-updated", {"bulk": True, "changed": changed, "status": "read"})
-    return {"status": "ok", "changed": changed}
-
-
-@app.post("/api/pings/toggle-favorite/{ping_id}", dependencies=[Depends(require_admin)])
-async def toggle_ping_favorite(ping_id: int):
-    await toggle_favorite(ping_id)
-    return {"status": "ok"}
-
-
-@app.get("/api/tags")
-async def list_all_tags(token_valid: str = Depends(get_current_role)):
-    return await get_all_tags()
-
-
-@app.post("/api/pings/{ping_id}/tags/{tag}")
-async def ping_add_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
-    tags = await add_ping_tag(ping_id, tag.strip().replace('"', ''))
-    return {"tags": tags}
-
-
-@app.delete("/api/pings/{ping_id}/tags/{tag}")
-async def ping_remove_tag(ping_id: int, tag: str, token_valid: bool = Depends(require_admin)):
-    tags = await remove_ping_tag(ping_id, tag.strip().replace('"', ''))
-    return {"tags": tags}
-
-
-@app.put("/api/pings/{ping_id}", dependencies=[Depends(require_admin)])
-async def update_ping_details(ping_id: int, data: PingMetaRequest):
-    if data.status is not None and data.status not in PING_STATUSES:
-        raise HTTPException(400, f"Unknown status: {data.status}")
-    if data.giveaway_status is not None and data.giveaway_status not in GIVEAWAY_STATUSES:
-        raise HTTPException(400, f"Unknown giveaway status: {data.giveaway_status}")
-    if data.action_status is not None and data.action_status not in ACTION_STATUSES:
-        raise HTTPException(400, f"Unknown action status: {data.action_status}")
-    for label, value in (("deadline_at", data.deadline_at), ("reminder_at", data.reminder_at)):
-        if value:
-            try:
-                datetime.fromisoformat(value)
-            except ValueError as exc:
-                raise HTTPException(400, f"Invalid {label}: {value}") from exc
-    await update_ping_meta(
-        ping_id,
-        status=data.status,
-        note=data.note,
-        is_favorite=data.is_favorite,
-        giveaway_status=data.giveaway_status,
-        deadline_at=data.deadline_at,
-        deadline_source="manual" if data.deadline_at is not None else None,
-        deadline_text="Ручной дедлайн" if data.deadline_at else None,
-        reminder_at=data.reminder_at,
-        action_status=data.action_status,
-    )
-    if data.deadline_at is not None or data.reminder_at is not None:
-        await replace_ping_reminders(ping_id, data.deadline_at, data.reminder_at)
-    await publish_live_event("ping-updated", {"ping_id": ping_id, "deadline_at": data.deadline_at, "action_status": data.action_status})
-    return {"status": "ok"}
-
-
-@app.get("/api/market")
-async def read_market(role: str = Depends(get_current_role)):
-    return await get_market_history(limit=1)
-
-
-@app.get("/api/market-history-full")
-async def get_market_history_full(role: str = Depends(get_current_role), limit: int = Query(24, ge=1, le=500)):
-    return await get_market_history(limit=limit)
-
-
-@app.get("/api/export-csv", dependencies=[Depends(require_admin)])
-async def export_csv(
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    favorite: Optional[bool] = None,
-    search: Optional[str] = None,
-):
-    rows = await get_pings(limit=0, status=status_filter, favorite=favorite, search=search)
-    output = StringIO()
-    output.write("\ufeff")
-    writer = csv.writer(output)
-    writer.writerow(["Обнаружено", "Дата сообщения", "Чат", "Тип", "Отправитель", "Упоминания", "Статус", "Статус розыгрыша", "Статус действия", "Дедлайн", "Источник дедлайна", "Напоминание", "Приоритет", "Заметка", "Текст", "Ссылка"])
-    for row in rows:
-        writer.writerow([
-            row.get("detected_at"),
-            row.get("date"),
-            row.get("chat"),
-            row.get("chat_type"),
-            row.get("sender"),
-            row.get("mentions"),
-            row.get("status"),
-            row.get("giveaway_status"),
-            row.get("action_status"),
-            row.get("deadline_at"),
-            row.get("deadline_source"),
-            row.get("reminder_at"),
-            row.get("priority_score"),
-            row.get("note"),
-            row.get("text"),
-            row.get("link"),
-        ])
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=pulse_pings_export.csv"},
-    )
-
-
-@app.get("/api/export-json", dependencies=[Depends(require_admin)])
-async def export_json(
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    favorite: Optional[bool] = None,
-    search: Optional[str] = None,
-    mention: Optional[str] = None,
-    chat_type: str = "all",
-):
-    rows = await get_pings(limit=0, status=status_filter, favorite=favorite, search=search, mention=mention, chat_type=chat_type)
-    return {
-        "exported_at": now_iso(),
-        "filters": {"status": status_filter, "favorite": favorite, "search": search, "mention": mention, "chat_type": chat_type},
-        "count": len(rows),
-        "rows": rows,
-    }
-
-
-@app.post("/api/export/telegram-digest")
-async def export_telegram_digest(
-    hours: int = Query(24, ge=1, le=168),
-    _: str = Depends(require_admin),
-):
-    if not state.bot_client or not settings.admin_id:
-        raise HTTPException(
-            status_code=503,
-            detail="Бот не настроен: нужны TELEGRAM_BOT_TOKEN и ADMIN_ID в .env",
-        )
-    since = (datetime.now() - timedelta(hours=hours)).isoformat()
-    pings = await get_pings(limit=200, date_from=since)
-    text = format_digest(pings, period_label=f"за {hours} ч")
-    try:
-        await state.bot_client.send_message(settings.admin_id, text, parse_mode="md")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Ошибка отправки: {exc}") from exc
-    return {"ok": True, "pings_count": len(pings)}
+async def _legacy_unused_csv_DELETED():
+    return None
 
 
 @app.post("/api/scan-history", dependencies=[Depends(require_admin)])
@@ -2655,7 +2560,7 @@ async def cancel_scan():
 
 @app.get("/api/scan-status")
 async def get_scan_status(role: str = Depends(get_current_role)):
-    return scan_status
+    return dict(scan_status)
 
 
 def channel_checkpoint_key(username: str, chat_id: Any) -> str:
@@ -2736,7 +2641,9 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
             logger.warning("Flood wait during recent edit sweep in %s: %s seconds", chat_id, exc.seconds)
             scan_status["last_error"] = f"Flood wait {exc.seconds}s in recent edit sweep"
             await record_app_event("WARNING", "scan", "Telegram flood wait during recent edit sweep", {"chat_id": chat_id, "seconds": exc.seconds})
-            await asyncio.sleep(min(exc.seconds, 300))
+            wait = flood_wait_seconds(exc.seconds)
+            mark_account_cooldown(session_name, wait)
+            await asyncio.sleep(wait)
         except Exception as exc:
             if is_auth_key_duplicated(exc):
                 scan_status["last_error"] = auth_key_duplicated_message(session_name)
@@ -2799,7 +2706,9 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                     logger.warning("Flood wait during fast channel sweep in %s: %s seconds", chat_id, exc.seconds)
                     scan_status["last_error"] = f"Flood wait {exc.seconds}s in fast channel sweep"
                     await record_app_event("WARNING", "scan", "Telegram flood wait during fast channel sweep", {"chat_id": chat_id, "seconds": exc.seconds})
-                    await asyncio.sleep(min(exc.seconds, 300))
+                    wait = flood_wait_seconds(exc.seconds)
+                    mark_account_cooldown(session_name, wait)
+                    await asyncio.sleep(wait)
                 except Exception as exc:
                     if is_auth_key_duplicated(exc):
                         scan_status["last_error"] = auth_key_duplicated_message(session_name)
@@ -2841,7 +2750,9 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                     logger.warning("Flood wait during targeted scan in %s for @%s: %s seconds", chat_id, username, exc.seconds)
                     scan_status["last_error"] = f"Flood wait {exc.seconds}s for @{username}"
                     await record_app_event("WARNING", "scan", "Telegram flood wait during targeted scan", {"chat_id": chat_id, "username": username, "seconds": exc.seconds})
-                    await asyncio.sleep(min(exc.seconds, 300))
+                    wait = flood_wait_seconds(exc.seconds)
+                    mark_account_cooldown(session_name, wait)
+                    await asyncio.sleep(wait)
                 except Exception as exc:
                     if is_auth_key_duplicated(exc):
                         scan_status["last_error"] = auth_key_duplicated_message(session_name)
@@ -3029,15 +2940,6 @@ async def update_runtime_settings(data: RuntimeSettingsRequest):
     return {"status": "ok", "settings": cleaned}
 
 
-@app.get("/api/settings/history")
-async def get_settings_change_history(
-    key: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    _: str = Depends(require_admin),
-):
-    return await get_settings_history(key=key, limit=limit)
-
-
 @app.get("/api/settings/notifications", dependencies=[Depends(require_admin)])
 async def get_notification_settings():
     return await load_notification_settings()
@@ -3050,30 +2952,6 @@ async def update_notification_settings(data: NotificationSettingsRequest):
     await record_app_event("INFO", "settings", "Notification rules updated", {"rules": settings})
     await publish_live_event("settings-updated", {"scope": "notifications"})
     return {"status": "ok", "settings": settings}
-
-
-@app.get("/api/saved-filters")
-async def get_saved_filters(role: str = Depends(get_current_role)):
-    return {"filters": await get_setting("saved_filters", [])}
-
-
-@app.put("/api/saved-filters", dependencies=[Depends(require_admin)])
-async def update_saved_filters(data: SavedFiltersRequest):
-    clean_filters = []
-    for item in data.filters:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        query = item.get("query") if isinstance(item.get("query"), dict) else {}
-        if name and isinstance(query, dict):
-            clean_filters.append({"name": name[:40], "query": query})
-    await set_setting("saved_filters", clean_filters)
-    return {"status": "ok", "filters": clean_filters}
-
-
-@app.get("/api/scan-runs", dependencies=[Depends(require_admin)])
-async def read_scan_runs(limit: int = Query(20, ge=1, le=100)):
-    return {"runs": await get_scan_runs(limit=limit)}
 
 
 @app.get("/api/accounts/health", dependencies=[Depends(require_admin)])

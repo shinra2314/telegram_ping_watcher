@@ -21,17 +21,68 @@
         .replace("VIEWER_TOKEN", "VIEWER_TOKEN");
     }
 
+    function showToast(message, kind = "info", timeoutMs = 4000) {
+      let host = document.getElementById("toast-host");
+      if (!host) {
+        host = document.createElement("div");
+        host.id = "toast-host";
+        host.setAttribute("aria-live", "polite");
+        host.setAttribute("role", "status");
+        document.body.appendChild(host);
+      }
+      const toast = document.createElement("div");
+      toast.className = `toast toast-${kind}`;
+      toast.textContent = message;
+      host.appendChild(toast);
+      // Force reflow then add visible class for fade-in
+      requestAnimationFrame(() => toast.classList.add("visible"));
+      setTimeout(() => {
+        toast.classList.remove("visible");
+        setTimeout(() => toast.remove(), 250);
+      }, timeoutMs);
+    }
+
     async function api(url, options = {}) {
       const headers = Object.assign({}, options.headers || {});
       if (state.token) headers["X-Pulse-Token"] = state.token;
-      const res = await fetch(apiUrl(url), Object.assign({}, options, { headers }));
-      if (res.status === 401 || res.status === 403) {
-        const message = res.status === 403 ? "Для этого действия нужен admin-токен." : "Нужен токен доступа.";
-        showLogin(message);
-        throw new Error(message);
+      const button = options.button || null;
+      const silent = options.silent === true;
+      let originalLabel = "";
+      if (button) {
+        button.disabled = true;
+        originalLabel = button.dataset._busyLabel = button.innerHTML;
+        button.classList.add("is-loading");
       }
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
+      // Strip our custom keys before forwarding to fetch
+      const { button: _b, silent: _s, ...fetchOpts } = options;
+      try {
+        const res = await fetch(apiUrl(url), Object.assign({}, fetchOpts, { headers }));
+        if (res.status === 401 || res.status === 403) {
+          const message = res.status === 403 ? "Для этого действия нужен admin-токен." : "Нужен токен доступа.";
+          showLogin(message);
+          throw new Error(message);
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          if (!silent) showToast(text || `Ошибка ${res.status}`, "error");
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        return res.json();
+      } catch (err) {
+        if (!silent && !(err && err.message && err.message.includes("токен"))) {
+          // Network/runtime errors not already toasted above
+          if (err && err.name === "TypeError") {
+            showToast("Нет связи с сервером.", "error");
+          }
+        }
+        throw err;
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.classList.remove("is-loading");
+          if (originalLabel) button.innerHTML = originalLabel;
+        }
+      }
     }
 
     function showLogin(message = "") {
@@ -92,14 +143,65 @@
       showLogin("Вы вышли. Введите токен для доступа.");
     }
 
+    function setLiveStatus(status) {
+      // status: "online" | "connecting" | "offline"
+      state.liveStatus = status;
+      const el = document.getElementById("live-status");
+      if (el) {
+        el.dataset.status = status;
+        el.title = status === "online" ? "Live-обновления подключены"
+          : status === "connecting" ? "Восстанавливаем соединение…"
+          : "Live-обновления оффлайн";
+      }
+      document.body.dataset.liveStatus = status;
+    }
+
     function startLive() {
-      if (state.liveSource) state.liveSource.close();
+      stopLive();
+      state.liveReconnectAttempt = 0;
+      _liveConnect();
+    }
+
+    function stopLive() {
+      if (state._liveReconnectTimer) {
+        clearTimeout(state._liveReconnectTimer);
+        state._liveReconnectTimer = null;
+      }
+      if (state.liveSource) {
+        try { state.liveSource.close(); } catch {}
+        state.liveSource = null;
+      }
+      setLiveStatus("offline");
+    }
+
+    function _liveScheduleReconnect() {
+      const attempt = (state.liveReconnectAttempt || 0) + 1;
+      state.liveReconnectAttempt = attempt;
+      // Exponential backoff 1s → 60s with ±20% jitter
+      const base = Math.min(60, Math.pow(2, Math.min(attempt - 1, 6)));
+      const jitter = base * 0.2 * (Math.random() - 0.5) * 2;
+      const delayMs = Math.max(1000, Math.round((base + jitter) * 1000));
+      setLiveStatus("connecting");
+      state._liveReconnectTimer = setTimeout(_liveConnect, delayMs);
+    }
+
+    function _liveConnect() {
+      state._liveReconnectTimer = null;
+      if (!state.token && !document.cookie.includes("pulse_token=")) {
+        // Not authenticated yet; defer.
+        setLiveStatus("offline");
+        return;
+      }
       try {
         const source = new EventSource("/api/live");
         state.liveSource = source;
         const onChange = () => {
           if (["dashboard", "analytics", "debts"].includes(state.tab)) refreshData({ silent: true, preserveScroll: true });
         };
+        source.addEventListener("open", () => {
+          state.liveReconnectAttempt = 0;
+          setLiveStatus("online");
+        });
         source.addEventListener("ping", onChange);
         source.addEventListener("ping-updated", onChange);
         source.addEventListener("giveaway-candidate", onChange);
@@ -113,11 +215,29 @@
           }
         });
         source.onerror = () => {
-          source.close();
+          try { source.close(); } catch {}
           state.liveSource = null;
+          _liveScheduleReconnect();
         };
-      } catch {}
+      } catch {
+        _liveScheduleReconnect();
+      }
     }
+
+    // Reconnect when tab becomes visible if currently offline
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && state.liveStatus !== "online" && !state._liveReconnectTimer) {
+        state.liveReconnectAttempt = 0;
+        _liveConnect();
+      }
+    });
+    window.addEventListener("online", () => {
+      if (state.liveStatus !== "online" && !state._liveReconnectTimer) {
+        state.liveReconnectAttempt = 0;
+        _liveConnect();
+      }
+    });
+    window.addEventListener("offline", () => setLiveStatus("offline"));
 
     function setTab(tab) {
       const titles = {
@@ -132,8 +252,19 @@
       if (!titles[tab]) tab = "dashboard";
       state.tab = tab;
       document.body.dataset.tab = tab;
-      document.querySelectorAll(".tabs").forEach(el => el.classList.toggle("active", el.id === tab));
-      document.querySelectorAll("[data-tab]").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tab));
+      document.querySelectorAll(".tabs").forEach(el => {
+        const active = el.id === tab;
+        el.classList.toggle("active", active);
+        // Mark section as a tabpanel for screen readers
+        if (!el.hasAttribute("role")) el.setAttribute("role", "tabpanel");
+        el.setAttribute("aria-hidden", active ? "false" : "true");
+        if (active) el.removeAttribute("tabindex"); else el.setAttribute("tabindex", "-1");
+      });
+      document.querySelectorAll("[data-tab]").forEach(btn => {
+        const active = btn.dataset.tab === tab;
+        btn.classList.toggle("active", active);
+        if (btn.hasAttribute("role")) btn.setAttribute("aria-selected", active ? "true" : "false");
+      });
       $("page-title").textContent = titles[tab][0];
       $("page-subtitle").textContent = titles[tab][1];
       refreshData();
@@ -1087,6 +1218,25 @@
       renderDebts(data);
     }
 
+    // Build a tiny inline sparkline (line + area) from a numeric series.
+    function sparkSVG(values) {
+      const pts = (values || []).map(Number).filter(v => Number.isFinite(v));
+      if (pts.length < 2) return "";
+      const w = 100, h = 30, pad = 2;
+      const max = Math.max(...pts), min = Math.min(...pts);
+      const span = max - min || 1;
+      const step = (w - pad * 2) / (pts.length - 1);
+      const coords = pts.map((v, i) => {
+        const x = pad + i * step;
+        const y = h - pad - ((v - min) / span) * (h - pad * 2);
+        return [Number(x.toFixed(2)), Number(y.toFixed(2))];
+      });
+      const line = coords.map((c, i) => `${i ? "L" : "M"}${c[0]} ${c[1]}`).join(" ");
+      const area = `${line} L${coords[coords.length - 1][0]} ${h} L${coords[0][0]} ${h} Z`;
+      return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">`
+        + `<path class="spark-area" d="${area}"/><path class="spark-line" d="${line}"/></svg>`;
+    }
+
     async function loadAnalytics() {
       const data = await api("/api/analytics");
       const shouldLoadDetailed = state.tab === "analytics";
@@ -1105,6 +1255,11 @@
         ["Избранное", data.favorites, "star", "#a78bfa"],
         ["Аккаунтов онлайн", data.accounts_online, "radio", "#2dd4bf"]
       ];
+      const dailySeries = Array.isArray(data.daily)
+        ? data.daily.slice().reverse().map(x => Number(x.count) || 0)
+        : [];
+      const sparkLabels = new Set(["Всего", "За 24 часа", "За 7 дней"]);
+      const spark = sparkLabels.size && dailySeries.length >= 2 ? sparkSVG(dailySeries) : "";
       const metricsHtml = metrics.map(([label, value, icon, color]) => `
         <div class="panel metric-card" style="--metric-color:${color}">
           <div class="metric-top">
@@ -1112,6 +1267,7 @@
             <span class="metric-icon"><i data-lucide="${icon}"></i></span>
           </div>
           <div class="metric-value">${value ?? 0}</div>
+          ${spark && sparkLabels.has(label) ? spark : ""}
         </div>
       `).join("");
       setHtmlIfChanged("stats-row", metricsHtml);
@@ -1863,8 +2019,43 @@
     });
 
     function closeModal() {
-      $("modal").classList.remove("active");
+      const modal = $("modal");
+      modal.classList.remove("active");
+      modal.setAttribute("aria-hidden", "true");
       document.body.classList.remove("modal-open");
+      document.removeEventListener("keydown", _modalKeydown);
+      if (state._modalReturnFocus && typeof state._modalReturnFocus.focus === "function") {
+        try { state._modalReturnFocus.focus(); } catch {}
+      }
+      state._modalReturnFocus = null;
+    }
+
+    function _focusableInModal() {
+      const modal = $("modal");
+      if (!modal) return [];
+      return Array.from(modal.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter(el => el.offsetParent !== null);
+    }
+
+    function _modalKeydown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeModal();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = _focusableInModal();
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
 
     async function loadActionHistory(ping) {
@@ -1947,7 +2138,21 @@
       $("modal-note").value = ping.note || "";
       renderModalTags(ping);
       document.body.classList.add("modal-open");
-      $("modal").classList.add("active");
+      const modal = $("modal");
+      modal.classList.add("active");
+      modal.setAttribute("aria-hidden", "false");
+      if (!modal.hasAttribute("role")) {
+        modal.setAttribute("role", "dialog");
+        modal.setAttribute("aria-modal", "true");
+        modal.setAttribute("aria-labelledby", "modal-title");
+      }
+      state._modalReturnFocus = document.activeElement;
+      document.addEventListener("keydown", _modalKeydown);
+      // Focus the first interactive element after a tick
+      setTimeout(() => {
+        const focusable = _focusableInModal();
+        if (focusable.length) focusable[0].focus();
+      }, 30);
       loadActionHistory(ping);
     }
 
@@ -2089,7 +2294,43 @@
         }, 4000);
     });
 
+    function applyTheme(theme) {
+      // theme: "light" | "dark" | "auto"
+      if (!["light", "dark", "auto"].includes(theme)) theme = "auto";
+      localStorage.setItem("pulse_theme", theme);
+      const effective = theme === "auto"
+        ? (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+        : theme;
+      document.documentElement.setAttribute("data-theme", effective);
+      const btn = document.getElementById("theme-toggle");
+      if (btn) {
+        const next = effective === "light" ? "dark" : "light";
+        btn.setAttribute("aria-label", `Сменить тему (сейчас ${effective})`);
+        btn.dataset.next = next;
+      }
+    }
+
+    function initTheme() {
+      const stored = localStorage.getItem("pulse_theme") || "light";
+      applyTheme(stored);
+      // React to OS theme changes when in auto mode
+      if (window.matchMedia) {
+        const mq = window.matchMedia("(prefers-color-scheme: light)");
+        mq.addEventListener("change", () => {
+          if ((localStorage.getItem("pulse_theme") || "auto") === "auto") applyTheme("auto");
+        });
+      }
+      // Wire up button if it exists
+      document.body.addEventListener("click", (e) => {
+        const btn = e.target.closest && e.target.closest("#theme-toggle");
+        if (!btn) return;
+        const next = btn.dataset.next || "light";
+        applyTheme(next);
+      });
+    }
+
     async function initApp() {
+      initTheme();
       restoreFilters();
       applyRole();
       if (browserNotificationsEnabled()) $("browser-notify-btn").classList.add("primary");

@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from telethon import Button, TelegramClient, events, types
 from telethon.errors import (
     FloodWaitError,
+    MessageNotModifiedError,
     PhoneCodeEmptyError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
@@ -1061,7 +1062,7 @@ async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Bu
 
 
 async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None, auto_joined: bool = False) -> None:
-    if not bot_client or not ADMIN_ID:
+    if not bot_client:
         return
     try:
         settings = await load_notification_settings()
@@ -1107,8 +1108,39 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         sent = await send_admin_bot_message(msg, buttons=buttons)
         if not sent:
             logger.error("Failed to send bot notification after retries")
+        # Mirror notification to viewer members (read-only, no action buttons).
+        member_buttons: Optional[list[list[Button]]] = None
+        if link and not link.startswith("нет "):
+            member_buttons = [[Button.url("Открыть в Telegram", link)]]
+        await broadcast_member_notification(msg, member_buttons)
     except Exception:
         logger.exception("Failed to send bot notification")
+
+
+async def broadcast_member_notification(message: str, buttons: Optional[list[list[Button]]] = None) -> None:
+    """Send a notification to every non-blocked viewer member of the bot."""
+    if not bot_client:
+        return
+    try:
+        members = await list_bot_members()
+    except Exception:
+        logger.exception("Failed to load bot members for broadcast")
+        return
+    admin_ids = {int(ADMIN_ID)} if ADMIN_ID else set()
+    for member in members:
+        if member.get("blocked"):
+            continue
+        tg_id = member.get("tg_id")
+        if tg_id is None or int(tg_id) in admin_ids:
+            continue  # owner already notified via send_admin_bot_message
+        try:
+            if not await ensure_bot_connected():
+                return
+            await bot_client.send_message(int(tg_id), message, buttons=buttons, link_preview=False)
+        except FloodWaitError as exc:
+            await asyncio.sleep(flood_wait_seconds(exc.seconds))
+        except Exception as exc:
+            logger.warning("Failed to notify bot member %s: %s", tg_id, exc)
 
 
 async def get_chat_type(client: TelegramClient, chat_id: int) -> str:
@@ -1443,6 +1475,13 @@ async def init_bot() -> None:
                 ])
             return rows
 
+        async def safe_edit(event, *args, **kwargs) -> None:
+            """Edit the callback message, ignoring 'not modified' errors."""
+            try:
+                await event.edit(*args, **kwargs)
+            except MessageNotModifiedError:
+                await event.answer()
+
         def help_text(role: str) -> str:
             lines = [
                 "**Pulse Desk Bot**",
@@ -1769,22 +1808,22 @@ async def init_bot() -> None:
 
             # ---- menu navigation (any authenticated role) ----
             if data == "menu_help":
-                await event.edit(help_text(role), buttons=main_menu_buttons(role))
+                await safe_edit(event, help_text(role), buttons=main_menu_buttons(role))
                 return
             if data == "menu_stats":
-                await event.edit(await render_stats(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_stats(), buttons=main_menu_buttons(role))
                 return
             if data == "menu_status":
-                await event.edit(await render_status(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_status(), buttons=main_menu_buttons(role))
                 return
             if data == "menu_giveaways":
-                await event.edit(await render_giveaways(), buttons=main_menu_buttons(role), link_preview=False)
+                await safe_edit(event, await render_giveaways(), buttons=main_menu_buttons(role), link_preview=False)
                 return
             if data == "menu_recent":
-                await event.edit(await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
+                await safe_edit(event, await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
                 return
             if data == "menu_market":
-                await event.edit(await render_market(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_market(), buttons=main_menu_buttons(role))
                 return
 
             # ---- owner-only menu + actions ----
@@ -1795,7 +1834,7 @@ async def init_bot() -> None:
                     return
 
             if data == "menu_keys":
-                await event.edit(await render_keys_text(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_keys_text(), buttons=main_menu_buttons(role))
                 return
             if data == "menu_scan":
                 if scan_lock.locked():
@@ -1809,12 +1848,12 @@ async def init_bot() -> None:
                     await event.answer("Логов нет")
                     return
                 lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
-                await event.edit("**Последние логи:**\n\n`" + "\n".join(lines)[-3500:] + "`", buttons=main_menu_buttons(role))
+                await safe_edit(event, "**Последние логи:**\n\n`" + "\n".join(lines)[-3500:] + "`", buttons=main_menu_buttons(role))
                 return
             if data.startswith("revokekey_"):
                 await revoke_bot_key(int(data.split("_", 1)[1]))
                 await event.answer("Ключ отозван")
-                await event.edit(await render_keys_text(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_keys_text(), buttons=main_menu_buttons(role))
                 return
             if data.startswith("blockmember_"):
                 await set_bot_member_blocked(int(data.split("_", 1)[1]), True)

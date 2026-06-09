@@ -1071,39 +1071,42 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         if should_throttle_notification(record, int(settings.get("cooldown_seconds", 120) or 0)):
             await record_app_event("INFO", "notifications", "Similar notification suppressed", {"chat": record.get("chat"), "mentions": record.get("mentions")})
             return
-        title = "Новое упоминание"
+        title = "🔔 Новое упоминание"
         if record.get("is_win"):
-            title = "Похоже на победу в розыгрыше"
+            title = "🏆 Похоже на победу в розыгрыше"
         elif record.get("is_giveaway"):
-            title = "Найден розыгрыш"
+            title = "🎁 Найден розыгрыш"
         candidate = await get_giveaway_candidate(int(ping_id)) if ping_id and record.get("is_giveaway") else None
         candidate_line = ""
         if candidate:
             candidate_line = (
-                f"\nПроверка участия: score `{candidate.get('score', 0)}` / status `{candidate.get('status', 'pending_review')}`"
-                + (f"\nManual: {candidate.get('blocked_reason')}" if candidate.get("blocked_reason") else "")
+                f"\n🧮 Участие: score `{candidate.get('score', 0)}` · status `{candidate.get('status', 'pending_review')}`"
+                + (f"\n✋ Manual: {candidate.get('blocked_reason')}" if candidate.get("blocked_reason") else "")
             )
+        mentions = ", ".join(record.get("mentions", [])) or "—"
         msg = (
-            f"**{title}**\n\n"
-            f"Чат: `{record.get('chat', 'unknown')}` ({record.get('chat_type', 'unknown')})\n"
-            f"Отправитель: {record.get('sender', 'unknown')}\n"
-            f"Упоминания: {', '.join(record.get('mentions', []))}\n"
-            f"Авто-вступление: {'да' if auto_joined else 'нет'}\n\n"
-            f"{candidate_line}\n{(record.get('text') or '')[:800]}"
+            f"**{title}**\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"💬 Чат: `{record.get('chat', 'unknown')}` · _{record.get('chat_type', 'unknown')}_\n"
+            f"👤 От: {record.get('sender', 'unknown')}\n"
+            f"🏷 Упоминания: {mentions}\n"
+            f"🤝 Авто-вступление: {'✅ да' if auto_joined else '❌ нет'}"
+            f"{candidate_line}\n\n"
+            f"{(record.get('text') or '')[:800]}"
         )
         buttons: list[list[Button]] = []
         link = record.get("link")
         if link and not link.startswith("нет "):
-            buttons.append([Button.url("Открыть в Telegram", link)])
+            buttons.append([Button.url("🔗 Открыть в Telegram", link)])
         if ping_id:
             buttons.append([
-                Button.inline("В избранное", data=f"fav_{ping_id}"),
-                Button.inline("Прочитано", data=f"read_{ping_id}"),
+                Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
+                Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
             ])
         if ping_id and record.get("is_giveaway"):
             buttons.append([
-                Button.inline("Confirm safe join", data=f"gconfirm_{ping_id}"),
-                Button.inline("Skip", data=f"gskip_{ping_id}"),
+                Button.inline("✅ Участвовать", data=f"gconfirm_{ping_id}"),
+                Button.inline("⏭ Пропустить", data=f"gskip_{ping_id}"),
             ])
         sent = await send_admin_bot_message(msg, buttons=buttons)
         if not sent:
@@ -1457,7 +1460,7 @@ async def init_bot() -> None:
             if role is None:
                 return True  # stranger — ignore silently
             if role != "admin":
-                await event.respond("⛔ Эта команда доступна только владельцу.")
+                await event.respond("⛔ **Только для владельца.**\nВ режиме просмотра это действие недоступно.")
                 return True
             return False
 
@@ -1482,47 +1485,63 @@ async def init_bot() -> None:
             except MessageNotModifiedError:
                 await event.answer()
 
+        DIV = "━━━━━━━━━━━━━━━"
+
+        def _fmt_dt(value: Optional[str]) -> str:
+            """Trim an ISO timestamp to `MM-DD HH:MM` for compact display."""
+            if not value:
+                return "—"
+            text = str(value).replace("T", " ")
+            return text[5:16] if len(text) >= 16 else text
+
         def help_text(role: str) -> str:
             lines = [
-                "**Pulse Desk Bot**",
-                "",
-                "/menu — главное меню",
-                "/stats — статистика",
-                "/status — состояние аккаунтов",
-                "/giveaways — розыгрыши",
-                "/recent [N] — последние упоминания",
-                "/latest — последние 5",
-                "/search <текст> — поиск",
-                "/market — курсы",
-                "/ping — проверка связи",
+                "🛰 **PULSE DESK**",
+                "__Мониторинг каналов и розыгрышей__",
+                DIV,
+                "📋 **Команды**",
+                "• /menu — главное меню",
+                "• /stats — статистика",
+                "• /status — состояние аккаунтов",
+                "• /giveaways — розыгрыши",
+                "• /recent `[N]` — последние упоминания",
+                "• /search `<текст>` — поиск",
+                "• /market — курсы",
+                "• /ping — проверка связи",
             ]
             if role == "admin":
                 lines += [
                     "",
-                    "**Владелец:**",
-                    "/scan — скан истории",
-                    "/logs — последние логи",
-                    "/export — CSV выгрузка",
-                    "/newkey [метка] — создать ключ доступа",
-                    "/keys — список ключей",
-                    "/members — список пользователей",
+                    "👑 **Владелец**",
+                    "• /scan — скан истории",
+                    "• /logs — последние логи",
+                    "• /export — CSV выгрузка",
+                    "• /newkey `[метка]` — создать ключ",
+                    "• /keys — список ключей",
+                    "• /members — пользователи",
                 ]
+            else:
+                lines += ["", "👁 __Режим: только просмотр__"]
             return "\n".join(lines)
 
         # ---- shared renderers (reused by slash commands and menu callbacks) -
         async def render_stats() -> str:
             analytics = await build_analytics()
             return (
-                "**📊 Статистика Pulse**\n\n"
-                f"Всего записей: `{analytics['total_pings']}`\n"
-                f"Аккаунтов онлайн: `{analytics['accounts_online']}`\n"
-                f"Новых: `{analytics['new_pings']}`\n"
-                f"Избранных: `{analytics['favorites']}`"
+                "📊 **Статистика**\n"
+                f"{DIV}\n"
+                f"📨 Всего записей: `{analytics['total_pings']}`\n"
+                f"🆕 Новых: `{analytics['new_pings']}`\n"
+                f"⭐ Избранных: `{analytics['favorites']}`\n"
+                f"🛰 Аккаунтов онлайн: `{analytics['accounts_online']}`"
             )
 
         async def render_status() -> str:
             accounts_online = sum(1 for acc in list(accounts_state.values()) if acc.get("status") == "online")
-            account_lines = [f"`{a.get('session_name', '?')}`: {a.get('status', 'unknown')}" for a in list(accounts_state.values())]
+            account_lines = [
+                f"  {'🟢' if a.get('status') == 'online' else '🔴'} `{a.get('session_name', '?')}` — {a.get('status', 'unknown')}"
+                for a in list(accounts_state.values())
+            ]
             try:
                 db_size_mb = DB_PATH.stat().st_size / 1024 / 1024 if DB_PATH.exists() else 0
             except Exception:
@@ -1530,64 +1549,74 @@ async def init_bot() -> None:
             uptime_sec = int((datetime.now() - state.started_at).total_seconds())
             uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
             running_jobs = sorted(name for name, task in state.background_tasks.items() if not task.done())
-            last_scan = state.last_scan_finished_at.isoformat(timespec="seconds") if state.last_scan_finished_at else "—"
+            last_scan = _fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
             return (
-                f"**🛰 Статус Pulse Desk v{APP_VERSION}**\n\n"
+                f"🛰 **Статус** · `v{APP_VERSION}`\n"
+                f"{DIV}\n"
                 f"⏱ Uptime: `{uptime_str}`\n"
-                f"💾 БД: `{db_size_mb:.1f} MB`\n"
+                f"💾 База: `{db_size_mb:.1f} MB`\n"
                 f"🛰 Аккаунты: `{accounts_online}/{len(accounts_state)}` online\n"
-                f"🔄 Последний скан: `{last_scan}` ({state.last_scan_status or '—'})\n"
+                f"🔄 Скан: `{last_scan}` · {state.last_scan_status or '—'}\n"
                 f"⚙️ Jobs ({len(running_jobs)}): `{', '.join(running_jobs) or '—'}`\n\n"
-                + "\n".join(account_lines or ["Нет аккаунтов"])
+                "👤 **Аккаунты**\n" + ("\n".join(account_lines) if account_lines else "  __нет аккаунтов__")
             )
 
         async def render_giveaways() -> str:
             board = await get_giveaway_board(limit=10)
             buckets = board.get("buckets") or {}
             stats = board.get("stats") or {}
-            lines = ["**🎁 Активные розыгрыши:**", ""]
-            lines.append(f"⏳ Ожидание: `{stats.get('waiting', 0)}` · 🎁 Призы: `{stats.get('to_claim', 0)}` · ❗ Срочные: `{stats.get('urgent', 0)}`")
+            lines = [
+                "🎁 **Розыгрыши**",
+                DIV,
+                f"⏳ Ожидание: `{stats.get('waiting', 0)}`  ·  🎁 Призы: `{stats.get('to_claim', 0)}`  ·  ❗ Срочные: `{stats.get('urgent', 0)}`",
+            ]
             urgent = buckets.get("urgent") or []
-            for row in urgent[:5]:
-                deadline = row.get("deadline_at") or "—"
-                chat = row.get("chat") or "?"
-                lines.append(f"⚠️ `{deadline}` · {chat}\n{(row.get('text') or '')[:120]}")
-            if not urgent:
-                lines.append("\nСрочных розыгрышей нет.")
+            if urgent:
+                lines.append("\n⚠️ **Срочное**")
+                for row in urgent[:5]:
+                    lines.append(f"  • `{_fmt_dt(row.get('deadline_at'))}` · {row.get('chat') or '?'}\n    {(row.get('text') or '')[:110]}")
+            else:
+                lines.append("\n✅ __Срочных розыгрышей нет.__")
             return "\n".join(lines)
 
         async def render_recent(n: int = 5) -> str:
             rows = await get_pings(limit=n)
             if not rows:
-                return "Упоминаний пока нет."
-            result = [f"**🕐 Последние {len(rows)}:**"]
+                return "🕐 **Последние**\n" + DIV + "\n📭 __Упоминаний пока нет.__"
+            result = [f"🕐 **Последние {len(rows)}**", DIV]
             for row in rows:
                 priority = row.get("priority_label") or ""
-                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "·"
-                result.append(f"{badge} `{row['detected_at']}` | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
+                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "•"
+                link = row.get("link") or ""
+                result.append(
+                    f"{badge} `{_fmt_dt(row.get('detected_at'))}` · {row['chat']}\n"
+                    f"{(row.get('text') or '')[:160]}"
+                    + (f"\n🔗 {link}" if link else "")
+                )
             return "\n\n".join(result)
 
         async def render_market() -> str:
             market = await get_market_history(limit=1)
             if not market:
-                return "Данные рынка пока недоступны."
+                return "💹 **Курсы**\n" + DIV + "\n📉 __Данные пока недоступны.__"
             m = market[0]
             return (
-                "**💹 Курсы:**\n\n"
-                f"BTC: `${m.get('bitcoin', {}).get('usd', 0):,}`\n"
-                f"ETH: `${m.get('ethereum', {}).get('usd', 0):,}`\n"
-                f"TON: `${m.get('the-open-network', {}).get('usd', 0):.3f}`\n"
-                f"SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
+                "💹 **Курсы**\n"
+                f"{DIV}\n"
+                f"🟠 BTC: `${m.get('bitcoin', {}).get('usd', 0):,}`\n"
+                f"🔷 ETH: `${m.get('ethereum', {}).get('usd', 0):,}`\n"
+                f"💎 TON: `${m.get('the-open-network', {}).get('usd', 0):.3f}`\n"
+                f"🟣 SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
             )
 
         async def render_keys_text() -> str:
             keys = await list_bot_keys()
             if not keys:
-                return "Активных ключей нет. Создайте: `/newkey метка`"
-            lines = ["**🔑 Ключи доступа:**", ""]
+                return "🔑 **Ключи доступа**\n" + DIV + "\n📭 __Ключей нет.__\nСоздайте: `/newkey метка`"
+            lines = ["🔑 **Ключи доступа**", DIV]
             for k in keys:
-                exp = k.get("expires_at") or "бессрочно"
-                lines.append(f"#{k['id']} · {k.get('label') or '—'} · 👥 {k.get('member_count', 0)} · до {exp}")
+                exp = _fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
+                lines.append(f"`#{k['id']}` · {k.get('label') or '—'}\n   👥 {k.get('member_count', 0)} · ⏳ {exp}")
             return "\n".join(lines)
 
         # ---- redeem / onboarding -------------------------------------------
@@ -1597,10 +1626,26 @@ async def init_bot() -> None:
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
             role = key.get("role") or "viewer"
             await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
+            greeting = f"Привет, {name}!" if name else "Привет!"
             await event.respond(
-                "✅ **Доступ открыт!**\nДобро пожаловать в Pulse Desk. Выберите раздел:",
+                "✅ **Доступ открыт!**\n"
+                f"{greeting} Добро пожаловать в **Pulse Desk**.\n"
+                + f"{DIV}\n"
+                + ("👑 Доступ: __полный__" if role == "admin" else "👁 Доступ: __только просмотр__")
+                + "\n\nВыберите раздел 👇",
                 buttons=main_menu_buttons(role),
             )
+
+        def menu_caption(role: str) -> str:
+            badge = "👑 владелец" if role == "admin" else "👁 просмотр"
+            return f"🛰 **PULSE DESK** · __{badge}__\nВыберите раздел 👇"
+
+        locked_text = (
+            "🔒 **Доступ закрыт**\n"
+            f"{DIV}\n"
+            "Пришлите ключ доступа, выданный владельцем, "
+            "или откройте ссылку-приглашение."
+        )
 
         @bot_client.on(events.NewMessage(pattern=r"/start(?:\s+(\S+))?"))
         async def start_handler(event):
@@ -1610,13 +1655,13 @@ async def init_bot() -> None:
                 if key:
                     await grant_access(event, key)
                     return
-                await event.respond("❌ Ключ недействителен или отозван.")
+                await event.respond("❌ **Ключ недействителен или отозван.**")
                 return
             role = await bot_role(event.sender_id)
             if role is None:
-                await event.respond("🔒 Бот закрыт. Пришлите ключ доступа, выданный владельцем, или откройте ссылку-приглашение.")
+                await event.respond(locked_text)
                 return
-            await event.respond("**Pulse Desk Bot**\nВыберите раздел:", buttons=main_menu_buttons(role))
+            await event.respond(menu_caption(role), buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern=r"/redeem(?:\s+(\S+))?"))
         async def redeem_handler(event):
@@ -1626,7 +1671,7 @@ async def init_bot() -> None:
                 return
             key = await get_bot_key_by_secret(payload)
             if not key:
-                await event.respond("❌ Ключ недействителен или отозван.")
+                await event.respond("❌ **Ключ недействителен или отозван.**")
                 return
             await grant_access(event, key)
 
@@ -1634,9 +1679,9 @@ async def init_bot() -> None:
         async def menu_handler(event):
             role = await bot_role(event.sender_id)
             if role is None:
-                await event.respond("🔒 Пришлите ключ доступа.")
+                await event.respond(locked_text)
                 return
-            await event.respond("Главное меню:", buttons=main_menu_buttons(role))
+            await event.respond(menu_caption(role), buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern="/help"))
         async def help_handler(event):
@@ -1690,11 +1735,15 @@ async def init_bot() -> None:
                 return
             rows = await get_pings(limit=5, search=parts[1])
             if not rows:
-                await event.respond("Ничего не найдено.")
+                await event.respond("🔎 __Ничего не найдено.__")
                 return
-            result = ["**🔎 Результаты поиска:**"]
+            result = ["🔎 **Результаты поиска**", DIV]
             for row in rows:
-                result.append(f"{row['detected_at']} | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
+                link = row.get("link") or ""
+                result.append(
+                    f"• `{_fmt_dt(row.get('detected_at'))}` · {row['chat']}\n{(row.get('text') or '')[:160]}"
+                    + (f"\n🔗 {link}" if link else "")
+                )
             await event.respond("\n\n".join(result), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
@@ -1707,7 +1756,7 @@ async def init_bot() -> None:
         async def ping_handler(event):
             if await bot_role(event.sender_id) is None:
                 return
-            await event.respond("Понг.")
+            await event.respond("🏓 **Понг!** Бот на связи.")
 
         @bot_client.on(events.NewMessage(pattern="/logs"))
         async def logs_handler(event):
@@ -1717,23 +1766,23 @@ async def init_bot() -> None:
                 await event.respond("Логов пока нет.")
                 return
             lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
-            await event.respond("**Последние логи:**\n\n`" + "\n".join(lines)[-3500:] + "`")
+            await event.respond("📜 **Последние логи**\n" + DIV + "\n```\n" + "\n".join(lines)[-3500:] + "\n```")
 
         @bot_client.on(events.NewMessage(pattern="/export"))
         async def export_bot_handler(event):
             if await deny_non_admin(event):
                 return
-            await event.respond("CSV экспорт доступен в веб-интерфейсе: /api/export-csv")
+            await event.respond("📤 **Экспорт CSV**\n" + DIV + "\nДоступен в веб-интерфейсе: `/api/export-csv`")
 
         @bot_client.on(events.NewMessage(pattern="/scan"))
         async def scan_handler(event):
             if await deny_non_admin(event):
                 return
             if scan_lock.locked():
-                await event.respond("Сканирование уже идет.")
+                await event.respond("⏳ Сканирование уже идёт.")
                 return
             asyncio.create_task(full_history_scan())
-            await event.respond("Сканирование истории запущено.")
+            await event.respond("🔄 **Сканирование истории запущено.**")
 
         @bot_client.on(events.NewMessage(pattern=r"/newkey(?:\s+(.+))?"))
         async def newkey_handler(event):
@@ -1743,13 +1792,18 @@ async def init_bot() -> None:
             secret = generate_access_key()
             await create_bot_key(label, secret, "viewer", None)
             link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
-            await event.respond(
-                f"🔑 **Новый ключ создан**\nМетка: `{label or '—'}`\n\n"
-                f"Ключ: `{secret}`\n\n"
-                f"Ссылка-приглашение:\n{link}\n\n"
-                "Отправьте её человеку — он откроет бота и получит доступ (только просмотр).",
-                link_preview=False,
+            body = (
+                "🔑 **Новый ключ создан**\n"
+                f"{DIV}\n"
+                f"🏷 Метка: `{label or '—'}`\n"
+                f"👁 Доступ: __только просмотр__\n\n"
+                f"🔐 Ключ:\n`{secret}`\n"
             )
+            if link:
+                body += f"\n🔗 **Ссылка-приглашение:**\n{link}\n\n_Отправьте её человеку — он откроет бота и получит доступ._"
+            else:
+                body += "\n_Бот не настроен на ссылки — передайте ключ вручную через_ `/redeem`."
+            await event.respond(body, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/keys"))
         async def keys_handler(event):
@@ -1757,12 +1811,13 @@ async def init_bot() -> None:
                 return
             keys = await list_bot_keys()
             if not keys:
-                await event.respond("Активных ключей нет. Создайте: `/newkey метка`")
+                await event.respond("🔑 **Ключи доступа**\n" + DIV + "\n📭 __Ключей нет.__\nСоздайте: `/newkey метка`")
                 return
+            await event.respond(f"🔑 **Ключи доступа** · `{len(keys)}`")
             for k in keys:
-                exp = k.get("expires_at") or "бессрочно"
+                exp = _fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
                 await event.respond(
-                    f"🔑 #{k['id']} · {k.get('label') or '—'}\n👥 {k.get('member_count', 0)} · до {exp}",
+                    f"`#{k['id']}` · **{k.get('label') or '—'}**\n👥 {k.get('member_count', 0)}  ·  ⏳ {exp}",
                     buttons=[[Button.inline("🗑 Отозвать", f"revokekey_{k['id']}".encode())]],
                 )
 
@@ -1772,18 +1827,19 @@ async def init_bot() -> None:
                 return
             members = await list_bot_members()
             if not members:
-                await event.respond("Пользователей пока нет.")
+                await event.respond("👥 **Пользователи**\n" + DIV + "\n📭 __Пока никого.__")
                 return
+            await event.respond(f"👥 **Пользователи** · `{len(members)}`")
             for m in members:
                 uname = f"@{m['tg_username']}" if m.get("tg_username") else "—"
-                badge = "🚫 заблокирован" if m.get("blocked") else "✅ активен"
-                seen = m.get("last_seen_at") or "—"
+                badge = "🚫 заблокирован" if m.get("blocked") else "🟢 активен"
+                seen = _fmt_dt(m.get("last_seen_at"))
                 if m.get("blocked"):
                     btn = Button.inline("✅ Разблокировать", f"unblockmember_{m['tg_id']}".encode())
                 else:
                     btn = Button.inline("🚫 Заблокировать", f"blockmember_{m['tg_id']}".encode())
                 await event.respond(
-                    f"👤 {m.get('name') or '—'} ({uname})\nКлюч: {m.get('key_label') or '—'} · {badge}\nПоследняя активность: {seen}",
+                    f"👤 **{m.get('name') or '—'}** ({uname})\n🔑 {m.get('key_label') or '—'}  ·  {badge}\n🕐 {seen}",
                     buttons=[[btn]],
                 )
 
@@ -1796,7 +1852,7 @@ async def init_bot() -> None:
             if key:
                 await grant_access(event, key)
                 return
-            await event.respond("🔒 Пришлите корректный ключ доступа или откройте ссылку-приглашение.")
+            await event.respond(locked_text)
 
         @bot_client.on(events.CallbackQuery())
         async def callback_handler(event):

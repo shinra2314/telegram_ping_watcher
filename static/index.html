@@ -49,6 +49,7 @@
         </div>
         <div class="actions command-actions">
           <button class="btn primary admin-only" id="scan-btn"><i data-lucide="database"></i>Скан истории</button>
+          <button class="btn admin-only" id="backfill-btn" title="Перечитать историю каналов и поймать пропущенные пинги по имени (ссылкой на профиль)"><i data-lucide="history"></i>Добрать пропущенные</button>
           <button class="btn admin-only" id="report-btn"><i data-lucide="file-text"></i>Отчет</button>
           <button class="btn" id="browser-notify-btn"><i data-lucide="bell"></i>Уведомления</button>
           <button id="btn-push-subscribe" class="btn-secondary" title="Включить браузерные уведомления">
@@ -419,6 +420,7 @@
           <button class="btn chip primary" data-settings-tab="tracking" title="Отслеживание"><i data-lucide="at-sign"></i>Трекинг</button>
           <button class="btn chip" data-settings-tab="runtime"><i data-lucide="sliders-horizontal"></i>Работа</button>
           <button class="btn chip" data-settings-tab="notifications" title="Уведомления"><i data-lucide="bell-ring"></i>Уведом.</button>
+          <button class="btn chip" data-settings-tab="botaccess" title="Доступ к боту"><i data-lucide="key-round"></i>Доступ к боту</button>
           <button class="btn chip" data-settings-tab="backups"><i data-lucide="archive"></i>Бэкапы</button>
           <button class="btn chip" data-settings-tab="health"><i data-lucide="activity"></i>Здоровье</button>
           <button class="btn chip" data-settings-tab="logs"><i data-lucide="terminal"></i>Логи</button>
@@ -550,6 +552,29 @@
               <button class="btn primary" id="save-notifications-btn"><i data-lucide="save"></i>Сохранить правила</button>
               <div class="muted" id="notifications-status"></div>
             </div>
+          </div>
+
+          <div class="panel settings-panel settings-card-wide" data-settings-section="botaccess">
+            <div class="settings-card-head">
+              <div>
+                <h2>Доступ к боту</h2>
+                <div class="section-meta" id="botaccess-meta">Ключи для друзей — только просмотр</div>
+              </div>
+              <span class="metric-icon"><i data-lucide="key-round"></i></span>
+            </div>
+            <div class="settings-form-grid compact">
+              <label class="field"><span>Метка ключа</span><input class="input" id="botkey-label" placeholder="напр. Друг Вася"></label>
+              <label class="field"><span>Срок до (необязательно)</span><input class="input" id="botkey-expires" type="datetime-local"></label>
+            </div>
+            <div class="actions settings-actions">
+              <button class="btn primary" id="create-botkey-btn"><i data-lucide="plus"></i>Создать ключ</button>
+              <button class="btn" id="refresh-botaccess-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+            </div>
+            <div id="botkey-new" class="panel" style="display:none;margin-top:.75rem"></div>
+            <h3 style="margin-top:1rem">Активные ключи</h3>
+            <div id="botkeys-list" class="muted">Загрузка...</div>
+            <h3 style="margin-top:1rem">Пользователи бота</h3>
+            <div id="botmembers-list" class="muted">Загрузка...</div>
           </div>
 
           <div class="panel settings-panel" data-settings-section="backups">

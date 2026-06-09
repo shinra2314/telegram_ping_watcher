@@ -1660,6 +1660,60 @@
       lucide.createIcons();
     }
 
+    async function loadBotAccess() {
+      const keysBox = $("botkeys-list");
+      const membersBox = $("botmembers-list");
+      if (!keysBox || !membersBox) return;
+      let data;
+      try {
+        data = await api("/api/bot/access", { silent: true });
+      } catch (e) {
+        keysBox.innerHTML = "<div class='muted'>Недоступно.</div>";
+        membersBox.innerHTML = "";
+        return;
+      }
+      const meta = $("botaccess-meta");
+      if (meta) meta.textContent = data.bot_username ? `Бот: @${esc(data.bot_username)} · только просмотр` : "Бот не настроен — ключи всё равно сохранятся";
+      const keys = data.keys || [];
+      keysBox.innerHTML = keys.length ? `<div class="backup-list">${keys.map(k => `
+        <div class="backup-item">
+          <div class="row"><strong>#${k.id} ${esc(k.label || "—")}</strong><span class="badge">👥 ${k.member_count || 0}</span><span class="badge">${k.expires_at ? "до " + fmtDate(k.expires_at) : "бессрочно"}</span></div>
+          <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
+            <code style="font-size:.75rem;word-break:break-all">${esc(k.secret)}</code>
+            <button class="btn" data-copy-link="${esc(k.share_link || "")}"><i data-lucide="link"></i>Ссылка</button>
+            <button class="btn bad" data-revoke-key="${k.id}"><i data-lucide="trash-2"></i>Отозвать</button>
+          </div>
+        </div>`).join("")}</div>` : "<div class='muted'>Ключей пока нет.</div>";
+      const members = data.members || [];
+      membersBox.innerHTML = members.length ? `<div class="backup-list">${members.map(m => `
+        <div class="backup-item">
+          <div class="row"><strong>${esc(m.name || "—")}</strong><span class="badge">${m.tg_username ? "@" + esc(m.tg_username) : "—"}</span><span class="badge ${m.blocked ? "bad" : "good"}">${m.blocked ? "заблокирован" : "активен"}</span></div>
+          <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
+            <span class="muted">ключ: ${esc(m.key_label || "—")} · ${m.last_seen_at ? fmtDate(m.last_seen_at) : "—"}</span>
+            <button class="btn ${m.blocked ? "" : "bad"}" data-block-member="${m.tg_id}" data-blocked="${m.blocked ? 1 : 0}"><i data-lucide="${m.blocked ? "user-check" : "user-x"}"></i>${m.blocked ? "Разблокировать" : "Заблокировать"}</button>
+          </div>
+        </div>`).join("")}</div>` : "<div class='muted'>Пользователей пока нет.</div>";
+      lucide.createIcons();
+    }
+
+    async function createBotKey(button) {
+      const label = ($("botkey-label").value || "").trim();
+      const rawExpires = ($("botkey-expires").value || "").trim();
+      const body = { label, expires_at: rawExpires ? new Date(rawExpires).toISOString() : null };
+      const res = await api("/api/bot/access/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), button });
+      const key = res.key || {};
+      const box = $("botkey-new");
+      box.style.display = "block";
+      box.innerHTML = `
+        <div class="row"><strong>🔑 Ключ создан</strong><span class="badge">${esc(key.label || "—")}</span></div>
+        <div style="margin:.4rem 0"><code style="font-size:.8rem;word-break:break-all">${esc(key.secret || "")}</code></div>
+        ${key.share_link ? `<div class="deadline-row" style="gap:.4rem"><a class="btn primary" href="${esc(key.share_link)}" target="_blank" rel="noopener"><i data-lucide="send"></i>Открыть ссылку</a><button class="btn" data-copy-link="${esc(key.share_link)}"><i data-lucide="copy"></i>Скопировать ссылку</button></div>` : "<div class='muted'>Бот не настроен — отправьте ключ вручную.</div>"}`;
+      $("botkey-label").value = "";
+      $("botkey-expires").value = "";
+      lucide.createIcons();
+      await loadBotAccess();
+    }
+
     async function renderSettingsHistory(container) {
       try {
         const history = await api('/api/settings/history?limit=30');
@@ -1733,6 +1787,7 @@
       const runs = await api("/api/scan-runs?limit=12");
       $("scan-runs-list").innerHTML = (runs.runs || []).map(run => `<div class="panel"><div class="row"><strong>#${run.id} ${esc(run.status)}</strong><span class="badge">${run.found || 0} найдено</span><span class="badge">${run.processed_accounts || 0}/${run.total_accounts || 0} акк.</span></div><div class="muted">${fmtDate(run.started_at)} - ${fmtDate(run.finished_at)}${run.last_error ? "<br>" + esc(run.last_error) : ""}</div></div>`).join("") || "<div class='muted'>Сканов пока нет.</div>";
       await loadBackups();
+      await loadBotAccess();
       await loadDiagnostics();
       await loadLogs();
       await loadEvents();
@@ -1874,6 +1929,12 @@
       $("scan-btn").disabled = true;
       await api("/api/scan-history", { method: "POST" });
       setTimeout(() => { $("scan-btn").disabled = false; refreshData({ silent: true, preserveScroll: true }); }, 2000);
+    });
+    $("backfill-btn").addEventListener("click", async () => {
+      if (!confirm("Перечитать историю каналов и добрать пропущенные пинги по имени? Может занять время и нагрузить аккаунты.")) return;
+      $("backfill-btn").disabled = true;
+      await api("/api/backfill-mentions", { method: "POST" });
+      setTimeout(() => { $("backfill-btn").disabled = false; refreshData({ silent: true, preserveScroll: true }); }, 2000);
     });
     $("cancel-scan-btn").addEventListener("click", async () => {
       await api("/api/scan-history/cancel", { method: "POST" });
@@ -2269,6 +2330,30 @@
     $("create-backup-btn").addEventListener("click", async () => {
       await api("/api/backups/create", { method: "POST" });
       await loadBackups();
+    });
+    $("refresh-botaccess-btn")?.addEventListener("click", loadBotAccess);
+    $("create-botkey-btn")?.addEventListener("click", (e) => createBotKey(e.currentTarget));
+    document.addEventListener("click", async (e) => {
+      const copyBtn = e.target.closest("[data-copy-link]");
+      if (copyBtn) {
+        await navigator.clipboard.writeText(copyBtn.dataset.copyLink || "");
+        showToast("Ссылка скопирована", "success");
+        return;
+      }
+      const revokeBtn = e.target.closest("[data-revoke-key]");
+      if (revokeBtn) {
+        if (!confirm("Отозвать ключ? Доступ по нему перестанет работать.")) return;
+        await api(`/api/bot/access/keys/${revokeBtn.dataset.revokeKey}/revoke`, { method: "POST", button: revokeBtn });
+        await loadBotAccess();
+        return;
+      }
+      const blockBtn = e.target.closest("[data-block-member]");
+      if (blockBtn) {
+        const blocked = blockBtn.dataset.blocked === "1";
+        await api(`/api/bot/access/members/${blockBtn.dataset.blockMember}/block`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocked: !blocked }), button: blockBtn });
+        await loadBotAccess();
+        return;
+      }
     });
     $("copy-logs-btn").addEventListener("click", () => navigator.clipboard.writeText($("logs-box").textContent));
     $("export-json-btn").addEventListener("click", async () => {

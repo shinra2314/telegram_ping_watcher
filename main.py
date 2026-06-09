@@ -18,6 +18,7 @@ from typing import Any, Optional
 import aiosqlite
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from pydantic import BaseModel
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -92,6 +93,15 @@ from database import (
     save_push_subscription,
     delete_push_subscription,
     get_push_subscriptions,
+    create_bot_key,
+    list_bot_keys,
+    get_bot_key_by_secret,
+    revoke_bot_key,
+    upsert_bot_member,
+    get_bot_member,
+    list_bot_members,
+    touch_bot_member,
+    set_bot_member_blocked,
     search_pings_fts,
     seed_giveaway_candidates_from_pings,
     set_setting,
@@ -140,7 +150,7 @@ from pulse_desk.jobs import runtime_health, start_supervised_task, start_tracked
 from pulse_desk.live import publish_live_event, register_dashboard_invalidator
 from pulse_desk.push import generate_vapid_keys, send_push, vapid_public_key_b64
 from pulse_desk.scan import channel_sweep_start_id, normalize_recent_edit_scan_limit, normalize_scan_history_limit
-from pulse_desk.security import is_weak_token, mask_secret
+from pulse_desk.security import generate_access_key, is_weak_token, mask_secret
 from pulse_desk.statuses import ACTION_STATUSES, GIVEAWAY_STATUSES, PING_STATUSES
 from pulse_desk.telegram_errors import (
     AUTH_KEY_DUPLICATED_STATUS,
@@ -201,6 +211,7 @@ BOT_TOKEN = settings.bot_token
 clients = state.clients
 bot_client: Optional[TelegramClient] = None
 bot_id: Optional[int] = None
+bot_username: Optional[str] = None
 connected_user_ids = state.connected_user_ids
 pending_auths = state.pending_auths
 accounts_state = state.accounts_state
@@ -230,6 +241,8 @@ state.ping_usernames = load_usernames()
 ping_usernames = state.ping_usernames
 state.ping_regex = build_ping_regex(ping_usernames)
 ping_regex = state.ping_regex
+ping_user_ids = state.ping_user_ids
+ping_user_ids_resolved = state.ping_user_ids_resolved
 
 WIN_KEYWORDS = [item.strip() for item in settings.win_keywords.split(",") if item.strip()]
 GIVEAWAY_KEYWORDS = [item.strip() for item in settings.giveaway_keywords.split(",") if item.strip()]
@@ -718,6 +731,9 @@ def apply_tracking_settings(values: dict[str, Any]) -> dict[str, Any]:
         usernames = load_usernames()
     ping_usernames = usernames
     ping_regex = build_ping_regex(ping_usernames)
+    # Tracked set changed: drop resolved ids so they re-resolve for the new usernames.
+    ping_user_ids.clear()
+    ping_user_ids_resolved.clear()
     return {"usernames": ping_usernames}
 
 
@@ -1120,6 +1136,26 @@ async def get_message_chat_type(client: TelegramClient, message: Any) -> str:
     return "unknown"
 
 
+async def resolve_ping_user_ids(client: TelegramClient) -> None:
+    """Resolve tracked usernames to user ids so text-mentions (name links) match.
+
+    Channels can ping a user by their display name instead of @username; those
+    arrive as MessageEntityMentionName carrying a user_id, not text. Each username
+    is looked up at most once per process to avoid repeated network calls.
+    """
+    pending = [u for u in ping_usernames if u.lower() not in ping_user_ids_resolved]
+    for username in pending:
+        ping_user_ids_resolved.add(username.lower())
+        try:
+            entity = await client.get_entity(username)
+        except Exception:
+            logger.debug("Could not resolve tracked username %s to user id", username, exc_info=True)
+            continue
+        uid = getattr(entity, "id", None)
+        if uid is not None:
+            ping_user_ids[int(uid)] = username
+
+
 async def process_ping_message(
     client: TelegramClient,
     message: Any,
@@ -1131,7 +1167,8 @@ async def process_ping_message(
     chat_type = await get_message_chat_type(client, message)
     if chat_type != "channel":
         return None
-    record = await message_to_record(client, message, ping_regex, ping_usernames)
+    await resolve_ping_user_ids(client)
+    record = await message_to_record(client, message, ping_regex, ping_usernames, tracked_ids=ping_user_ids or None)
     if not record:
         return None
     record["chat_type"] = chat_type
@@ -1181,7 +1218,7 @@ async def process_ping_message(
         )
     if notify and existing is None:
         await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
-    if existing is None and ping_id:
+    if notify and existing is None and ping_id:
         saved_record = {**record, "id": ping_id}
         asyncio.create_task(_fan_push_ping(saved_record))
     return int(ping_id) if existing is None else None
@@ -1353,38 +1390,10 @@ async def init_bot() -> None:
         await bot_client.start(bot_token=BOT_TOKEN)
         bot_me = await bot_client.get_me()
         bot_id = bot_me.id
+        bot_username = bot_me.username
         logger.info("Bot started: @%s", bot_me.username)
 
-        @bot_client.on(events.NewMessage(pattern="/start"))
-        async def start_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
-                return
-            await event.respond(
-                "**Pulse Desk Bot**\n\n"
-                "/stats - статистика\n"
-                "/status - состояние аккаунтов\n"
-                "/latest - последние упоминания\n"
-                "/search <текст> - поиск\n"
-                "/market - курсы\n"
-                "/logs - последние логи\n"
-                "/export - CSV выгрузка\n"
-                "/scan - скан истории\n"
-                "/ping - проверка связи"
-            )
-
-        @bot_client.on(events.NewMessage(pattern="/stats"))
-        async def stats_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
-                return
-            analytics = await build_analytics()
-            await event.respond(
-                "**Статистика Pulse**\n\n"
-                f"Всего записей: `{analytics['total_pings']}`\n"
-                f"Аккаунтов онлайн: `{analytics['accounts_online']}`\n"
-                f"Новых: `{analytics['new_pings']}`\n"
-                f"Избранных: `{analytics['favorites']}`"
-            )
-
+        # ---- access control -------------------------------------------------
         def _bot_admin_chat_ids() -> set[int]:
             ids: set[int] = set()
             if ADMIN_ID:
@@ -1400,16 +1409,79 @@ async def init_bot() -> None:
                             pass
             return ids
 
-        def _is_bot_admin(sender_id: int) -> bool:
-            allowed = _bot_admin_chat_ids()
-            if not allowed:
-                return True  # No restrictions configured — open
-            return sender_id in allowed
+        async def bot_role(sender_id: int) -> Optional[str]:
+            """Resolve a Telegram user to 'admin', 'viewer', or None (no access)."""
+            if sender_id in _bot_admin_chat_ids():
+                return "admin"
+            member = await get_bot_member(sender_id)
+            if member and not member.get("blocked"):
+                await touch_bot_member(sender_id)
+                return member.get("role") or "viewer"
+            return None
 
-        @bot_client.on(events.NewMessage(pattern="/status"))
-        async def status_handler(event):
-            if not _is_bot_admin(event.sender_id):
-                return
+        async def deny_non_admin(event) -> bool:
+            """True if the sender must be blocked from an owner-only action."""
+            role = await bot_role(event.sender_id)
+            if role is None:
+                return True  # stranger — ignore silently
+            if role != "admin":
+                await event.respond("⛔ Эта команда доступна только владельцу.")
+                return True
+            return False
+
+        def main_menu_buttons(role: str) -> list[list[Button]]:
+            rows = [
+                [Button.inline("📊 Статистика", b"menu_stats"), Button.inline("🎁 Розыгрыши", b"menu_giveaways")],
+                [Button.inline("🕐 Последние", b"menu_recent"), Button.inline("💹 Курсы", b"menu_market")],
+                [Button.inline("🛰 Статус", b"menu_status"), Button.inline("❓ Помощь", b"menu_help")],
+            ]
+            if role == "admin":
+                rows.append([
+                    Button.inline("🔑 Ключи", b"menu_keys"),
+                    Button.inline("🔄 Скан", b"menu_scan"),
+                    Button.inline("📜 Логи", b"menu_logs"),
+                ])
+            return rows
+
+        def help_text(role: str) -> str:
+            lines = [
+                "**Pulse Desk Bot**",
+                "",
+                "/menu — главное меню",
+                "/stats — статистика",
+                "/status — состояние аккаунтов",
+                "/giveaways — розыгрыши",
+                "/recent [N] — последние упоминания",
+                "/latest — последние 5",
+                "/search <текст> — поиск",
+                "/market — курсы",
+                "/ping — проверка связи",
+            ]
+            if role == "admin":
+                lines += [
+                    "",
+                    "**Владелец:**",
+                    "/scan — скан истории",
+                    "/logs — последние логи",
+                    "/export — CSV выгрузка",
+                    "/newkey [метка] — создать ключ доступа",
+                    "/keys — список ключей",
+                    "/members — список пользователей",
+                ]
+            return "\n".join(lines)
+
+        # ---- shared renderers (reused by slash commands and menu callbacks) -
+        async def render_stats() -> str:
+            analytics = await build_analytics()
+            return (
+                "**📊 Статистика Pulse**\n\n"
+                f"Всего записей: `{analytics['total_pings']}`\n"
+                f"Аккаунтов онлайн: `{analytics['accounts_online']}`\n"
+                f"Новых: `{analytics['new_pings']}`\n"
+                f"Избранных: `{analytics['favorites']}`"
+            )
+
+        async def render_status() -> str:
             accounts_online = sum(1 for acc in list(accounts_state.values()) if acc.get("status") == "online")
             account_lines = [f"`{a.get('session_name', '?')}`: {a.get('status', 'unknown')}" for a in list(accounts_state.values())]
             try:
@@ -1420,8 +1492,8 @@ async def init_bot() -> None:
             uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
             running_jobs = sorted(name for name, task in state.background_tasks.items() if not task.done())
             last_scan = state.last_scan_finished_at.isoformat(timespec="seconds") if state.last_scan_finished_at else "—"
-            await event.respond(
-                f"**Статус Pulse Desk v{APP_VERSION}**\n\n"
+            return (
+                f"**🛰 Статус Pulse Desk v{APP_VERSION}**\n\n"
                 f"⏱ Uptime: `{uptime_str}`\n"
                 f"💾 БД: `{db_size_mb:.1f} MB`\n"
                 f"🛰 Аккаунты: `{accounts_online}/{len(accounts_state)}` online\n"
@@ -1430,14 +1502,11 @@ async def init_bot() -> None:
                 + "\n".join(account_lines or ["Нет аккаунтов"])
             )
 
-        @bot_client.on(events.NewMessage(pattern="/giveaways"))
-        async def giveaways_handler(event):
-            if not _is_bot_admin(event.sender_id):
-                return
+        async def render_giveaways() -> str:
             board = await get_giveaway_board(limit=10)
             buckets = board.get("buckets") or {}
             stats = board.get("stats") or {}
-            lines = ["**Активные розыгрыши:**", ""]
+            lines = ["**🎁 Активные розыгрыши:**", ""]
             lines.append(f"⏳ Ожидание: `{stats.get('waiting', 0)}` · 🎁 Призы: `{stats.get('to_claim', 0)}` · ❗ Срочные: `{stats.get('urgent', 0)}`")
             urgent = buckets.get("urgent") or []
             for row in urgent[:5]:
@@ -1446,31 +1515,135 @@ async def init_bot() -> None:
                 lines.append(f"⚠️ `{deadline}` · {chat}\n{(row.get('text') or '')[:120]}")
             if not urgent:
                 lines.append("\nСрочных розыгрышей нет.")
-            await event.respond("\n".join(lines), link_preview=False)
+            return "\n".join(lines)
+
+        async def render_recent(n: int = 5) -> str:
+            rows = await get_pings(limit=n)
+            if not rows:
+                return "Упоминаний пока нет."
+            result = [f"**🕐 Последние {len(rows)}:**"]
+            for row in rows:
+                priority = row.get("priority_label") or ""
+                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "·"
+                result.append(f"{badge} `{row['detected_at']}` | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
+            return "\n\n".join(result)
+
+        async def render_market() -> str:
+            market = await get_market_history(limit=1)
+            if not market:
+                return "Данные рынка пока недоступны."
+            m = market[0]
+            return (
+                "**💹 Курсы:**\n\n"
+                f"BTC: `${m.get('bitcoin', {}).get('usd', 0):,}`\n"
+                f"ETH: `${m.get('ethereum', {}).get('usd', 0):,}`\n"
+                f"TON: `${m.get('the-open-network', {}).get('usd', 0):.3f}`\n"
+                f"SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
+            )
+
+        async def render_keys_text() -> str:
+            keys = await list_bot_keys()
+            if not keys:
+                return "Активных ключей нет. Создайте: `/newkey метка`"
+            lines = ["**🔑 Ключи доступа:**", ""]
+            for k in keys:
+                exp = k.get("expires_at") or "бессрочно"
+                lines.append(f"#{k['id']} · {k.get('label') or '—'} · 👥 {k.get('member_count', 0)} · до {exp}")
+            return "\n".join(lines)
+
+        # ---- redeem / onboarding -------------------------------------------
+        async def grant_access(event, key: dict) -> None:
+            sender = await event.get_sender()
+            uname = getattr(sender, "username", "") or ""
+            name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
+            role = key.get("role") or "viewer"
+            await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
+            await event.respond(
+                "✅ **Доступ открыт!**\nДобро пожаловать в Pulse Desk. Выберите раздел:",
+                buttons=main_menu_buttons(role),
+            )
+
+        @bot_client.on(events.NewMessage(pattern=r"/start(?:\s+(\S+))?"))
+        async def start_handler(event):
+            payload = (event.pattern_match.group(1) or "").strip()
+            if payload:
+                key = await get_bot_key_by_secret(payload)
+                if key:
+                    await grant_access(event, key)
+                    return
+                await event.respond("❌ Ключ недействителен или отозван.")
+                return
+            role = await bot_role(event.sender_id)
+            if role is None:
+                await event.respond("🔒 Бот закрыт. Пришлите ключ доступа, выданный владельцем, или откройте ссылку-приглашение.")
+                return
+            await event.respond("**Pulse Desk Bot**\nВыберите раздел:", buttons=main_menu_buttons(role))
+
+        @bot_client.on(events.NewMessage(pattern=r"/redeem(?:\s+(\S+))?"))
+        async def redeem_handler(event):
+            payload = (event.pattern_match.group(1) or "").strip()
+            if not payload:
+                await event.respond("Использование: `/redeem <ключ>`")
+                return
+            key = await get_bot_key_by_secret(payload)
+            if not key:
+                await event.respond("❌ Ключ недействителен или отозван.")
+                return
+            await grant_access(event, key)
+
+        @bot_client.on(events.NewMessage(pattern="/menu"))
+        async def menu_handler(event):
+            role = await bot_role(event.sender_id)
+            if role is None:
+                await event.respond("🔒 Пришлите ключ доступа.")
+                return
+            await event.respond("Главное меню:", buttons=main_menu_buttons(role))
+
+        @bot_client.on(events.NewMessage(pattern="/help"))
+        async def help_handler(event):
+            role = await bot_role(event.sender_id)
+            if role is None:
+                return
+            await event.respond(help_text(role))
+
+        @bot_client.on(events.NewMessage(pattern="/stats"))
+        async def stats_handler(event):
+            if await bot_role(event.sender_id) is None:
+                return
+            await event.respond(await render_stats())
+
+        @bot_client.on(events.NewMessage(pattern="/status"))
+        async def status_handler(event):
+            if await bot_role(event.sender_id) is None:
+                return
+            await event.respond(await render_status())
+
+        @bot_client.on(events.NewMessage(pattern="/giveaways"))
+        async def giveaways_handler(event):
+            if await bot_role(event.sender_id) is None:
+                return
+            await event.respond(await render_giveaways(), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/recent"))
         async def recent_handler(event):
-            if not _is_bot_admin(event.sender_id):
+            if await bot_role(event.sender_id) is None:
                 return
             parts = (event.message.text or "").split(" ", 1)
             try:
                 n = max(1, min(20, int(parts[1]))) if len(parts) > 1 else 5
             except (ValueError, IndexError):
                 n = 5
-            rows = await get_pings(limit=n)
-            if not rows:
-                await event.respond("Упоминаний пока нет.")
+            await event.respond(await render_recent(n), link_preview=False)
+
+        @bot_client.on(events.NewMessage(pattern="/latest"))
+        async def latest_handler(event):
+            if await bot_role(event.sender_id) is None:
                 return
-            result = [f"**Последние {len(rows)}:**"]
-            for row in rows:
-                priority = row.get("priority_label") or ""
-                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "·"
-                result.append(f"{badge} `{row['detected_at']}` | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
-            await event.respond("\n\n".join(result), link_preview=False)
+            await event.respond(await render_recent(5), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/search"))
         async def search_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if await bot_role(event.sender_id) is None:
                 return
             parts = event.message.text.split(" ", 1)
             if len(parts) < 2:
@@ -1480,44 +1653,26 @@ async def init_bot() -> None:
             if not rows:
                 await event.respond("Ничего не найдено.")
                 return
-            result = ["**Результаты поиска:**"]
-            for row in rows:
-                result.append(f"{row['detected_at']} | {row['chat']}\n{row['text'][:160]}\n{row['link']}")
-            await event.respond("\n\n".join(result), link_preview=False)
-
-        @bot_client.on(events.NewMessage(pattern="/latest"))
-        async def latest_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
-                return
-            rows = await get_pings(limit=5)
-            if not rows:
-                await event.respond("Упоминаний пока нет.")
-                return
-            result = ["**Последние упоминания:**"]
+            result = ["**🔎 Результаты поиска:**"]
             for row in rows:
                 result.append(f"{row['detected_at']} | {row['chat']}\n{(row.get('text') or '')[:160]}\n{row.get('link') or ''}")
             await event.respond("\n\n".join(result), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
         async def market_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if await bot_role(event.sender_id) is None:
                 return
-            market = await get_market_history(limit=1)
-            if not market:
-                await event.respond("Данные рынка пока недоступны.")
+            await event.respond(await render_market())
+
+        @bot_client.on(events.NewMessage(pattern="/ping"))
+        async def ping_handler(event):
+            if await bot_role(event.sender_id) is None:
                 return
-            m = market[0]
-            await event.respond(
-                "**Курсы:**\n\n"
-                f"BTC: `${m.get('bitcoin', {}).get('usd', 0):,}`\n"
-                f"ETH: `${m.get('ethereum', {}).get('usd', 0):,}`\n"
-                f"TON: `${m.get('the-open-network', {}).get('usd', 0):.3f}`\n"
-                f"SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
-            )
+            await event.respond("Понг.")
 
         @bot_client.on(events.NewMessage(pattern="/logs"))
         async def logs_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if await deny_non_admin(event):
                 return
             if not LOG_FILE.exists():
                 await event.respond("Логов пока нет.")
@@ -1527,14 +1682,13 @@ async def init_bot() -> None:
 
         @bot_client.on(events.NewMessage(pattern="/export"))
         async def export_bot_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if await deny_non_admin(event):
                 return
-            response = await export_csv()
             await event.respond("CSV экспорт доступен в веб-интерфейсе: /api/export-csv")
 
         @bot_client.on(events.NewMessage(pattern="/scan"))
         async def scan_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+            if await deny_non_admin(event):
                 return
             if scan_lock.locked():
                 await event.respond("Сканирование уже идет.")
@@ -1542,18 +1696,136 @@ async def init_bot() -> None:
             asyncio.create_task(full_history_scan())
             await event.respond("Сканирование истории запущено.")
 
-        @bot_client.on(events.NewMessage(pattern="/ping"))
-        async def ping_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
+        @bot_client.on(events.NewMessage(pattern=r"/newkey(?:\s+(.+))?"))
+        async def newkey_handler(event):
+            if await deny_non_admin(event):
                 return
-            await event.respond("Понг.")
+            label = (event.pattern_match.group(1) or "").strip()
+            secret = generate_access_key()
+            await create_bot_key(label, secret, "viewer", None)
+            link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
+            await event.respond(
+                f"🔑 **Новый ключ создан**\nМетка: `{label or '—'}`\n\n"
+                f"Ключ: `{secret}`\n\n"
+                f"Ссылка-приглашение:\n{link}\n\n"
+                "Отправьте её человеку — он откроет бота и получит доступ (только просмотр).",
+                link_preview=False,
+            )
+
+        @bot_client.on(events.NewMessage(pattern="/keys"))
+        async def keys_handler(event):
+            if await deny_non_admin(event):
+                return
+            keys = await list_bot_keys()
+            if not keys:
+                await event.respond("Активных ключей нет. Создайте: `/newkey метка`")
+                return
+            for k in keys:
+                exp = k.get("expires_at") or "бессрочно"
+                await event.respond(
+                    f"🔑 #{k['id']} · {k.get('label') or '—'}\n👥 {k.get('member_count', 0)} · до {exp}",
+                    buttons=[[Button.inline("🗑 Отозвать", f"revokekey_{k['id']}".encode())]],
+                )
+
+        @bot_client.on(events.NewMessage(pattern="/members"))
+        async def members_handler(event):
+            if await deny_non_admin(event):
+                return
+            members = await list_bot_members()
+            if not members:
+                await event.respond("Пользователей пока нет.")
+                return
+            for m in members:
+                uname = f"@{m['tg_username']}" if m.get("tg_username") else "—"
+                badge = "🚫 заблокирован" if m.get("blocked") else "✅ активен"
+                seen = m.get("last_seen_at") or "—"
+                if m.get("blocked"):
+                    btn = Button.inline("✅ Разблокировать", f"unblockmember_{m['tg_id']}".encode())
+                else:
+                    btn = Button.inline("🚫 Заблокировать", f"blockmember_{m['tg_id']}".encode())
+                await event.respond(
+                    f"👤 {m.get('name') or '—'} ({uname})\nКлюч: {m.get('key_label') or '—'} · {badge}\nПоследняя активность: {seen}",
+                    buttons=[[btn]],
+                )
+
+        @bot_client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.message and e.message.text and not e.message.text.startswith("/"))))
+        async def freeform_handler(event):
+            # Treat a bare message as a possible access key for non-members.
+            if await bot_role(event.sender_id) is not None:
+                return
+            key = await get_bot_key_by_secret((event.message.text or "").strip())
+            if key:
+                await grant_access(event, key)
+                return
+            await event.respond("🔒 Пришлите корректный ключ доступа или откройте ссылку-приглашение.")
 
         @bot_client.on(events.CallbackQuery())
         async def callback_handler(event):
-            if ADMIN_ID and event.sender_id != ADMIN_ID:
-                await event.answer("Доступ запрещен", alert=True)
-                return
             data = event.data.decode("utf-8")
+            role = await bot_role(event.sender_id)
+            if role is None:
+                await event.answer("Доступ запрещён", alert=True)
+                return
+
+            # ---- menu navigation (any authenticated role) ----
+            if data == "menu_help":
+                await event.edit(help_text(role), buttons=main_menu_buttons(role))
+                return
+            if data == "menu_stats":
+                await event.edit(await render_stats(), buttons=main_menu_buttons(role))
+                return
+            if data == "menu_status":
+                await event.edit(await render_status(), buttons=main_menu_buttons(role))
+                return
+            if data == "menu_giveaways":
+                await event.edit(await render_giveaways(), buttons=main_menu_buttons(role), link_preview=False)
+                return
+            if data == "menu_recent":
+                await event.edit(await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
+                return
+            if data == "menu_market":
+                await event.edit(await render_market(), buttons=main_menu_buttons(role))
+                return
+
+            # ---- owner-only menu + actions ----
+            admin_prefixes = ("revokekey_", "blockmember_", "unblockmember_", "fav_", "read_", "gconfirm_", "gskip_")
+            if data in ("menu_keys", "menu_scan", "menu_logs") or data.startswith(admin_prefixes):
+                if role != "admin":
+                    await event.answer("Только владелец", alert=True)
+                    return
+
+            if data == "menu_keys":
+                await event.edit(await render_keys_text(), buttons=main_menu_buttons(role))
+                return
+            if data == "menu_scan":
+                if scan_lock.locked():
+                    await event.answer("Скан уже идёт")
+                else:
+                    asyncio.create_task(full_history_scan())
+                    await event.answer("Скан запущен")
+                return
+            if data == "menu_logs":
+                if not LOG_FILE.exists():
+                    await event.answer("Логов нет")
+                    return
+                lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+                await event.edit("**Последние логи:**\n\n`" + "\n".join(lines)[-3500:] + "`", buttons=main_menu_buttons(role))
+                return
+            if data.startswith("revokekey_"):
+                await revoke_bot_key(int(data.split("_", 1)[1]))
+                await event.answer("Ключ отозван")
+                await event.edit(await render_keys_text(), buttons=main_menu_buttons(role))
+                return
+            if data.startswith("blockmember_"):
+                await set_bot_member_blocked(int(data.split("_", 1)[1]), True)
+                await event.answer("Пользователь заблокирован")
+                return
+            if data.startswith("unblockmember_"):
+                await set_bot_member_blocked(int(data.split("_", 1)[1]), False)
+                await event.answer("Пользователь разблокирован")
+                return
+
+            # ---- legacy data-mutating actions (owner only, gated above) ----
             if data.startswith("fav_"):
                 await toggle_favorite(int(data.split("_", 1)[1]))
                 await event.answer("Избранное обновлено")
@@ -1576,6 +1848,39 @@ async def init_bot() -> None:
                 await record_giveaway_action(ping_id, "skip", "skipped", "telegram_bot")
                 await event.answer("Skipped")
                 await event.delete()
+
+        # ---- register Telegram command menus (best-effort) ------------------
+        try:
+            from telethon.tl.functions.bots import SetBotCommandsRequest
+            from telethon.tl.types import BotCommand, BotCommandScopeDefault, BotCommandScopePeer
+            viewer_cmds = [
+                BotCommand("menu", "Главное меню"),
+                BotCommand("stats", "Статистика"),
+                BotCommand("status", "Состояние аккаунтов"),
+                BotCommand("giveaways", "Розыгрыши"),
+                BotCommand("recent", "Последние упоминания"),
+                BotCommand("latest", "Последние 5"),
+                BotCommand("search", "Поиск"),
+                BotCommand("market", "Курсы"),
+                BotCommand("ping", "Проверка связи"),
+            ]
+            await bot_client(SetBotCommandsRequest(scope=BotCommandScopeDefault(), lang_code="", commands=viewer_cmds))
+            if ADMIN_ID:
+                admin_cmds = viewer_cmds + [
+                    BotCommand("scan", "Скан истории"),
+                    BotCommand("logs", "Логи"),
+                    BotCommand("export", "CSV выгрузка"),
+                    BotCommand("newkey", "Создать ключ"),
+                    BotCommand("keys", "Ключи доступа"),
+                    BotCommand("members", "Пользователи"),
+                ]
+                await bot_client(SetBotCommandsRequest(
+                    scope=BotCommandScopePeer(peer=await bot_client.get_input_entity(int(ADMIN_ID))),
+                    lang_code="",
+                    commands=admin_cmds,
+                ))
+        except Exception:
+            logger.debug("Could not set bot command menu", exc_info=True)
     except Exception:
         logger.exception("Bot startup failed")
 
@@ -2546,6 +2851,18 @@ async def start_scan(background_tasks: BackgroundTasks):
     return {"status": "ok", "message": "Сканирование запущено"}
 
 
+@app.post("/api/backfill-mentions", dependencies=[Depends(require_admin)])
+async def start_mention_backfill(background_tasks: BackgroundTasks, limit: int = 1000):
+    if not clients:
+        return {"status": "error", "message": "Нет подключенных аккаунтов"}
+    if scan_lock.locked():
+        return {"status": "running", "message": "Сканирование уже идет"}
+    per_channel_limit = normalize_scan_history_limit(limit)
+    background_tasks.add_task(backfill_name_mention_scan, per_channel_limit)
+    scope = "вся история" if per_channel_limit <= 0 else f"до {per_channel_limit} сообщений на канал"
+    return {"status": "ok", "message": f"Backfill упоминаний по имени запущен ({scope})"}
+
+
 @app.post("/api/scan-history/cancel", dependencies=[Depends(require_admin)])
 async def cancel_scan():
     if not scan_lock.locked():
@@ -2864,6 +3181,153 @@ async def full_history_scan() -> None:
             scan_cancel_event.clear()
 
 
+async def backfill_account_name_mentions(client: TelegramClient, per_channel_limit: int) -> int:
+    """Re-read one account's channel history without checkpoints or @username
+    search, so pings delivered as text-mentions (name links) are re-evaluated.
+    Messages already stored are skipped; historical hits raise no notifications.
+    """
+    session_name = getattr(client, "_session_name_custom", "unknown")
+    found = 0
+    iter_limit = None if per_channel_limit <= 0 else per_channel_limit
+    try:
+        me = await client.get_me()
+        user_label = me.username or str(me.id)
+        scan_status["current_account"] = user_label
+        await resolve_ping_user_ids(client)
+        dialogs = await list_broadcast_channel_dialogs(client)
+        scan_status["total_channels"] = int(scan_status.get("total_channels") or 0) + len(dialogs)
+        scan_status["total_usernames"] = int(scan_status.get("total_usernames") or 0) + len(dialogs)
+        for dialog in dialogs:
+            if scan_cancel_event.is_set():
+                break
+            entity = dialog.entity
+            chat_id = getattr(entity, "id", None)
+            if chat_id is None:
+                continue
+            scan_status["current_channel"] = getattr(dialog, "name", None) or str(chat_id)
+            try:
+                async for message in client.iter_messages(entity, limit=iter_limit):
+                    if scan_cancel_event.is_set():
+                        break
+                    if await get_ping_by_message_ref(chat_id, getattr(message, "id", None)):
+                        continue
+                    ping_id = await process_ping_message(
+                        client,
+                        message,
+                        account_label=user_label,
+                        notify=False,
+                        source="mention-backfill",
+                    )
+                    if ping_id:
+                        found += 1
+                        scan_status["found"] += 1
+            except FloodWaitError as exc:
+                logger.warning("Flood wait during mention backfill in %s: %s seconds", chat_id, exc.seconds)
+                scan_status["last_error"] = f"Flood wait {exc.seconds}s in mention backfill"
+                await record_app_event("WARNING", "scan", "Telegram flood wait during mention backfill", {"chat_id": chat_id, "seconds": exc.seconds})
+                wait = flood_wait_seconds(exc.seconds)
+                mark_account_cooldown(session_name, wait)
+                await asyncio.sleep(wait)
+            except Exception as exc:
+                if is_auth_key_duplicated(exc):
+                    scan_status["last_error"] = auth_key_duplicated_message(session_name)
+                    scan_cancel_event.set()
+                    await mark_auth_key_duplicated(session_name, client, exc)
+                    break
+                scan_status["last_error"] = str(exc)
+                await record_app_event("WARNING", "scan", "Mention backfill failed", {"session": session_name, "chat_id": chat_id, "error": str(exc)})
+                logger.warning("Mention backfill failed for %s in %s: %s", chat_id, session_name, exc)
+            finally:
+                scan_status["processed_usernames"] += 1
+                if scan_status.get("scan_run_id"):
+                    await update_scan_run(
+                        int(scan_status["scan_run_id"]),
+                        processed_usernames=scan_status["processed_usernames"],
+                        found=scan_status["found"],
+                        last_error=scan_status.get("last_error"),
+                    )
+    except Exception as exc:
+        if is_auth_key_duplicated(exc):
+            scan_status["last_error"] = auth_key_duplicated_message(session_name)
+            await mark_auth_key_duplicated(session_name, client, exc)
+        else:
+            scan_status["last_error"] = str(exc)
+            await record_app_event("ERROR", "scan", "Mention backfill account failed", {"session": session_name, "error": str(exc)})
+            logger.exception("Mention backfill account failed: %s", session_name)
+    return found
+
+
+async def backfill_name_mention_scan(per_channel_limit: int = 1000) -> None:
+    """Surface pings missed before text-mention detection existed by re-reading
+    channel history across all accounts. Reuses the scan lock and status so the
+    dashboard shows progress and the existing cancel button works.
+    """
+    if scan_lock.locked():
+        logger.info("Mention backfill skipped: a scan is already running.")
+        return
+    async with scan_lock:
+        scan_cancel_event.clear()
+        scan_run_id = await start_scan_run(len(clients), 0)
+        scan_status.update({
+            "running": True,
+            "started_at": now_iso(),
+            "finished_at": None,
+            "current_account": None,
+            "current_username": None,
+            "current_channel": None,
+            "total_accounts": len(clients),
+            "processed_accounts": 0,
+            "total_channels": 0,
+            "total_usernames": 0,
+            "processed_usernames": 0,
+            "found": 0,
+            "fast_channels": 0,
+            "targeted_channels": 0,
+            "edit_sweep_messages": 0,
+            "scan_strategy": "name-mention-backfill",
+            "history_limit": per_channel_limit,
+            "last_error": None,
+            "scan_run_id": scan_run_id,
+            "cancel_requested": False,
+        })
+        await record_app_event("INFO", "scan", "Name-mention backfill started", {"scan_run_id": scan_run_id, "per_channel_limit": per_channel_limit})
+        try:
+            for client in list(clients):
+                if scan_cancel_event.is_set():
+                    break
+                await backfill_account_name_mentions(client, per_channel_limit)
+                scan_status["processed_accounts"] += 1
+                await update_scan_run(
+                    scan_run_id,
+                    processed_accounts=scan_status["processed_accounts"],
+                    processed_usernames=scan_status["processed_usernames"],
+                    found=scan_status["found"],
+                    last_error=scan_status.get("last_error"),
+                )
+        finally:
+            status_value = "cancelled" if scan_cancel_event.is_set() else "finished"
+            scan_status.update({
+                "running": False,
+                "finished_at": now_iso(),
+                "current_account": None,
+                "current_username": None,
+                "current_channel": None,
+                "cancel_requested": scan_cancel_event.is_set(),
+            })
+            await update_scan_run(
+                scan_run_id,
+                status=status_value,
+                finished_at=scan_status["finished_at"],
+                processed_accounts=scan_status["processed_accounts"],
+                processed_usernames=scan_status["processed_usernames"],
+                found=scan_status["found"],
+                last_error=scan_status.get("last_error"),
+                cancel_requested=1 if scan_cancel_event.is_set() else 0,
+            )
+            await record_app_event("INFO", "scan", f"Name-mention backfill {status_value}", {"scan_run_id": scan_run_id, "found": scan_status["found"]})
+            scan_cancel_event.clear()
+
+
 @app.get("/api/accounts", dependencies=[Depends(require_admin)])
 async def get_accounts():
     known = {name: {"session_name": name, "status": "known"} for name in SESSION_NAMES}
@@ -2875,6 +3339,52 @@ async def get_accounts():
 async def disconnect_account_api(session_name: str):
     disconnected = await disconnect_account(session_name)
     return {"status": "ok" if disconnected else "not_found"}
+
+
+class BotKeyCreateRequest(BaseModel):
+    label: str = ""
+    expires_at: Optional[str] = None
+
+
+class BotMemberBlockRequest(BaseModel):
+    blocked: bool = True
+
+
+def _bot_share_link(secret: str) -> str:
+    return f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
+
+
+@app.get("/api/bot/access", dependencies=[Depends(require_admin)])
+async def get_bot_access():
+    keys = await list_bot_keys()
+    for key in keys:
+        key["share_link"] = _bot_share_link(key.get("secret", ""))
+    members = await list_bot_members()
+    return {"keys": keys, "members": members, "bot_username": bot_username}
+
+
+@app.post("/api/bot/access/keys", dependencies=[Depends(require_admin)])
+async def create_bot_access_key(data: BotKeyCreateRequest):
+    secret = generate_access_key()
+    expires_at = (data.expires_at or "").strip() or None
+    key = await create_bot_key(data.label.strip(), secret, "viewer", expires_at)
+    key["share_link"] = _bot_share_link(secret)
+    await record_app_event("INFO", "bot", "Bot access key created", {"label": key.get("label"), "id": key.get("id")})
+    return {"status": "ok", "key": key}
+
+
+@app.post("/api/bot/access/keys/{key_id}/revoke", dependencies=[Depends(require_admin)])
+async def revoke_bot_access_key(key_id: int):
+    await revoke_bot_key(key_id)
+    await record_app_event("INFO", "bot", "Bot access key revoked", {"id": key_id})
+    return {"status": "ok"}
+
+
+@app.post("/api/bot/access/members/{tg_id}/block", dependencies=[Depends(require_admin)])
+async def block_bot_access_member(tg_id: int, data: BotMemberBlockRequest):
+    await set_bot_member_blocked(tg_id, data.blocked)
+    await record_app_event("INFO", "bot", "Bot member block toggled", {"tg_id": tg_id, "blocked": data.blocked})
+    return {"status": "ok"}
 
 
 @app.get("/api/settings/usernames", dependencies=[Depends(require_admin)])

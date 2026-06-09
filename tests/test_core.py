@@ -166,7 +166,7 @@ class CoreParsingTests(unittest.TestCase):
     def test_default_usernames_match_requested_targets(self):
         self.assertEqual(
             list(DEFAULT_USERNAMES),
-            ["alga_kazakhst2n", "w3v8f0rm", "Fjfjfjfjds", "Timofey02513", "MuverGT", "xdfusybau", "davifd23", "fsdfsdfdsg34"],
+            ["alga_kazakhst2n", "w3v8f0rm", "Fjfjfjfjds", "Timofey02513", "MuverGT", "xdfusybau", "davifd23", "fsdfsdfdsg34", "sakmangg69"],
         )
 
     def test_scan_history_limit_zero_means_unlimited(self):
@@ -200,6 +200,23 @@ class CoreParsingTests(unittest.TestCase):
         regex = build_ping_regex(["Alpha", "Beta"])
         message = SimpleNamespace(raw_text="hello @alpha and @Beta_test and @Beta", entities=None)
         self.assertEqual(extract_mentions(message, regex, ["Alpha", "Beta"]), ["@Alpha", "@Beta"])
+
+    def test_extract_mentions_matches_text_mention_by_user_id(self):
+        from telethon import types as tg_types
+
+        text = "🏆 Победители: ww zavoz 67"
+        offset = text.index("ww zavoz 67")
+        entity = tg_types.MessageEntityMentionName(offset=offset, length=len("ww zavoz 67"), user_id=777)
+        message = SimpleNamespace(raw_text=text, entities=[entity])
+        regex = build_ping_regex(["sakmangg69"])
+
+        # No id map: a name-link ping is invisible (the original bug).
+        self.assertEqual(extract_mentions(message, regex, ["sakmangg69"]), [])
+        # With the resolved id map: the name-link resolves to the tracked username.
+        self.assertEqual(
+            extract_mentions(message, regex, ["sakmangg69"], {777: "sakmangg69"}),
+            ["@sakmangg69"],
+        )
 
     def test_build_ping_regex_matches_exact_username(self):
         regex = build_ping_regex(["Alpha"])
@@ -1081,6 +1098,56 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(no_deadline_id, [row["id"] for row in board["buckets"]["no_deadline"]])
         self.assertIn(suspicious_id, [row["id"] for row in board["buckets"]["suspicious"]])
         self.assertGreaterEqual(board["stats"]["total"], 3)
+
+
+class BotAccessTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        if database is None:
+            self.skipTest("aiosqlite is not installed in this Python environment")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_db_path = database.DB_PATH
+        database.DB_PATH = Path(self.tmp.name) / "pulse_test.db"
+        await database.init_db()
+
+    async def asyncTearDown(self):
+        database.DB_PATH = self.old_db_path
+        self.tmp.cleanup()
+
+    async def test_create_and_lookup_key(self):
+        key = await database.create_bot_key("friend", "secret-abc-123456", "viewer", None)
+        self.assertEqual(key["label"], "friend")
+        found = await database.get_bot_key_by_secret("secret-abc-123456")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["id"], key["id"])
+        self.assertIsNone(await database.get_bot_key_by_secret("nope"))
+
+    async def test_revoked_and_expired_keys_are_rejected(self):
+        revoked = await database.create_bot_key("r", "rev-secret-000000", "viewer", None)
+        await database.revoke_bot_key(revoked["id"])
+        self.assertIsNone(await database.get_bot_key_by_secret("rev-secret-000000"))
+
+        await database.create_bot_key("e", "exp-secret-000000", "viewer", "2000-01-01T00:00:00")
+        self.assertIsNone(await database.get_bot_key_by_secret("exp-secret-000000"))
+
+    async def test_redeem_upserts_member_without_duplicates(self):
+        key = await database.create_bot_key("team", "team-secret-123456", "viewer", None)
+        await database.upsert_bot_member(555, "vasya", "Вася", key["id"], "viewer")
+        await database.upsert_bot_member(555, "vasya", "Вася П.", key["id"], "viewer")
+        member = await database.get_bot_member(555)
+        self.assertEqual(member["role"], "viewer")
+        self.assertEqual(member["name"], "Вася П.")
+        self.assertFalse(member["blocked"])
+        self.assertEqual(len(await database.list_bot_members()), 1)
+        keys = await database.list_bot_keys()
+        self.assertEqual(keys[0]["member_count"], 1)
+
+    async def test_block_member(self):
+        key = await database.create_bot_key("", "blk-secret-1234567", "viewer", None)
+        await database.upsert_bot_member(777, "x", "X", key["id"], "viewer")
+        await database.set_bot_member_blocked(777, True)
+        self.assertTrue((await database.get_bot_member(777))["blocked"])
+        await database.set_bot_member_blocked(777, False)
+        self.assertFalse((await database.get_bot_member(777))["blocked"])
 
 
 if __name__ == "__main__":

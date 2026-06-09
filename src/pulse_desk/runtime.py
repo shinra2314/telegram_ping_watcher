@@ -40,6 +40,8 @@ class AppState:
     notification_seen: dict = field(default_factory=dict)
     ping_usernames: list = field(default_factory=list)
     ping_regex: object = None  # compiled regex or None
+    ping_user_ids: dict[int, str] = field(default_factory=dict)  # resolved user_id -> tracked username
+    ping_user_ids_resolved: set[str] = field(default_factory=set)  # lowercase usernames already attempted
     win_keywords: list = field(default_factory=list)
     giveaway_keywords: list = field(default_factory=list)
     join_button_keywords: list = field(default_factory=list)

@@ -26,6 +26,14 @@ except ImportError:  # pragma: no cover
         seconds = 0
 
 
+# Text-mention ("name link") entities carry a user_id instead of an @username.
+# Telegram uses these when a channel pings a user by their display name.
+if types is not None:
+    MENTION_NAME_ENTITY_TYPES = (types.MessageEntityMentionName, types.InputMessageEntityMentionName)
+else:  # pragma: no cover - telethon not installed
+    MENTION_NAME_ENTITY_TYPES = ()
+
+
 DEFAULT_USERNAMES = (
     "alga_kazakhst2n",
     "w3v8f0rm",
@@ -35,6 +43,7 @@ DEFAULT_USERNAMES = (
     "xdfusybau",
     "davifd23",
     "fsdfsdfdsg34",
+    "sakmangg69",
 )
 BASE_DIR = Path(__file__).resolve().parent
 SRC_DIR = BASE_DIR / "src"
@@ -133,7 +142,12 @@ def build_message_link(chat, message) -> str:
     return "нет публичной ссылки"
 
 
-def extract_mentions(message, ping_regex: re.Pattern[str], usernames: Iterable[str]) -> list[str]:
+def extract_mentions(
+    message,
+    ping_regex: re.Pattern[str],
+    usernames: Iterable[str],
+    tracked_ids: dict[int, str] | None = None,
+) -> list[str]:
     found: set[str] = set()
     text = getattr(message, "raw_text", "") or ""
     normalized_lookup = {username.lower(): username for username in normalize_usernames(usernames)}
@@ -149,6 +163,10 @@ def extract_mentions(message, ping_regex: re.Pattern[str], usernames: Iterable[s
                 username = normalized_lookup.get(mention_text.lower())
                 if username:
                     found.add(f"@{username}")
+            elif tracked_ids and MENTION_NAME_ENTITY_TYPES and isinstance(ent, MENTION_NAME_ENTITY_TYPES):
+                username = tracked_ids.get(getattr(ent, "user_id", None))
+                if username:
+                    found.add(f"@{username}")
 
     return sorted(found, key=str.lower)
 
@@ -162,8 +180,8 @@ def local_iso_datetime(value) -> str:
         return str(value)
 
 
-async def message_to_record(client: TelegramClient, message, ping_regex, usernames, *, require_mentions: bool = True) -> dict | None:
-    mentions = extract_mentions(message, ping_regex, usernames)
+async def message_to_record(client: TelegramClient, message, ping_regex, usernames, *, require_mentions: bool = True, tracked_ids: dict[int, str] | None = None) -> dict | None:
+    mentions = extract_mentions(message, ping_regex, usernames, tracked_ids)
     if require_mentions and not mentions:
         return None
     try:

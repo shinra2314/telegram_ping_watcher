@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - keeps parser tests independent from opti
     DB_PATH = Path(os.getenv("PULSE_DB_PATH", BASE_DIR / "pulse_desk.db"))
     BACKUP_DIR = DB_PATH.parent / "backups"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _now_iso() -> str:
@@ -459,6 +459,33 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL,
                 last_seen_at TEXT,
                 active BOOLEAN DEFAULT 1
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_access_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT DEFAULT '',
+                secret TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_members (
+                tg_id INTEGER PRIMARY KEY,
+                tg_username TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                key_id INTEGER,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                joined_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                blocked INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -2605,6 +2632,122 @@ async def get_push_subscriptions() -> list[dict]:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions")).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Bot access keys & members (multi-user bot access)
+# ---------------------------------------------------------------------------
+
+
+async def create_bot_key(label: str, secret: str, role: str = "viewer", expires_at: Optional[str] = None) -> dict:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            INSERT INTO bot_access_keys (label, secret, role, created_at, expires_at, revoked)
+            VALUES (?, ?, ?, ?, ?, 0)
+            """,
+            (label or "", secret, role or "viewer", _now_iso(), expires_at),
+        )
+        await db.commit()
+        row = await (await db.execute("SELECT * FROM bot_access_keys WHERE id = ?", (cursor.lastrowid,))).fetchone()
+    return dict(row)
+
+
+async def list_bot_keys(include_revoked: bool = False) -> list[dict]:
+    where = "" if include_revoked else "WHERE k.revoked = 0"
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT k.*, (SELECT COUNT(*) FROM bot_members m WHERE m.key_id = k.id) AS member_count
+                FROM bot_access_keys k
+                {where}
+                ORDER BY k.created_at DESC
+                """
+            )
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
+    if not secret:
+        return None
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute("SELECT * FROM bot_access_keys WHERE secret = ?", (secret,))
+        ).fetchone()
+    if not row:
+        return None
+    key = dict(row)
+    if key.get("revoked"):
+        return None
+    expires_at = key.get("expires_at")
+    if expires_at and expires_at <= _now_iso():
+        return None
+    return key
+
+
+async def revoke_bot_key(key_id: int) -> None:
+    async with _connect() as db:
+        await db.execute("UPDATE bot_access_keys SET revoked = 1 WHERE id = ?", (key_id,))
+        await db.commit()
+
+
+async def upsert_bot_member(tg_id: int, tg_username: str, name: str, key_id: Optional[int], role: str = "viewer") -> None:
+    async with _connect() as db:
+        await db.execute(
+            """
+            INSERT INTO bot_members (tg_id, tg_username, name, key_id, role, joined_at, last_seen_at, blocked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                tg_username = excluded.tg_username,
+                name = excluded.name,
+                key_id = excluded.key_id,
+                role = excluded.role,
+                last_seen_at = excluded.last_seen_at,
+                blocked = 0
+            """,
+            (tg_id, tg_username or "", name or "", key_id, role or "viewer", _now_iso(), _now_iso()),
+        )
+        await db.commit()
+
+
+async def get_bot_member(tg_id: int) -> Optional[dict]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT * FROM bot_members WHERE tg_id = ?", (tg_id,))).fetchone()
+    return dict(row) if row else None
+
+
+async def list_bot_members() -> list[dict]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                """
+                SELECT m.*, k.label AS key_label
+                FROM bot_members m
+                LEFT JOIN bot_access_keys k ON k.id = m.key_id
+                ORDER BY m.joined_at DESC
+                """
+            )
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def touch_bot_member(tg_id: int) -> None:
+    async with _connect() as db:
+        await db.execute("UPDATE bot_members SET last_seen_at = ? WHERE tg_id = ?", (_now_iso(), tg_id))
+        await db.commit()
+
+
+async def set_bot_member_blocked(tg_id: int, blocked: bool) -> None:
+    async with _connect() as db:
+        await db.execute("UPDATE bot_members SET blocked = ? WHERE tg_id = ?", (1 if blocked else 0, tg_id))
+        await db.commit()
 
 
 async def get_schema_version() -> int:

@@ -19,6 +19,7 @@ logs/
 sessions/
 .mypy_cache/
 .ruff_cache/
+config/services.json
 htmlcov/
 .coverage
 coverage.xml

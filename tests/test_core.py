@@ -987,6 +987,30 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         actions = await database.get_giveaway_actions(ping_id)
         self.assertEqual(actions[0]["context"]["button"], "Join")
 
+    async def test_recent_giveaway_actions_across_pings_with_chat(self):
+        ping_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Recent Channel",
+            "chat_id": 420,
+            "sender": "Channel",
+            "sender_id": 420,
+            "message_id": 421,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/test/421",
+            "text": "giveaway @Alpha",
+            "chat_type": "channel",
+            "detected_at": "2026-05-07T10:01:00",
+            "is_giveaway": True,
+            "is_win": False,
+        })
+        await database.record_giveaway_action(ping_id, "skip", "skipped", "telegram_bot")
+        await database.record_giveaway_action(ping_id, "confirm", "confirmed", "telegram_bot")
+        recent = await database.get_recent_giveaway_actions(limit=5)
+        self.assertGreaterEqual(len(recent), 2)
+        # Newest first, with the joined chat label exposed for display.
+        self.assertEqual(recent[0]["action"], "confirm")
+        self.assertEqual(recent[0]["chat"], "Recent Channel")
+
     async def test_giveaway_action_analyze_is_deduplicated(self):
         ping_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",
@@ -1148,6 +1172,35 @@ class BotAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await database.get_bot_member(777))["blocked"])
         await database.set_bot_member_blocked(777, False)
         self.assertFalse((await database.get_bot_member(777))["blocked"])
+
+    async def test_broadcast_messages_roundtrip(self):
+        await database.save_broadcast_messages("abc123", [(111, 10), (222, 20)])
+        rows = await database.get_broadcast_messages("abc123")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({(r["tg_id"], r["message_id"]) for r in rows}, {(111, 10), (222, 20)})
+        self.assertEqual(await database.get_broadcast_messages("missing"), [])
+
+        await database.delete_broadcast_messages("abc123")
+        self.assertEqual(await database.get_broadcast_messages("abc123"), [])
+
+    async def test_broadcast_messages_save_empty_is_noop(self):
+        await database.save_broadcast_messages("empty", [])
+        self.assertEqual(await database.get_broadcast_messages("empty"), [])
+
+    async def test_prune_broadcast_messages(self):
+        await database.save_broadcast_messages("fresh", [(111, 10)])
+        import aiosqlite as _aiosqlite
+
+        async with _aiosqlite.connect(database.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO bot_broadcast_messages (token, tg_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+                ("stale", 333, 30, "2000-01-01T00:00:00"),
+            )
+            await db.commit()
+        pruned = await database.prune_broadcast_messages(days=7)
+        self.assertEqual(pruned, 1)
+        self.assertEqual(await database.get_broadcast_messages("stale"), [])
+        self.assertEqual(len(await database.get_broadcast_messages("fresh")), 1)
 
 
 if __name__ == "__main__":

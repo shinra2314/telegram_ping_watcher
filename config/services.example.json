@@ -1,0 +1,19 @@
+{
+  "_comment": "Template for the launcher. Copy to config/services.json (git-ignored) and adjust paths. cwd/cmd support ${VAR} and ~ expansion. Set autostart=true to bring a service up automatically when Pulse Desk starts.",
+  "services": [
+    {
+      "name": "discord-bot",
+      "label": "Discord Bot",
+      "cmd": ["node", "src/index.js"],
+      "cwd": "${DISCORD_BOT_DIR}",
+      "env": {},
+      "health": { "host": "127.0.0.1", "port": 8080 },
+      "panel_url": "http://127.0.0.1:8080",
+      "autostart": false,
+      "autorestart": true,
+      "backoff_base": 3.0,
+      "backoff_max": 120.0,
+      "max_restarts": 8
+    }
+  ]
+}

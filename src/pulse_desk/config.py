@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     backup_retention: int = Field(default=10, alias="BACKUP_RETENTION")
     pending_auth_ttl_seconds: int = Field(default=600, alias="PENDING_AUTH_TTL_SECONDS")
 
+    # Obsidian "Долги" note two-way sync (all optional; empty path = disabled).
+    obsidian_debts_path: str = Field(default="", alias="OBSIDIAN_DEBTS_PATH")
+    obsidian_sync_enabled: bool = Field(default=False, alias="OBSIDIAN_SYNC_ENABLED")
+    obsidian_sync_write: bool = Field(default=False, alias="OBSIDIAN_SYNC_WRITE")
+    obsidian_sync_poll_seconds: int = Field(default=30, alias="OBSIDIAN_SYNC_POLL_SECONDS")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     telethon_log_level: str = Field(default="WARNING", alias="TELETHON_LOG_LEVEL")
 

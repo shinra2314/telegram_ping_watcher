@@ -23,21 +23,21 @@ python main.py
 uv sync --extra dev
 ```
 
-**Run tests:**
+**Run tests** (pytest is in the `dev` extra; `asyncio_mode = "auto"` is set in pyproject.toml):
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests
-.\.venv\Scripts\python.exe -m unittest tests.test_core      # single file
-```
+.\.venv\Scripts\python.exe -m pytest                        # all tests
+.\.venv\Scripts\python.exe -m pytest tests\test_core.py     # single file
+.\.venv\Scripts\python.exe -m pytest tests\test_core.py -k name_of_test
 
-**Install pytest (for API tests):**
-```bash
-pip install pytest==8.3.5 pytest-asyncio==0.24.0
+# unittest also works (tests are unittest-style)
+.\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 **Syntax validation (no linter configured):**
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile main.py database.py telegram_ping_watcher.py src\pulse_desk\config.py
-node --check static/app.js   # requires Node.js
+.\.venv\Scripts\python.exe -m py_compile main.py telegram_ping_watcher.py
+.\.venv\Scripts\python.exe -c "import main"   # imports every module + registers all routers
+node --check static/js/app-core.js   # requires Node.js; repeat per changed JS file
 ```
 
 **Docker:**
@@ -52,33 +52,89 @@ docker compose up --build
 ### Layer breakdown
 
 ```
-main.py (3000+ lines)
-  FastAPI app — ~70 HTTP endpoints + WebSocket /api/live
-  Role-based auth: ADMIN_TOKEN (full control) vs VIEWER_TOKEN (read-only)
-  Startup lifespan hook initialises DB and launches background jobs
+main.py (~160 lines)
+  Entry point only: builds the FastAPI app, registers routers, runs the
+  startup/shutdown lifespan (DB init, settings load, bot + background jobs).
+  No business logic and no endpoints live here anymore.
+
+routers/                   — ALL HTTP endpoints. One module per area:
+  analytics, auth, backups, boards, bot_access, export, giveaways, launcher,
+  live (SSE), lookups, market, obsidian, pings, push, scan, settings, system.
+  Registered in main.py via app.include_router(). They import singletons from
+  src/pulse_desk/app_ctx.py — NEVER from main (avoids circular imports).
+  New endpoint groups go here, not in main.py.
 
 src/pulse_desk/
+  app_ctx.py        — Shared context: settings/state/logger singletons,
+                      derived constants, auth dependencies for routers
   config.py         — Pydantic BaseSettings loaded from .env
-  runtime.py        — AppState singleton (in-memory job state, caches)
-  jobs.py           — Background job management (scan, reminders, market-monitor, bot-service)
-  scan.py           — Channel sweep logic using Telethon; writes pings/checkpoints to DB
+  runtime.py        — AppState dataclass (clients, bot, scan status, keywords,
+                      tracked usernames — all mutable shared state lives here)
+  common.py         — now_iso, record_app_event, flood_wait_seconds,
+                      start_background_task / start_supervised wrappers
+  watch_settings.py — Mutable watcher settings: keyword/tracking/notification/
+                      digest settings + runtime tunables (SCAN_INTERVAL_SECONDS
+                      etc.). Read tunables via the module: `ws.SCAN_HISTORY_LIMIT`
+  telegram_accounts.py — Account lifecycle: start_client, reconnect/cooldown,
+                      auth-session helpers, disconnect
+  ping_pipeline.py  — process_ping_message: classify, score, deadlines,
+                      persist, notify, web-push fanout
+  scan_engine.py    — full_history_scan, scan_single_account, mention backfill
+  giveaway_actions.py — Safe giveaway join: analysis, button detection, confirm
+  bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
+  bot_service.py    — init_bot: inline menus, slash commands, access keys
+  loops.py          — Background loops: market, reminders, digest, scores,
+                      auto-scan, obsidian-sync, startup maintenance
+  obsidian_debts.py — Two-way sync of the Debts board with an Obsidian
+                      `Долги.md` note: parse/normalise/reconcile (pure, unit
+                      tested) + atomic write w/ dated backup. Note wins on
+                      conflict; only the "done = claimed" bit is synced. Gated
+                      by OBSIDIAN_SYNC_* env vars (see config.py)
+  analytics.py      — build_analytics / channel_account_stats
+  jobs.py           — Task supervision primitives (start_tracked/supervised_task)
+  scan.py           — Scan limit normalisation + sweep-start helpers
   giveaways.py      — Giveaway detection and candidate scoring
   deadlines.py      — Natural-language date/time parsing for reminders
   dashboard.py      — Dashboard summary aggregation
+  live.py / live_hub.py — SSE event publishing to connected clients
+  push.py           — Web Push notifications (PWA)
+  digest.py         — Periodic digest generation
   security.py       — HMAC constant-time token validation
   telegram_reconnect.py — Exponential backoff reconnect logic
+  process_supervisor.py — Launcher: spawn/supervise EXTERNAL runtimes (Discord
+                      bot) as child processes; stdlib-only (Popen + thread
+                      reader + asyncio supervise loop), auto-restart w/ backoff.
+                      Singleton via get_supervisor(). See docs/DASHBOARD.md
+  service_registry.py — Loads managed-service manifest (config/services.json,
+                      template config/services.example.json; git-ignored real file)
 
-database.py (2500+ lines)
-  All SQLite access via aiosqlite. Schema version tracked (current: 8).
-  Auto-migrates on startup. WAL mode + FK enabled + 5 s busy timeout.
-  Main tables: pings, giveaway_candidates, tasks, debts, market_snapshots,
-               channel_profiles, scan_runs, checkpoints, settings, reminders
+database/                  — SQLite layer (aiosqlite), split per area.
+  __init__.py re-exports the full public API, so `import database` /
+  `from database import save_ping` keep working. DB_PATH stays a mutable
+  attribute on the package (tests monkeypatch it); submodules resolve it
+  through _core.db_path().
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 14)
+  schema.py   — init_db + migrations   backups.py  — file backups
+  pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
+  giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards
+  reminders.py — deadline reminders    channels.py — profiles, source scores
+  market.py   — market snapshots       scan_runs.py — scan-run bookkeeping
+  events.py   — app event log          settings_kv.py — key-value settings
+  outbox.py   — SSE outbox             push.py — push subscriptions
+  bot_access.py — bot keys/members     stats.py / maintenance.py — stats, cleanup
+  WAL mode + FK enabled + 5 s busy timeout everywhere.
 
 telegram_ping_watcher.py   — Telethon client helpers and message parsing utilities
 auth_accounts.py           — Console tool for Telegram account authentication
 
 static/                    — Vanilla JS frontend (no build step). PWA with service worker.
+  index.html loads classic scripts in a fixed order; the former app.js is split
+  into static/js/app-{core,pings,dashboard,settings,main}.js which share one
+  global scope — keep the load order from index.html when adding files, and
+  bump CACHE_NAME in static/sw.js when shell assets change.
 sessions/                  — Telethon .session credential files (never commit these)
+scripts/                   — One-off tools: generate_bot_assets.py (bot branding
+                             PNGs, needs Pillow), set_bot_profile.py (upload avatar)
 ```
 
 ### Background jobs (always running)
@@ -86,10 +142,12 @@ sessions/                  — Telethon .session credential files (never commit 
 | Job | Purpose | Key env var |
 |-----|---------|-------------|
 | `auto-scan` | Sweeps channels for new messages | `SCAN_INTERVAL_SECONDS` (default 900 s) |
-| `reminders` | Fires deadline reminders | — |
+| `reminders` | Fires deadline reminders (admin + opted-in bot members) | — |
+| `daily-digest` | Sends daily ping digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 09:00) | — |
 | `source-scores` | Recalculates channel reliability scores | — |
+| `obsidian-sync` | Reconciles the Debts board with the Obsidian `Долги.md` note (note wins; syncs the claimed/done bit, appends newly detected wins) | `OBSIDIAN_DEBTS_PATH`, `OBSIDIAN_SYNC_ENABLED`, `OBSIDIAN_SYNC_WRITE`, `OBSIDIAN_SYNC_POLL_SECONDS` |
 | `market-monitor` | Fetches crypto prices, alerts on volatility | `MARKET_POLL_SECONDS` |
-| `bot-service` | Telegram bot for admin notifications | optional |
+| `bot-service` | Telegram bot for notifications + inline menus | `TELEGRAM_BOT_TOKEN` (optional) |
 
 ### Data flow for a "ping"
 
@@ -116,7 +174,8 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
 ## Key conventions
 
 - **All DB access is async** via `aiosqlite`; never use synchronous sqlite3 in new code.
-- **Schema changes** require bumping `SCHEMA_VERSION` in `database.py` and adding a migration branch in `run_migrations()`.
+- **Routers import from `app_ctx`, never from `main`** — `src/pulse_desk/app_ctx.py` holds the settings/state/logger singletons and auth dependencies precisely so router modules avoid circular imports with `main.py`.
+- **Schema changes** require bumping `SCHEMA_VERSION` in `database/_core.py` and adding a migration branch in `database/schema.py` (`init_db`).
 - **Giveaway actions default to dry-run** (`DRY_RUN_GIVEAWAYS=true`). Any code that joins or submits must check this flag.
 - **Session files are secrets** — treat `.session` files like passwords; they are excluded from git via `.gitignore`.
-- The frontend is plain ES modules in `/static` — no npm, no bundler, no TypeScript.
+- The frontend is plain classic scripts in `/static` sharing one global scope — no npm, no bundler, no TypeScript. The `app-*.js` load order in index.html matters.

@@ -83,7 +83,7 @@ def runtime_health(
     accounts_configured: int,
     expected_tasks: set[str] | None = None,
 ) -> dict[str, Any]:
-    expected = expected_tasks or {"auto-scan", "reminders", "source-scores", "market-fetch"}
+    expected = expected_tasks or {"auto-scan", "reminders", "daily-digest", "source-scores", "market-fetch"}
     running_tasks = sorted(name for name, task in state.background_tasks.items() if not task.done())
     missing_tasks = sorted(expected - set(running_tasks))
     now = datetime.now()

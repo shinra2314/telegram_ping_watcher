@@ -210,4 +210,18 @@ async def update_ping_details(ping_id: int, data: PingMetaRequest):
         "ping-updated",
         {"ping_id": ping_id, "deadline_at": data.deadline_at, "action_status": data.action_status},
     )
+    # Mirror a manual "Забрал" (claimed) into the Obsidian note when write-sync
+    # is enabled. Best-effort: never let a note/file error break the request.
+    try:
+        from pulse_desk.app_ctx import settings as _settings, state as _state
+
+        if _settings.obsidian_sync_write and (data.giveaway_status == "claimed" or data.action_status == "claimed"):
+            from database import get_ping_by_id
+            from pulse_desk.obsidian_debts import mark_link_done
+
+            ping = await get_ping_by_id(ping_id)
+            if ping and ping.get("link"):
+                await mark_link_done(_state, _settings, ping["link"], True)
+    except Exception:
+        logger.debug("Obsidian note update on status change failed", exc_info=True)
     return {"status": "ok"}

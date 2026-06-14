@@ -17,6 +17,9 @@ class AppState:
     clients: list[TelegramClient] = field(default_factory=list)
     bot_client: Optional[TelegramClient] = None
     bot_id: Optional[int] = None
+    bot_username: Optional[str] = None
+    # Pending free-text inputs for the bot settings menus: sender_id -> {kind, scope, armed_at}.
+    bot_pending_inputs: dict[int, dict] = field(default_factory=dict)
     connected_user_ids: set[int] = field(default_factory=set)
     pending_auths: dict[str, dict[str, Any]] = field(default_factory=dict)
     processed_msg_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
@@ -38,12 +41,18 @@ class AppState:
     vapid_private_pem: str = ""
     last_giveaway_action_at: Optional[datetime] = None
     notification_seen: dict = field(default_factory=dict)
+    # Obsidian "Долги" note sync: last parsed snapshot, sync meta, write lock.
+    obsidian_debts: Optional[dict] = None
+    obsidian_sync_meta: Optional[dict] = None
+    obsidian_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     ping_usernames: list = field(default_factory=list)
     ping_regex: object = None  # compiled regex or None
     ping_user_ids: dict[int, str] = field(default_factory=dict)  # resolved user_id -> tracked username
     ping_user_ids_resolved: set[str] = field(default_factory=set)  # lowercase usernames already attempted
     win_keywords: list = field(default_factory=list)
     giveaway_keywords: list = field(default_factory=list)
+    high_priority_keywords: list = field(default_factory=list)
+    ignore_keywords: list = field(default_factory=list)
     join_button_keywords: list = field(default_factory=list)
     session_names: list = field(default_factory=list)
     scan_status: dict[str, Any] = field(default_factory=lambda: {

@@ -35,6 +35,7 @@
         <button data-tab="analytics" role="tab" aria-selected="false" aria-controls="analytics"><i data-lucide="bar-chart-3"></i>Аналитика</button>
         <button data-tab="share" role="tab" aria-selected="false" aria-controls="share" class="admin-only"><i data-lucide="share-2"></i>Друзьям</button>
         <button data-tab="accounts" role="tab" aria-selected="false" aria-controls="accounts" class="admin-only"><i data-lucide="users"></i>Аккаунты</button>
+        <button data-tab="services" role="tab" aria-selected="false" aria-controls="services" class="admin-only"><i data-lucide="server-cog"></i>Сервисы</button>
         <button data-tab="settings" role="tab" aria-selected="false" aria-controls="settings" class="admin-only"><i data-lucide="settings"></i>Настройки</button>
       </nav>
       <div class="side-status" id="side-status">Загрузка статуса...</div>
@@ -217,6 +218,20 @@
             <div id="debt-profile-tabs" class="debt-profile-tabs"></div>
           </aside>
         </div>
+        <div class="panel obsidian-debts-panel" id="obsidian-panel">
+          <div class="ops-panel-head">
+            <div>
+              <div class="kicker">Obsidian · @Долги</div>
+              <h2>Журнал розыгрышей из Obsidian</h2>
+              <div class="section-meta" id="obsidian-sync-status">Загрузка…</div>
+            </div>
+            <button class="btn" id="refresh-obsidian-btn"><i data-lucide="refresh-cw"></i>Синхронизировать</button>
+          </div>
+          <div id="obsidian-config" class="obsidian-config"></div>
+          <div id="obsidian-debts-progress" class="obsidian-progress"></div>
+          <div id="obsidian-debt-groups" class="obsidian-groups"></div>
+          <div id="obsidian-debts-list" class="board-list obsidian-list"></div>
+        </div>
       </section>
 
       <section id="giveaways" class="tabs">
@@ -398,6 +413,41 @@
           <div class="panel">
             <h2>Нельзя отправлять</h2>
             <div id="share-never" class="badges"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="services" class="tabs services-shell">
+        <div class="debts-head">
+          <div>
+            <div class="kicker">Launcher</div>
+            <h2 class="section-title">Сервисы и процессы</h2>
+            <div class="section-meta">Запуск, мониторинг и логи внешних рантаймов (Discord-бот и др.). Pulse Desk — хост-оболочка.</div>
+          </div>
+          <div class="actions">
+            <button class="btn good" id="services-start-all"><i data-lucide="play"></i>Старт всех</button>
+            <button class="btn bad" id="services-stop-all"><i data-lucide="square"></i>Стоп всех</button>
+            <button class="btn" id="services-refresh"><i data-lucide="refresh-cw"></i>Обновить</button>
+          </div>
+        </div>
+        <div class="grid stats" id="services-stats"></div>
+        <div id="services-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px">
+          <div class="muted">Загрузка сервисов...</div>
+        </div>
+        <div id="services-detail" style="display:none;margin-top:18px">
+          <div class="panel">
+            <div class="ops-panel-head">
+              <div><div class="kicker">Logs</div><h2 id="services-log-title">Логи сервиса</h2></div>
+              <button class="btn" id="services-log-refresh"><i data-lucide="refresh-cw"></i>Обновить</button>
+            </div>
+            <div class="log-box" id="services-log-box">Выберите сервис и нажмите «Логи».</div>
+          </div>
+          <div class="panel" id="services-panel-wrap" style="display:none;margin-top:16px">
+            <div class="ops-panel-head">
+              <div><div class="kicker">Embedded panel</div><h2 id="services-panel-title">Встроенная панель</h2></div>
+              <a class="btn" id="services-panel-open" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Открыть отдельно</a>
+            </div>
+            <iframe id="services-panel-iframe" title="Service panel" style="width:100%;height:520px;border:0;border-radius:12px;background:#fff" referrerpolicy="no-referrer"></iframe>
           </div>
         </div>
       </section>
@@ -746,7 +796,14 @@
   <script src="/static/js/core.js"></script>
   <script src="/static/js/giveaways.js"></script>
   <script src="/static/js/diagnostics.js"></script>
-  <script src="/static/app.js"></script>
+  <!-- app-*.js are one classic-script unit split for readability: keep this load order. -->
+  <script src="/static/js/app-core.js"></script>
+  <script src="/static/js/app-pings.js"></script>
+  <script src="/static/js/app-dashboard.js"></script>
+  <script src="/static/js/app-obsidian.js"></script>
+  <script src="/static/js/app-settings.js"></script>
+  <script src="/static/js/app-services.js"></script>
+  <script src="/static/js/app-main.js"></script>
   <script src="/static/js/command-palette.js"></script>
   <script src="/static/js/pwa.js"></script>
 </body>

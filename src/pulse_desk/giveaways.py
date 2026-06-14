@@ -10,6 +10,8 @@ try:
 except ModuleNotFoundError:  # Keeps parser/scoring tests runnable without Telegram deps.
     types = None
 
+from pulse_desk.telegram_errors import iter_messages_resilient
+
 
 GIVEAWAY_WORDS = (
     "розыгрыш",
@@ -279,7 +281,7 @@ async def inspect_required_channel(client: Any, username: str, recent_limit: int
         channel.subscribers = getattr(full, "participants_count", None)
         giveaway_posts = 0
         last_active_at = ""
-        async for message in client.iter_messages(entity, limit=recent_limit):
+        async for message in iter_messages_resilient(client, entity, limit=recent_limit):
             text = (getattr(message, "raw_text", "") or "").lower()
             if not last_active_at and getattr(message, "date", None):
                 last_active_at = message.date.replace(tzinfo=None).isoformat()

@@ -316,136 +316,175 @@
       lucide.createIcons();
     }
 
-    function debtProfileRows(data, profileKey) {
-      if (!profileKey || profileKey === "all") return data.rows || [];
-      const profile = (data.profiles || []).find(item => item.key === profileKey);
-      return profile ? profile.rows || [] : data.rows || [];
+    const DEBT_GROUPS = [
+      { key: "overdue", label: "Просрочено", cls: "bad" },
+      { key: "today", label: "Сегодня", cls: "warn" },
+      { key: "week", label: "На неделе", cls: "info" },
+      { key: "missing", label: "Без дедлайна", cls: "muted" }
+    ];
+
+    function debtMoney(row) {
+      const v = Number(row.estimated_value || 0);
+      return v > 0 ? "≈ ₴" + v.toLocaleString("ru-RU") : "";
     }
 
-    function renderDebtStats(data) {
-      const stats = data.stats || {};
-      setHtmlIfChanged("debts-stats", [
-        ["Ждут выдачи", stats.total, "receipt-text", "#f6c453"],
-        ["Новые", stats.new, "sparkles", "#45d483"],
-        ["Критично", stats.critical, "siren", "#fb7185"],
-        ["Профилей с долгом", stats.profiles_with_debt, "at-sign", "#29d3c2"]
-      ].map(([label, value, icon, color]) => `
-        <div class="panel metric-card" style="--metric-color:${color}">
-          <div class="metric-top"><div class="metric-label">${label}</div><span class="metric-icon"><i data-lucide="${icon}"></i></span></div>
-          <div class="metric-value">${value ?? 0}</div>
-        </div>
-      `).join(""));
+    function debtGroupKey(row) {
+      const s = row.deadline_state;
+      if (s === "overdue") return "overdue";
+      if (s === "today") return "today";
+      if (s === "tomorrow" || s === "upcoming") return "week";
+      return "missing";
     }
 
-    function renderDebtProfiles(data) {
-      const profiles = data.profiles || [];
-      const active = state.debtProfile || "all";
-      const allCount = Number(data.stats?.total || 0);
-      const allNew = Number(data.stats?.new || 0);
-      const buttons = [`
-        <button class="${active === "all" ? "active" : ""}" data-debt-profile="all">
-          <span class="profile-name"><i data-lucide="layers"></i>Все долги</span>
-          <span class="profile-count">${allCount}</span>
-          ${allNew ? `<small>${allNew} новых</small>` : "<small>общая очередь</small>"}
-        </button>
-      `].concat(profiles.map(profile => {
-        const selected = active === profile.key;
-        const count = Number(profile.count || 0);
-        const critical = Number(profile.critical_count || 0);
-        return `
-          <button class="${selected ? "active" : ""} ${count ? "has-debt" : ""}" data-debt-profile="${esc(profile.key)}">
-            <span class="profile-name"><i data-lucide="${count ? "trophy" : "at-sign"}"></i>@${esc(profile.username)}</span>
-            <span class="profile-count">${count}</span>
-            <small>${critical ? `${critical} критично` : `prio ${Number(profile.max_priority || 0)}`}</small>
-          </button>
-        `;
-      })).join("");
-      setHtmlIfChanged("debt-profile-tabs", buttons);
+    function groupDebtsByDeadline(rows) {
+      const g = { overdue: [], today: [], week: [], missing: [] };
+      (rows || []).forEach(r => g[debtGroupKey(r)].push(r));
+      return g;
     }
 
-    function debtItem(row) {
+    function isHotDebt(row) {
+      if (row.deadline_state === "overdue") return true;
+      const s = Number(row.deadline_seconds);
+      return Number.isFinite(s) && s >= 0 && s <= 86400;
+    }
+
+    function pluralPrizes(n) {
+      const m = n % 10, h = n % 100;
+      if (m === 1 && h !== 11) return "приз";
+      if (m >= 2 && m <= 4 && (h < 12 || h > 14)) return "приза";
+      return "призов";
+    }
+
+    function debtRow(row) {
       const mentions = safeJson(row.mentions, []);
-      const priority = Number(row.priority_score || 0);
-      const priorityInfo = priorityMeta(priority, row.status);
-      const deadline = deadlineMeta(row);
-      const status = giveawayStatusMeta(row.giveaway_status || "pending");
-      const text = (row.text || "").replace(/\s+/g, " ").trim();
-      const clipped = text.length > 260 ? text.slice(0, 260) + "..." : text;
-      const openLink = safeExternalLink(row.link);
-      const source = row.chat || "Неизвестный источник";
-      const primaryMention = mentions[0] ? `@${String(mentions[0]).replace(/^@/, "")}` : "username не найден";
-      const detected = row.detected_at ? fmtDate(row.detected_at) : "";
-      const deadlineLabel = row.deadline_at ? deadline.label : "Срок выдачи не найден";
-      const actions = state.role === "admin" ? `
-        <div class="board-actions debt-actions">
-          <button class="btn good" data-debt-status="claimed" data-id="${row.id}"><i data-lucide="badge-check"></i>Забрал</button>
-          <button class="btn" data-debt-status="missed_reply" data-id="${row.id}"><i data-lucide="message-square-x"></i>Не отписал</button>
-          <button class="btn" data-debt-status="missed" data-id="${row.id}"><i data-lucide="clock-alert"></i>Не успел</button>
-          <button class="btn bad" data-debt-status="scam" data-id="${row.id}"><i data-lucide="shield-alert"></i>Скам</button>
-        </div>
-      ` : "";
+      const who = mentions[0] ? "@" + String(mentions[0]).replace(/^@/, "") : "@—";
+      const nm = (row.text || "").replace(/\s+/g, " ").trim().slice(0, 60) || "Победа";
+      const source = row.chat || "источник";
+      const hasDeadline = !!row.deadline_at;
+      const dl = deadlineMeta(row);
+      const pillCls = !hasDeadline ? "info" : (row.deadline_badge_class === "bad" ? "bad" : row.deadline_badge_class === "warn" ? "warn" : "info");
+      const pillLabel = hasDeadline ? dl.label : "без срока";
+      const tab = row.deadline_state === "overdue" ? "bad" : (row.deadline_state === "today" ? "warn" : "info");
+      const money = debtMoney(row);
+      const checked = state.debtSelection && state.debtSelection.has(row.id);
+      const admin = state.role === "admin";
       return `
-        <div class="board-item debt-item" data-ping='${esc(JSON.stringify(row))}'>
-          <div class="debt-card-head">
-            <span class="debt-source-mark">${esc(initials(source))}</span>
-            <div class="debt-title-block">
-              <span>Победа · ${esc(primaryMention)}</span>
-              <strong>${esc(source)}</strong>
-              ${detected ? `<small>${esc(detected)}</small>` : ""}
-            </div>
-            <span class="debt-status-pill ${status.className}"><i data-lucide="${status.icon}"></i>${esc(status.shortLabel || status.label)}</span>
+        <div class="dq-row" data-debt-id="${row.id}" data-ping='${esc(JSON.stringify(row))}'>
+          <span class="dq-tab ${tab}"></span>
+          <span class="dq-cbx ${checked ? "on" : ""}" data-debt-select="${row.id}"><i data-lucide="check"></i></span>
+          <div class="dq-main">
+            <div class="dq-l1"><span class="dq-who">${esc(who)}</span><span class="dq-nm">${esc(nm)}</span></div>
+            <div class="dq-l2"><span class="dq-src"><i data-lucide="radio"></i>${esc(source)}</span></div>
           </div>
-          <div class="debt-signal-grid">
-            <div class="debt-signal priority ${priorityInfo.className}" style="--priority-width:${clamp(priority, 0, 100)}%">
-              <span class="metric-icon"><i data-lucide="${priorityInfo.icon}"></i></span>
-              <div>
-                <span>Приоритет</span>
-                <strong>${priority}/100 · ${esc(priorityInfo.label)}</strong>
-                <div class="priority-meter"><span></span></div>
-              </div>
-            </div>
-            <div class="debt-signal deadline ${deadline.className}">
-              <span class="metric-icon"><i data-lucide="${deadline.icon}"></i></span>
-              <div>
-                <span>Выдача</span>
-                <strong>${esc(deadlineLabel)}</strong>
-                <small>${esc(deadline.hint || "проверь вручную")}</small>
-              </div>
-            </div>
-          </div>
-          <div class="debt-meta-row">
-            <div class="ping-mentions">${renderMentionChips(mentions, 6)}</div>
-            ${openLink ? `<a class="badge debt-telegram-link" href="${openLink}" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Telegram</a>` : ""}
-          </div>
-          <div class="debt-preview">
-            <span>Текст результата</span>
-            <p>${esc(clipped || "Нет текста")}</p>
-          </div>
-          <div class="debt-footer">
-            <div class="debt-context-badges">
-              <span class="badge info"><i data-lucide="trophy"></i>победа</span>
-              <span class="badge ${row.status === "new" ? "good" : "info"}">${esc(statusMeta(row.status).label)}</span>
-            </div>
-            ${actions}
-          </div>
+          <span class="dq-pill ${pillCls}"><i data-lucide="clock"></i>${esc(pillLabel)}</span>
+          ${money ? `<span class="dq-money">${esc(money)}</span>` : ""}
+          ${admin ? `<div class="dq-acts">
+            <span class="dq-icb good" data-debt-status="claimed" data-id="${row.id}" title="Забрал"><i data-lucide="check"></i></span>
+            <span class="dq-icb" data-debt-status="scam" data-id="${row.id}" title="Скам"><i data-lucide="shield-alert"></i></span>
+          </div>` : ""}
         </div>
       `;
     }
 
+    function renderDebtHero(data) {
+      const rows = data.rows || [];
+      const total = rows.length;
+      const value = rows.reduce((a, r) => a + Number(r.estimated_value || 0), 0);
+      const hot = rows.filter(isHotDebt).sort((a, b) => (Number(a.deadline_seconds ?? 9e9)) - (Number(b.deadline_seconds ?? 9e9)))[0];
+      const nearLabel = hot ? deadlineMeta(hot).label : "нет срочных";
+      const hotWho = hot ? (safeJson(hot.mentions, [])[0] ? "@" + String(safeJson(hot.mentions, [])[0]).replace(/^@/, "") : "") : "всё спокойно";
+      setHtmlIfChanged("debts-hero", `
+        <div class="tile acc">
+          <div class="lbl">К получению</div>
+          <div class="big">${total} ${pluralPrizes(total)}</div>
+          <div class="sub mono">${value > 0 ? "≈ ₴" + value.toLocaleString("ru-RU") + " оценкой" : "оценка недоступна"}</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Ближайший дедлайн</div>
+          <div class="big mono" style="color:${hot ? "var(--bad)" : "var(--muted)"}">${esc(nearLabel)}</div>
+          <div class="sub">${esc(hotWho)}</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Новых</div>
+          <div class="big">${Number(data.stats?.new || 0)}</div>
+          <div class="sub">критичных ${Number(data.stats?.critical || 0)}</div>
+        </div>
+      `);
+    }
+
+    function renderDebtSegments(groups) {
+      const seg = state.debtSegment || "all";
+      const allCount = groups.overdue.length + groups.today.length + groups.week.length + groups.missing.length;
+      const items = [["all", "Все", allCount, false]]
+        .concat(DEBT_GROUPS.map(g => [g.key, g.label, groups[g.key].length, g.key === "overdue"]));
+      setHtmlIfChanged("debts-segments", items.map(([k, l, n, dot]) =>
+        `<span class="dseg ${seg === k ? "active" : ""}" data-debt-seg="${k}">${dot && n ? '<span class="dot"></span>' : ""}${esc(l)} <span class="n">${n}</span></span>`
+      ).join(""));
+    }
+
+    function renderDebtFocus(rows) {
+      const hot = (rows || []).filter(isHotDebt).sort((a, b) => (Number(a.deadline_seconds ?? 9e9)) - (Number(b.deadline_seconds ?? 9e9))).slice(0, 1);
+      const label = $("debts-focus-label");
+      if (label) label.hidden = hot.length === 0;
+      if (!hot.length) { setHtmlIfChanged("debts-focus", ""); return; }
+      const r = hot[0];
+      const m = safeJson(r.mentions, []);
+      const who = m[0] ? "@" + String(m[0]).replace(/^@/, "") : "@—";
+      const nm = (r.text || "").replace(/\s+/g, " ").trim().slice(0, 70);
+      const link = safeExternalLink(r.link);
+      const admin = state.role === "admin";
+      setHtmlIfChanged("debts-focus", `
+        <div style="text-align:center;flex:none"><div class="cd">${esc(deadlineMeta(r).label)}</div></div>
+        <div style="flex:1;min-width:0">
+          <div class="dq-l1"><span class="dq-who">${esc(who)}</span><span class="dq-nm">${esc(nm)}</span></div>
+        </div>
+        <div style="display:flex;gap:8px;flex:none">
+          ${link ? `<a class="btn primary" href="${link}" target="_blank" rel="noopener"><i data-lucide="send"></i>Написать</a>` : ""}
+          ${admin ? `<button class="btn" data-debt-status="claimed" data-id="${r.id}"><i data-lucide="check"></i>Забрал</button>` : ""}
+        </div>
+      `);
+    }
+
+    function renderDebtLens(data) {
+      const profiles = (data.profiles || []).filter(p => Number(p.count) > 0);
+      const lines = profiles.length
+        ? profiles.map(p => `
+          <div class="lr">
+            <div><div class="ln">@${esc(p.username)}</div></div>
+            <div style="text-align:right"><div class="dq-money">${Number(p.count)}</div></div>
+          </div>`).join("")
+        : `<div class="lsub">нет открытых долгов</div>`;
+      setHtmlIfChanged("debts-lens", `
+        <div class="card">
+          <div class="ct"><i data-lucide="users"></i>Люди</div>
+          ${lines}
+        </div>
+      `);
+    }
+
     function renderDebts(data) {
       state.debtBoard = data;
-      const validKeys = new Set(["all"].concat((data.profiles || []).map(item => item.key)));
-      if (!validKeys.has(state.debtProfile)) state.debtProfile = "all";
-      const activeProfile = (data.profiles || []).find(item => item.key === state.debtProfile);
-      const rows = debtProfileRows(data, state.debtProfile);
-      renderDebtStats(data);
-      renderDebtProfiles(data);
-      $("debts-active-kicker").textContent = activeProfile ? `@${activeProfile.username}` : "Все профили";
-      $("debts-active-title").textContent = activeProfile ? "Победы этого username" : "Ожидают выдачи";
-      $("debts-active-count").textContent = rows.length;
-      setHtmlIfChanged("debts-list", rows.length
-        ? rows.map(debtItem).join("")
-        : emptyState("badge-check", "Долгов нет", "Все найденные призы закрыты или еще не появились в статусе “ожидаю выдачи”."));
+      if (!state.debtSegment) state.debtSegment = "all";
+      if (!state.debtSelection) state.debtSelection = new Set();
+      if (!state.debtCollapsed) state.debtCollapsed = new Set(["week", "missing"]);
+      const rows = data.rows || [];
+      const groups = groupDebtsByDeadline(rows);
+      renderDebtHero(data);
+      renderDebtSegments(groups);
+      renderDebtFocus(rows);
+      renderDebtLens(data);
+      const seg = state.debtSegment;
+      const visible = DEBT_GROUPS.filter(g => seg === "all" || g.key === seg);
+      const html = visible.map(g => {
+        const list = groups[g.key];
+        if (!list.length) return "";
+        const collapsed = state.debtCollapsed.has(g.key);
+        const body = collapsed ? "" : list.map(debtRow).join("");
+        return `<div class="dgroup-head ${collapsed ? "muted" : ""}" data-debt-group="${g.key}"><i data-lucide="${collapsed ? "chevron-right" : "chevron-down"}"></i>${g.label} <span style="color:var(--${g.cls})">· ${list.length}</span></div>${body}`;
+      }).join("");
+      setHtmlIfChanged("debts-list", html
+        || emptyState("badge-check", "Долгов нет", "Все призы получены или ещё не появились в очереди."));
+      if (typeof updateBulkBtn === "function") updateBulkBtn();
       lucide.createIcons();
     }
 

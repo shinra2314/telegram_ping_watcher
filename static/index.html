@@ -189,36 +189,31 @@
       <section id="debts" class="tabs debts-shell">
         <div class="debts-head">
           <div>
-            <div class="kicker">Prize debts</div>
+            <div class="kicker">Prize debts · что мне должны</div>
             <h2 class="section-title">Долги по призам</h2>
-            <div class="section-meta">Автоматическая очередь побед, где статус розыгрыша еще “ожидаю выдачи”.</div>
+            <div class="section-meta">Очередь побед, которые ещё не выданы. Сверху — что горит.</div>
           </div>
-          <button class="btn" id="refresh-debts-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <div style="display:flex;gap:8px">
+            <button class="btn" id="refresh-debts-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
+            <button class="btn primary" id="debts-bulk-btn" hidden><i data-lucide="circle-check"></i>Забрать выбранные · <span id="debts-bulk-count">0</span></button>
+          </div>
         </div>
-        <div class="grid stats" id="debts-stats"></div>
-        <div class="debts-layout">
-          <div class="panel debts-main-panel">
-            <div class="ops-panel-head">
-              <div>
-                <div class="kicker" id="debts-active-kicker">Все профили</div>
-                <h2 id="debts-active-title">Ожидают выдачи</h2>
-              </div>
-              <span class="badge warn" id="debts-active-count">0</span>
-            </div>
+        <div class="dhero" id="debts-hero"></div>
+        <div class="dseg-bar" id="debts-segments"></div>
+        <div class="dfocus-label" id="debts-focus-label" hidden><i data-lucide="flame"></i>Сейчас горит</div>
+        <div class="dfocus" id="debts-focus"></div>
+        <div class="dqueue-layout">
+          <div class="panel debts-main-panel" style="padding:14px">
             <div id="debts-list" class="board-list debts-list"></div>
           </div>
-          <aside class="panel debt-profiles-panel">
-            <div class="ops-panel-head">
-              <div>
-                <div class="kicker">Monitoring profiles</div>
-                <h2>Профили</h2>
-              </div>
-              <span class="metric-icon"><i data-lucide="at-sign"></i></span>
-            </div>
-            <div id="debt-profile-tabs" class="debt-profile-tabs"></div>
-          </aside>
+          <aside class="dlens" id="debts-lens"></aside>
         </div>
-        <div class="panel obsidian-debts-panel" id="obsidian-panel">
+        <div class="dhistory" id="debts-history-toggle">
+          <i data-lucide="history"></i>
+          <span style="flex:1">Журнал и Obsidian — забранные, скам, синхронизация Долги.md</span>
+          <i data-lucide="chevron-down"></i>
+        </div>
+        <div class="panel obsidian-debts-panel" id="obsidian-panel" hidden>
           <div class="ops-panel-head">
             <div>
               <div class="kicker">Obsidian · @Долги</div>

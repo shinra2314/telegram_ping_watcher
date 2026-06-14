@@ -183,30 +183,75 @@
       const card = e.target.closest(".card[data-ping]");
       if (card) openModal(JSON.parse(card.dataset.ping));
     });
-    $("debt-profile-tabs").addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-debt-profile]");
+    function applyDebtStatus(id, status) {
+      const mappedAction = { claimed: "claimed", scam: "scam", missed: "missed", missed_reply: "missed" }[status] || "missed";
+      return api(`/api/pings/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ giveaway_status: status, action_status: mappedAction })
+      });
+    }
+    function updateBulkBtn() {
+      const n = state.debtSelection ? state.debtSelection.size : 0;
+      const btn = $("debts-bulk-btn");
       if (!btn) return;
-      state.debtProfile = btn.dataset.debtProfile || "all";
+      btn.hidden = n === 0;
+      const c = $("debts-bulk-count");
+      if (c) c.textContent = n;
+    }
+    $("debts-segments").addEventListener("click", (e) => {
+      const seg = e.target.closest("[data-debt-seg]");
+      if (!seg) return;
+      state.debtSegment = seg.dataset.debtSeg || "all";
       if (state.debtBoard) renderDebts(state.debtBoard);
     });
     $("debts-list").addEventListener("click", async (e) => {
-      const statusBtn = e.target.closest("button[data-debt-status]");
+      const head = e.target.closest("[data-debt-group]");
+      if (head) {
+        const k = head.dataset.debtGroup;
+        if (state.debtCollapsed.has(k)) state.debtCollapsed.delete(k); else state.debtCollapsed.add(k);
+        if (state.debtBoard) renderDebts(state.debtBoard);
+        return;
+      }
+      const sel = e.target.closest("[data-debt-select]");
+      if (sel) {
+        e.stopPropagation();
+        const id = Number(sel.dataset.debtSelect);
+        if (state.debtSelection.has(id)) state.debtSelection.delete(id); else state.debtSelection.add(id);
+        if (state.debtBoard) renderDebts(state.debtBoard);
+        return;
+      }
+      const statusBtn = e.target.closest("[data-debt-status]");
       if (statusBtn) {
         e.stopPropagation();
-        const status = statusBtn.dataset.debtStatus;
-        const mappedAction = { claimed: "claimed", scam: "scam", missed: "missed", missed_reply: "missed" }[status] || "missed";
-        await api(`/api/pings/${statusBtn.dataset.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ giveaway_status: status, action_status: mappedAction })
-        });
+        await applyDebtStatus(statusBtn.dataset.id, statusBtn.dataset.debtStatus);
         await loadDebts();
         await loadDashboardSummary();
         return;
       }
       if (e.target.closest("a")) return;
-      const item = e.target.closest(".debt-item[data-ping]");
+      const item = e.target.closest(".dq-row[data-ping]");
       if (item) openModal(JSON.parse(item.dataset.ping));
+    });
+    $("debts-focus").addEventListener("click", async (e) => {
+      const statusBtn = e.target.closest("[data-debt-status]");
+      if (!statusBtn) return;
+      e.stopPropagation();
+      await applyDebtStatus(statusBtn.dataset.id, statusBtn.dataset.debtStatus);
+      await loadDebts();
+      await loadDashboardSummary();
+    });
+    $("debts-bulk-btn")?.addEventListener("click", async () => {
+      const ids = Array.from(state.debtSelection || []);
+      for (const id of ids) await applyDebtStatus(id, "claimed");
+      if (state.debtSelection) state.debtSelection.clear();
+      updateBulkBtn();
+      await loadDebts();
+      await loadDashboardSummary();
+    });
+    $("debts-history-toggle")?.addEventListener("click", () => {
+      const p = $("obsidian-panel");
+      if (p) p.hidden = !p.hidden;
     });
     $("obsidian-config").addEventListener("click", async (e) => {
       if (e.target.closest("#obsidian-save-cfg-btn")) await saveObsidianConfig();

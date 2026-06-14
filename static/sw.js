@@ -2,8 +2,8 @@
 // - precaches the shell
 // - stale-while-revalidate for read-only API endpoints (last-known data offline)
 // - network-first for everything else with cache fallback for navigations
-const CACHE_NAME = "pulse-desk-v35-offline";
-const RUNTIME_CACHE = "pulse-desk-runtime-v35";
+const CACHE_NAME = "pulse-desk-v36-offline";
+const RUNTIME_CACHE = "pulse-desk-runtime-v36";
 const SHELL_ASSETS = [
   "/",
   "/static/index.html",

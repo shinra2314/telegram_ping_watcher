@@ -928,14 +928,54 @@ header .actions { justify-content: flex-end; max-width: 640px; }
 .dashboard-command h1 { font-size: clamp(28px, 3vw, 42px); }
 
 .command-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  width: min(520px, 100%);
+  width: min(560px, 100%);
   justify-self: end;
+  justify-content: flex-end;
 }
-.command-actions .btn { min-width: 0; justify-content: flex-start; }
+.command-actions .btn { min-width: 0; justify-content: center; }
 .command-actions #logout-btn { color: var(--bad); }
+.command-actions kbd { margin-left: 6px; }
+
+/* Compact icon-only header buttons (theme, overflow, etc.) */
+.command-actions .icon-only { padding-inline: 11px; }
+.command-actions .icon-only > i { margin: 0; }
+
+/* Overflow "⋯" menu built on a native <details> — keeps button ids/handlers. */
+.cmd-overflow { position: relative; display: inline-flex; }
+.cmd-overflow > summary { list-style: none; cursor: pointer; }
+.cmd-overflow > summary::-webkit-details-marker { display: none; }
+.cmd-overflow > summary::marker { content: ""; }
+.cmd-overflow[open] > summary { background: var(--surface-2); border-color: var(--line-strong); }
+.cmd-overflow-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  display: grid;
+  gap: 6px;
+  min-width: 232px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.cmd-overflow-menu .btn { width: 100%; justify-content: flex-start; }
+
+/* Actions tied to the dashboard are hidden on other tabs (body[data-tab]).
+   No data-tab attribute = initial load on the dashboard, so keep them shown. */
+body[data-tab]:not([data-tab="dashboard"]) .dashboard-action { display: none !important; }
+
+/* Notifications button reflects an active (subscribed) state. */
+#btn-push-subscribe.is-on { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); }
+
+@media (max-width: 760px) {
+  .cmd-desktop-only { display: none; }
+}
 
 /* ---------- Dashboard bento ---------- */
 .dashboard-stats {

@@ -96,14 +96,6 @@
       window.open(url, "_blank", "noopener");
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     });
-    $("browser-notify-btn").addEventListener("click", async () => {
-      if (!("Notification" in window)) return;
-      const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
-      if (permission === "granted") {
-        localStorage.setItem("pulse_browser_notifications", "1");
-        $("browser-notify-btn").classList.add("primary");
-      }
-    });
     $("refresh-share-btn").addEventListener("click", loadShareGuide);
     $("copy-friend-message-btn").addEventListener("click", async () => {
       await navigator.clipboard.writeText($("friend-message").value);
@@ -616,19 +608,20 @@
 
     document.getElementById('btn-tg-digest')?.addEventListener('click', async () => {
         const btn = document.getElementById('btn-tg-digest');
+        const label = btn.querySelector('.digest-label') || btn;
         btn.disabled = true;
-        btn.textContent = 'Отправляю…';
+        label.textContent = 'Отправляю…';
         try {
             const hours = document.getElementById('digest-hours')?.value || '24';
             const res = await api(`/api/export/telegram-digest?hours=${hours}`, { method: 'POST' });
-            btn.textContent = `✅ Отправлено (${res.pings_count} пингов)`;
+            label.textContent = `Отправлено (${res.pings_count} пингов)`;
         } catch (e) {
-            btn.textContent = '❌ Ошибка';
+            label.textContent = 'Ошибка';
             console.error(e);
         }
         setTimeout(() => {
             btn.disabled = false;
-            btn.textContent = '📤 Дайджест в Telegram';
+            label.textContent = 'Дайджест в Telegram';
         }, 4000);
     });
 
@@ -671,7 +664,6 @@
       initTheme();
       restoreFilters();
       applyRole();
-      if (browserNotificationsEnabled()) $("browser-notify-btn").classList.add("primary");
       const ok = await loadSession();
       if (ok) {
         await loadSavedFilters();
@@ -713,8 +705,9 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(subscription.toJSON()),
         });
+        localStorage.setItem('pulse_browser_notifications', '1');
         const btn = document.getElementById('btn-push-subscribe');
-        if (btn) btn.textContent = '🔕 Отписаться';
+        if (btn) { btn.classList.add('is-on'); const l = btn.querySelector('.notify-label'); if (l) l.textContent = 'Отписаться'; }
     }
 
     async function unsubscribeFromPush() {
@@ -729,8 +722,9 @@
             });
             await sub.unsubscribe();
         }
+        localStorage.removeItem('pulse_browser_notifications');
         const btn = document.getElementById('btn-push-subscribe');
-        if (btn) btn.textContent = '🔔 Уведомления';
+        if (btn) { btn.classList.remove('is-on'); const l = btn.querySelector('.notify-label'); if (l) l.textContent = 'Уведомления'; }
     }
 
     document.getElementById('btn-push-subscribe')?.addEventListener('click', async () => {
@@ -748,6 +742,6 @@
             const reg = await navigator.serviceWorker.ready;
             const sub = await reg.pushManager.getSubscription();
             const btn = document.getElementById('btn-push-subscribe');
-            if (btn && sub) btn.textContent = '🔕 Отписаться';
+            if (btn && sub) { btn.classList.add('is-on'); const l = btn.querySelector('.notify-label'); if (l) l.textContent = 'Отписаться'; }
         } catch {}
     })();

@@ -46,7 +46,7 @@
       { id: "report-btn", label: "Сформировать отчёт", icon: "file-text" },
       { id: "refresh-btn", label: "Обновить данные", icon: "refresh-cw" },
       { id: "theme-toggle", label: "Сменить тему", icon: "sun-moon" },
-      { id: "browser-notify-btn", label: "Браузерные уведомления", icon: "bell" },
+      { id: "btn-push-subscribe", label: "Уведомления", icon: "bell" },
       { id: "export-json-btn", label: "Экспорт аналитики (JSON)", icon: "download" },
       { id: "logout-btn", label: "Выйти", icon: "log-out" }
     ];

@@ -49,16 +49,18 @@
           <div class="subtitle" id="page-subtitle">Мониторинг Telegram-упоминаний в реальном времени</div>
         </div>
         <div class="actions command-actions">
-          <button class="btn primary admin-only" id="scan-btn"><i data-lucide="database"></i>Скан истории</button>
-          <button class="btn admin-only" id="backfill-btn" title="Перечитать историю каналов и поймать пропущенные пинги по имени (ссылкой на профиль)"><i data-lucide="history"></i>Добрать пропущенные</button>
-          <button class="btn admin-only" id="report-btn"><i data-lucide="file-text"></i>Отчет</button>
-          <button class="btn" id="browser-notify-btn"><i data-lucide="bell"></i>Уведомления</button>
-          <button id="btn-push-subscribe" class="btn-secondary" title="Включить браузерные уведомления">
-            🔔 Уведомления
-          </button>
+          <button class="btn primary admin-only dashboard-action" id="scan-btn"><i data-lucide="database"></i>Скан истории</button>
           <button class="btn" id="refresh-btn"><i data-lucide="refresh-cw"></i>Обновить</button>
-          <button class="btn" id="cmdk-open" aria-label="Командная палитра" title="Командная палитра (Ctrl+K)"><i data-lucide="command"></i>Команды<kbd style="margin-left:auto">Ctrl K</kbd></button>
-          <button class="btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><i data-lucide="sun-moon"></i></button>
+          <button class="btn" id="btn-push-subscribe" title="Уведомления (браузер + push)"><i data-lucide="bell"></i><span class="notify-label">Уведомления</span></button>
+          <button class="btn cmd-desktop-only" id="cmdk-open" aria-label="Командная палитра" title="Командная палитра (Ctrl+K)"><i data-lucide="command"></i>Команды<kbd>Ctrl K</kbd></button>
+          <button class="btn icon-only" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><i data-lucide="sun-moon"></i></button>
+          <details class="cmd-overflow admin-only dashboard-action">
+            <summary class="btn icon-only" aria-label="Ещё действия" title="Ещё действия"><i data-lucide="ellipsis"></i></summary>
+            <div class="cmd-overflow-menu">
+              <button class="btn" id="backfill-btn" title="Перечитать историю каналов и поймать пропущенные пинги по имени (ссылкой на профиль)"><i data-lucide="history"></i>Добрать пропущенные</button>
+              <button class="btn" id="report-btn"><i data-lucide="file-text"></i>Отчет</button>
+            </div>
+          </details>
           <button class="btn" id="logout-btn"><i data-lucide="log-out"></i>Выйти</button>
         </div>
         <div class="command-metrics" id="command-metrics">
@@ -354,8 +356,8 @@
             <option value="48">48 ч</option>
             <option value="168">7 дн</option>
           </select>
-          <button id="btn-tg-digest" class="btn-secondary" title="Отправить дайджест в Telegram">
-            📤 Дайджест в Telegram
+          <button id="btn-tg-digest" class="btn" title="Отправить дайджест в Telegram">
+            <i data-lucide="send"></i><span class="digest-label">Дайджест в Telegram</span>
           </button>
         </div>
       </section>

@@ -316,3 +316,20 @@ async def disconnect_account(session_name: str) -> bool:
             state.accounts_state.setdefault(session_name, {"session_name": session_name})["status"] = "offline"
             return True
     return False
+
+
+async def restart_monitoring() -> dict[str, Any]:
+    """Disconnect every Telegram user-client and reconnect from the discovered
+    sessions. Re-establishes monitoring in-process — it does NOT reload code or
+    restart the Python process. Picks up newly added/removed ``.session`` files;
+    the auto-scan loop resumes against the fresh clients on its next cycle.
+    """
+    for client in list(state.clients):
+        name = getattr(client, "_session_name_custom", "")
+        if name:
+            await disconnect_account(name)
+    state.session_names = settings.discover_sessions()
+    for name in state.session_names:
+        start_background_task(f"telegram-start:{name}", start_client(name))
+    await record_app_event("INFO", "telegram", "Monitoring restarted", {"sessions": len(state.session_names)})
+    return {"status": "ok", "restarted": len(state.session_names), "sessions": state.session_names}

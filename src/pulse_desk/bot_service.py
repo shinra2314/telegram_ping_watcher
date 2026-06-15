@@ -34,7 +34,7 @@ from .giveaway_actions import confirm_safe_giveaway_join
 from .live import publish_live_event
 from .scan_engine import full_history_scan
 from .security import generate_access_key
-from .telegram_accounts import telegram_client_for_session
+from .telegram_accounts import restart_monitoring, telegram_client_for_session
 
 
 async def init_bot() -> None:
@@ -127,7 +127,7 @@ async def init_bot() -> None:
                     Button.inline("🔄 Скан", b"menu_scan"),
                     Button.inline("📜 Логи", b"menu_logs"),
                 ])
-                rows.append([Button.inline("⚙️ Настройки", b"st")])
+                rows.append([Button.inline("⚙️ Настройки", b"st"), Button.inline("♻️ Рестарт", b"menu_restart")])
             else:
                 rows.append([Button.inline("🔔 Мои уведомления", b"pf")])
             return rows
@@ -808,6 +808,14 @@ async def init_bot() -> None:
             asyncio.create_task(full_history_scan())
             await event.respond("🔄 **Сканирование истории запущено.**")
 
+        @bot_client.on(events.NewMessage(pattern="/restart"))
+        @safe
+        async def restart_handler(event):
+            if await deny_non_admin(event):
+                return
+            result = await restart_monitoring()
+            await event.respond(f"♻️ **Мониторинг перезапущен.**\nПереподключаю аккаунтов: `{result.get('restarted', 0)}`")
+
         @bot_client.on(events.NewMessage(pattern=r"/newkey(?:\s+(.+))?"))
         @safe
         async def newkey_handler(event):
@@ -989,7 +997,7 @@ async def init_bot() -> None:
 
             # ---- owner-only menu + actions ----
             admin_prefixes = ("revokekey_", "blockmember_", "unblockmember_", "fav_", "read_", "gconfirm_", "gskip_", "hidebc_")
-            if data in ("menu_keys", "menu_scan", "menu_logs") or data.startswith(admin_prefixes):
+            if data in ("menu_keys", "menu_scan", "menu_logs", "menu_restart") or data.startswith(admin_prefixes):
                 if role != "admin":
                     await event.answer("Только владелец", alert=True)
                     return
@@ -1003,6 +1011,10 @@ async def init_bot() -> None:
                 else:
                     asyncio.create_task(full_history_scan())
                     await event.answer("Скан запущен")
+                return
+            if data == "menu_restart":
+                result = await restart_monitoring()
+                await event.answer(f"♻️ Перезапуск: {result.get('restarted', 0)} аккаунт(ов)", alert=True)
                 return
             if data == "menu_logs":
                 if not LOG_FILE.exists():
@@ -1129,6 +1141,7 @@ async def init_bot() -> None:
                     BotCommand("keys", "Ключи доступа"),
                     BotCommand("members", "Пользователи"),
                     BotCommand("actions", "История действий по розыгрышам"),
+                    BotCommand("restart", "Перезапустить мониторинг"),
                 ]
                 await bot_client(SetBotCommandsRequest(
                     scope=BotCommandScopePeer(peer=await bot_client.get_input_entity(int(ADMIN_ID))),

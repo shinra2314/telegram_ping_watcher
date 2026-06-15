@@ -45,6 +45,7 @@
       { id: "scan-btn", label: "Скан истории", icon: "database" },
       { id: "report-btn", label: "Сформировать отчёт", icon: "file-text" },
       { id: "refresh-btn", label: "Обновить данные", icon: "refresh-cw" },
+      { id: "restart-monitoring-btn", label: "Перезапустить мониторинг", icon: "power" },
       { id: "theme-toggle", label: "Сменить тему", icon: "sun-moon" },
       { id: "btn-push-subscribe", label: "Уведомления", icon: "bell" },
       { id: "export-json-btn", label: "Экспорт аналитики (JSON)", icon: "download" },

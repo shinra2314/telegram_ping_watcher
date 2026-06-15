@@ -115,6 +115,17 @@
       await api("/api/backfill-mentions", { method: "POST" });
       setTimeout(() => { $("backfill-btn").disabled = false; refreshData({ silent: true, preserveScroll: true }); }, 2000);
     });
+    $("restart-monitoring-btn")?.addEventListener("click", async () => {
+      if (!confirm("Перезапустить мониторинг? Все Telegram-аккаунты переподключатся (приложение не перезапускается).")) return;
+      const btn = $("restart-monitoring-btn");
+      btn.disabled = true;
+      try {
+        const res = await api("/api/monitoring/restart", { method: "POST" });
+        alert(res.message || "Мониторинг перезапущен");
+      } finally {
+        setTimeout(() => { btn.disabled = false; refreshData({ silent: true, preserveScroll: true }); }, 2500);
+      }
+    });
     $("cancel-scan-btn").addEventListener("click", async () => {
       await api("/api/scan-history/cancel", { method: "POST" });
       await refreshData();

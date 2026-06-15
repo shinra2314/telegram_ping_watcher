@@ -1216,5 +1216,46 @@ class BotAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await database.get_broadcast_messages("fresh")), 1)
 
 
+class MonitoringRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_disconnects_all_then_starts_discovered_sessions(self):
+        import pulse_desk.telegram_accounts as ta
+        from pulse_desk.runtime import AppState
+
+        st = AppState()
+        st.clients = [SimpleNamespace(_session_name_custom="a"), SimpleNamespace(_session_name_custom="b")]
+        disconnected: list[str] = []
+        started: list[str] = []
+
+        async def fake_disconnect(name):
+            disconnected.append(name)
+            st.clients[:] = [c for c in st.clients if getattr(c, "_session_name_custom", "") != name]
+            return True
+
+        def fake_bg(name, coro):
+            started.append(name)
+            coro.close()  # don't actually connect to Telegram
+
+        async def fake_event(level, source, message, context=None):
+            return None
+
+        originals = (ta.state, ta.disconnect_account, ta.start_background_task, ta.settings, ta.record_app_event)
+        ta.state = st
+        ta.disconnect_account = fake_disconnect
+        ta.start_background_task = fake_bg
+        ta.settings = SimpleNamespace(discover_sessions=lambda: ["a", "b", "c"])
+        ta.record_app_event = fake_event
+        try:
+            result = await ta.restart_monitoring()
+        finally:
+            (ta.state, ta.disconnect_account, ta.start_background_task, ta.settings, ta.record_app_event) = originals
+
+        # Every connected client is disconnected first...
+        self.assertEqual(sorted(disconnected), ["a", "b"])
+        self.assertEqual(st.clients, [])
+        # ...then every freshly discovered session is (re)started.
+        self.assertEqual(started, ["telegram-start:a", "telegram-start:b", "telegram-start:c"])
+        self.assertEqual(result["restarted"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

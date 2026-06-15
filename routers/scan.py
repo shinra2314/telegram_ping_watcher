@@ -8,8 +8,16 @@ from pulse_desk.app_ctx import get_current_role, require_admin, state
 from pulse_desk.common import record_app_event
 from pulse_desk.scan import normalize_scan_history_limit
 from pulse_desk.scan_engine import backfill_name_mention_scan, full_history_scan
+from pulse_desk.telegram_accounts import restart_monitoring
 
 router = APIRouter()
+
+
+@router.post("/api/monitoring/restart", dependencies=[Depends(require_admin)])
+async def restart_monitoring_endpoint():
+    """Reconnect all Telegram accounts (re-establish monitoring in-process)."""
+    result = await restart_monitoring()
+    return {**result, "message": f"Мониторинг перезапущен: переподключаю аккаунтов — {result.get('restarted', 0)}"}
 
 
 @router.post("/api/scan-history", dependencies=[Depends(require_admin)])

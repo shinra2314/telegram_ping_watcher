@@ -16,7 +16,7 @@ from .bot_notify import send_bot_notification
 from .common import now_iso, record_app_event
 from .deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from .giveaway_actions import analyze_and_store_giveaway
-from .giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
+from .giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
 from .live import publish_live_event
 from .push import send_push
 
@@ -351,7 +351,7 @@ async def process_ping_message(
     ping_id = await save_ping(record)
     if ping_id and record.get("deadline_at"):
         await replace_ping_reminders(int(ping_id), record.get("deadline_at"), record.get("reminder_at"))
-    if ping_id and record.get("is_giveaway"):
+    if ping_id and should_analyze_giveaway(bool(record.get("is_giveaway")), existing is None, source):
         await analyze_and_store_giveaway(client, int(ping_id), record, message)
 
     if not ping_id:

@@ -103,6 +103,21 @@ def giveaway_outcome_resolution(text: str) -> str:
     return "pending"
 
 
+def should_analyze_giveaway(is_giveaway: bool, is_new: bool, source: str = "telegram") -> bool:
+    """Decide whether to run the network-heavy giveaway analysis for a message.
+
+    Scans re-deliver the same giveaway post on every sweep; re-running the
+    required-channel inspection each time is pure waste and a FloodWait risk
+    (it inspects each required channel over the network). Analyze only the
+    first time a post is seen, or when an edit may have changed its content.
+    """
+    if not is_giveaway:
+        return False
+    if is_new:
+        return True
+    return source == "telegram-edit"
+
+
 @dataclass
 class RequiredChannel:
     username: str

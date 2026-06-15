@@ -388,6 +388,19 @@ class CoreParsingTests(unittest.TestCase):
         self.assertEqual(status, "manual_required")
         self.assertIn("twitch.tv", blocked)
 
+    def test_giveaway_analysis_gate_runs_once_per_message(self):
+        from pulse_desk.giveaways import should_analyze_giveaway
+
+        # First time a giveaway post is seen → run the (network-heavy) analysis.
+        self.assertTrue(should_analyze_giveaway(True, is_new=True, source="telegram"))
+        # Re-scan re-delivers the same known post → skip; this is the fix that
+        # stops the redundant re-analysis churn.
+        self.assertFalse(should_analyze_giveaway(True, is_new=False, source="telegram"))
+        # An edit of a known post may have changed the content → analyze again.
+        self.assertTrue(should_analyze_giveaway(True, is_new=False, source="telegram-edit"))
+        # Non-giveaway messages never trigger giveaway analysis.
+        self.assertFalse(should_analyze_giveaway(False, is_new=True, source="telegram"))
+
     def test_settings_history_schema(self):
         from datetime import datetime
         row = {

@@ -1,13 +1,47 @@
-# Spectral Pulse
+# Aperture
 
 **A design philosophy for the Pulse Desk brand set.**
 
-Spectral Pulse is the conviction that attention itself has a color temperature. A signal arriving out of silence is not a grey event in a log — it is a flare, a chromatic ignition. The movement renders the act of listening as luminous gradient fields: violet deepening into magenta, magenta igniting into orange, the way a radar afterglow warms the eye a moment after the sweep has passed. Every canvas is a sky at the exact second a transmission lands.
+Aperture is the optics of the machine that catches the signal. Where an earlier
+identity rendered listening as an emotional sky, Aperture renders it as the cold,
+exact instrument that does the work — a viewfinder the instant before it locks on
+a target. The brand is not the feeling of an arrival; it is the precision tool
+that found it. Every canvas is the focal plane of a device built by someone who
+trusts measurement over mood.
 
-Form is concentric and patient. The core motif is the pulse ring — circles radiating from a single point of origin, each ring thinner and quieter than the last, meticulously spaced so the eye reads rhythm, not decoration. Against these rings sits one waveform: a calm horizontal line that spikes once, sharply, and returns to rest. One heartbeat per canvas. The discipline is absolute — a single point of origin, a single spike, never a crowd of gestures. Restraint is what separates the master's hand from the enthusiast's.
+The body is graphite. A near-black field, faintly darker at the corners so the
+eye falls to the centre, carries a single oscilloscope grid: minor lines and
+brighter majors, drawn from the centre outward so the geometry stays symmetric.
+The grid is not decoration but the instrument's own reference frame — the quiet
+ruled surface against which any deviation becomes visible. Nothing floats; every
+element sits on a coordinate.
 
-Color behaves as weather. Gradients are never linear decoration laid over a layout; they are the atmosphere the composition lives inside, blended radially and diagonally with painstaking calibration so no banding, no dead zones, no muddy midpoints survive. The palette is saturated but governed: deep indigo as the night floor, electric violet and hot magenta as the body, amber-orange as the single warm accent reserved for the moment of contact. White appears only as signal — rings, spike, glyph, a whisper of type.
+The core motif is the focus reticle. Four corner brackets close in on a ring;
+the ring carries fine measurement ticks; a crosshair extends along the four axes;
+and at the exact centre sits one locked dot. The dot is the only soft light in
+the entire system — a small, disciplined bloom reserved for the moment of
+contact. One reticle, one lock, never a crowd. Restraint is the whole point: the
+mark must read at the size of a chat-list avatar and still feel like an
+instrument, not an ornament.
 
-Scale is generous and unafraid. The pulse origin may sit off-center, letting rings exit the frame, implying the signal continues beyond what we are permitted to see. Negative space is not emptiness but listening room. Composition balances one heavy luminous zone against one quiet dark zone, the equilibrium of a long exposure photograph — the product of countless invisible adjustments, each margin and radius reconsidered until inevitability is achieved.
+Colour is governed to a single rule. Graphite is the body; structural marks — the
+viewfinder brackets framing the canvas — stay dim, the grey of machined metal,
+and never borrow the accent. Electric citron is the one signal colour, spent only
+where meaning is: the reticle, the scan node, the lock. For alerts the signal
+colour shifts to carry type — ice cyan for a mention, citron for a giveaway,
+warm amber for a win — but the system never lights up everywhere at once. White
+appears as sparse instrument type and nothing else.
 
-Typography is a clinical whisper inside an emotional sky: thin geometric letterforms, widely tracked, small, placed with surveyor's precision. Words never explain; they timestamp. A name, a frequency, a coordinate — the sparse annotations of an imaginary discipline that studies arrivals. The work must read as an artifact labored over by someone at the absolute top of their field: every glow falloff hand-tuned, every ring interval measured, master-level execution disguised as effortlessness.
+Form is patient and off-centre. The reticle may sit toward one edge, its outer
+brackets and ring exiting the frame, implying the field of view continues beyond
+what we are permitted to see. A single horizontal scan line crosses the canvas
+with its own measurement ticks and one bright node at the lock point — one sweep,
+never a flurry. Negative space is listening room, not emptiness.
+
+Typography is an instrument readout, not a voice. Thin geometric letterforms,
+widely tracked, set the name; a monospace caption timestamps the canvas with a
+unit code and a discipline — `PD·01 // SIGNAL LOCK`. Words never explain; they
+label. The work must read as the panel of a device engineered by someone at the
+top of their field — every grid interval measured, every bracket arm the same
+length, master-level execution disguised as the plainness of a tool that simply
+works.

@@ -10,7 +10,7 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from pulse_desk.giveaways import CHECK_KEYWORDS_DEFAULT, is_check_text
+from pulse_desk.giveaways import CHECK_KEYWORDS_DEFAULT, check_addressed_to_other, is_check_text
 
 try:
     import database
@@ -23,47 +23,98 @@ except ModuleNotFoundError as exc:  # Allows parser tests to run without project
 class CheckMatcherTests(unittest.TestCase):
     kw = CHECK_KEYWORDS_DEFAULT
 
-    def test_matches_bare_check(self):
-        self.assertTrue(is_check_text("чек на 5 TON, забирай", self.kw))
+    def test_matches_amount_and_currency(self):
+        # Real redeemable checks always carry an amount + currency.
+        for phrase in (
+            "чек на 5 TON, забирай",
+            "Чек на 1.413019 USDT (105 RUB).",
+            "Чек на 5 USDT (5.0$)",
+            "Чек на 105 ₽",
+        ):
+            self.assertTrue(is_check_text(phrase, self.kw), msg=phrase)
 
-    def test_matches_case_insensitive_and_emoji(self):
-        self.assertTrue(is_check_text("💸 Чек: t.me/CryptoBot?start=CQ", self.kw))
+    def test_matches_wallet_signal(self):
+        # A wallet-bot link/mention or redeem param is a strong signal even with
+        # no explicit amount in the caption text.
+        for phrase in (
+            "💸 Чек: t.me/CryptoBot?start=CQ",
+            "чек через @send",
+            "забери чек в @xrocket",
+        ):
+            self.assertTrue(is_check_text(phrase, self.kw), msg=phrase)
 
     def test_matches_multicheck(self):
         self.assertTrue(is_check_text("раздаю мультичек на 20 человек", self.kw))
-
-    def test_matches_inflections(self):
-        self.assertTrue(is_check_text("два чека для вас", self.kw))
-        self.assertTrue(is_check_text("свежие чеки тут", self.kw))
         self.assertTrue(is_check_text("ещё мультичеки", self.kw))
+
+    def test_rejects_check_without_value_signal(self):
+        # Noun "чек" with no amount, wallet signal, or "мультичек" is noise:
+        # cashier receipts, "send me the receipt", bare plurals.
+        for phrase in (
+            "кассовый чек",
+            "скинь чек оплаты на карту",
+            "два чека для вас",
+            "пачка чеков",
+            "приз в чеке",
+            "свежие чеки тут",
+        ):
+            self.assertFalse(is_check_text(phrase, self.kw), msg=phrase)
+
+    def test_rejects_already_claimed(self):
+        for phrase in (
+            "Чек на 5 USDT — получено",
+            "чек на 5 TON, активаций больше нет",
+            "Чек на 10 USDT, чек недействителен",
+        ):
+            self.assertFalse(is_check_text(phrase, self.kw), msg=phrase)
+
+    def test_claim_call_to_action_still_matches(self):
+        # "Получить" (button CTA) must NOT be confused with "получено" (claimed).
+        self.assertTrue(is_check_text("Чек на 5 USDT, получить", self.kw))
 
     def test_no_false_positive_on_substring(self):
         # "человечек" ends with "чек" but must not match (word boundary).
-        self.assertFalse(is_check_text("маленький человечек", self.kw))
+        self.assertFalse(is_check_text("маленький человечек на 5 TON", self.kw))
 
     def test_no_match_on_verb_forms(self):
         # "чекать"/"чекни"/… are verbs ("to check it out"), not redeemable
         # checks — they must not trigger a check notification.
         for phrase in (
-            "го чекать профиль",
-            "чекни личку",
+            "го чекать профиль на 5 TON",
+            "чекни личку, там 5 USDT",
             "я чекаю каналы целыми днями",
-            "надо чекнуть бота",
-            "чекаем дальше",
+            "надо чекнуть бота @xrocket",
+            "зачекать раздачу на 5 TON",
         ):
             self.assertFalse(is_check_text(phrase, self.kw), msg=phrase)
 
-    def test_still_matches_noun_cases(self):
-        # Noun inflections stay matched after the verb-exclusion fix.
-        for phrase in ("приз в чеке", "рад чеку", "пачка чеков"):
-            self.assertTrue(is_check_text(phrase, self.kw), msg=phrase)
-
     def test_no_match_without_keyword(self):
         self.assertFalse(is_check_text("обычное сообщение без подарков", self.kw))
+        self.assertFalse(is_check_text("раздаю 5 USDT всем", self.kw))
 
     def test_empty_inputs(self):
         self.assertFalse(is_check_text("", self.kw))
-        self.assertFalse(is_check_text("чек", []))
+        self.assertFalse(is_check_text("чек на 5 TON", []))
+
+
+class CheckAddressedToOtherTests(unittest.TestCase):
+    text = "Чек на 5 USDT (5.0$) для @IvanLydhii777"
+
+    def test_addressed_to_non_owner(self):
+        self.assertTrue(check_addressed_to_other(self.text, ["myhandle"]))
+
+    def test_addressed_to_owner_is_not_other(self):
+        # Match is case-insensitive; "@" prefix on owner handle tolerated.
+        self.assertFalse(check_addressed_to_other(self.text, ["@IvanLydhii777"]))
+        self.assertFalse(check_addressed_to_other(self.text, ["ivanlydhii777"]))
+
+    def test_open_check_without_target_is_not_other(self):
+        self.assertFalse(check_addressed_to_other("Чек на 5 USDT", ["myhandle"]))
+
+    def test_unknown_owner_list_does_not_filter(self):
+        # Empty owner list -> we cannot tell -> keep the check.
+        self.assertFalse(check_addressed_to_other(self.text, []))
+        self.assertFalse(check_addressed_to_other(self.text, None))
 
 
 class CheckFilterDbTests(unittest.IsolatedAsyncioTestCase):

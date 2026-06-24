@@ -16,7 +16,7 @@ from .bot_notify import send_bot_notification, send_check_notification
 from .common import now_iso, record_app_event
 from .deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from .giveaway_actions import analyze_and_store_giveaway
-from .giveaways import giveaway_outcome_resolution, is_check_text, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
+from .giveaways import check_addressed_to_other, giveaway_outcome_resolution, is_check_text, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
 from .live import publish_live_event
 from .push import send_push
 
@@ -32,7 +32,10 @@ def check_is_giveaway(text: str, chat_type: str = "") -> bool:
 
 
 def check_is_check(text: str) -> bool:
-    return is_check_text(text, state.check_keywords)
+    # Redeemable crypto check AND not explicitly addressed to someone else.
+    return is_check_text(text, state.check_keywords) and not check_addressed_to_other(
+        text, state.ping_usernames
+    )
 
 
 def priority_label(score: int) -> str:

@@ -93,15 +93,62 @@ def _check_regex(keywords: Iterable[str]) -> Optional[re.Pattern[str]]:
     return _check_regex_cache[key]
 
 
-def is_check_text(text: str, keywords: Iterable[str]) -> bool:
-    """True if the message advertises a redeemable check/multicheck.
+# A redeemable crypto check always carries an amount + currency...
+CHECK_AMOUNT_RE = re.compile(
+    r"(?:\d+(?:[.,]\d+)?\s*(?:usdt|usdc|usd|ton|trx|btc|eth|ltc|bnb|sol|"
+    r"not|dogs|rub|руб|грн|uah|eur|\$|₽|₴|€))"
+    r"|(?:(?:\$|usd|usdt|₽|₴|€)\s*\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+# ...or a wallet-bot link / mention / redeem param (CryptoBot, @send, xRocket).
+CHECK_WALLET_RE = re.compile(
+    r"(?:t\.me/(?:cryptobot|send|xrocket|wallet|tonkeeper))"
+    r"|(?:@(?:cryptobot|xrocket|send|wallet|tonkeeper))"
+    r"|(?:\bcryptobot\b|\bxrocket\b)"
+    r"|(?:\?start=)",
+    re.IGNORECASE,
+)
+# Already-claimed / dead checks: "получено" (claimed), exhausted, expired.
+# "получить"/"получи" (a call-to-action button) is deliberately NOT matched.
+CHECK_CLAIMED_RE = re.compile(
+    r"получен(?:о|а|ы)?(?![а-яё])|активаций\s+больше\s+нет|"
+    r"чек\s+недействител|истёк|истек(?![а-яё])|разобран",
+    re.IGNORECASE | re.UNICODE,
+)
+# Addressed check: "для @username" / "for @username".
+CHECK_FOR_OTHER_RE = re.compile(r"(?:для|for)\s+@([A-Za-z0-9_]{4,32})", re.IGNORECASE)
 
-    Word-boundary matching (unlike the substring rules above) so common words
-    like "человечек" don't trigger a false positive, while inflections such as
-    "чеки"/"чеков"/"мультичеки" still match.
+
+def is_check_text(text: str, keywords: Iterable[str]) -> bool:
+    """True if the message advertises a *redeemable* crypto check.
+
+    Requires the check noun (word-boundary, verb-safe — so "человечек" and
+    "чекать" don't match) AND a value signal: an amount+currency, a wallet-bot
+    link/mention, or the word "мультичек". Already-claimed checks are rejected.
     """
     regex = _check_regex(keywords)
-    return bool(regex and text and regex.search(text))
+    if not (regex and text and regex.search(text)):
+        return False
+    if CHECK_CLAIMED_RE.search(text):
+        return False
+    if "мультичек" in text.lower():
+        return True
+    return bool(CHECK_AMOUNT_RE.search(text) or CHECK_WALLET_RE.search(text))
+
+
+def check_addressed_to_other(text: str, owner_usernames: Iterable[str]) -> bool:
+    """True if a check is explicitly addressed to a non-owner ("для @someone").
+
+    Owner handles come from the tracked-username list. If that list is empty we
+    cannot tell who the owner is, so we do not filter (keep the check).
+    """
+    owners = {u.lstrip("@").lower() for u in (owner_usernames or []) if u}
+    if not owners:
+        return False
+    return any(
+        match.group(1).lower() not in owners
+        for match in CHECK_FOR_OTHER_RE.finditer(text or "")
+    )
 
 
 def is_giveaway_outcome_text(text: str) -> bool:

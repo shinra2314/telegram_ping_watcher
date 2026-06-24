@@ -32,6 +32,9 @@ GIVEAWAY_OUTCOME_WORDS = (
     "конкурс закончен",
     "congratulations",
 )
+# Redeemable CryptoBot checks posted in channels ("чек на 5 TON", "мультичек").
+CHECK_KEYWORDS_DEFAULT = ("чек", "мультичек")
+_check_regex_cache: dict[tuple[str, ...], Optional[re.Pattern[str]]] = {}
 WINNER_LIST_RE = re.compile(r"(?:^|\n)\s*(?:🏆\s*)?(?:победител[ьи]|winners?)\s*[:：-]", re.IGNORECASE)
 GENERIC_WINNER_COUNT_RE = re.compile(
     r"\b(?:\d+|один|одна|два|две|три|четыре|пять|одного)\s+победител[ьяей]*\b|"
@@ -66,6 +69,39 @@ def matches_strict_giveaway_rule(text: str, chat_type: str, keywords: Iterable[s
         return False
     lowered = (text or "").lower()
     return any(keyword.lower() in lowered for keyword in keywords if keyword)
+
+
+def _check_regex(keywords: Iterable[str]) -> Optional[re.Pattern[str]]:
+    """Compile (and cache) a word-boundary regex over the check keywords."""
+    key = tuple(sorted({k.strip().lower() for k in keywords if k and k.strip()}, key=len, reverse=True))
+    if key not in _check_regex_cache:
+        if not key:
+            _check_regex_cache[key] = None
+        else:
+            alternation = "|".join(re.escape(word) for word in key)
+            # Allow only Russian *noun* endings after the stem, then forbid any
+            # further Cyrillic letter. This keeps inflections matching
+            # (чек/чека/чеки/чеков/чеке/мультичеки) while rejecting verbs
+            # (чекать/чекни/чекаю/чекнуть), which continue with a letter and
+            # otherwise spammed false-positive check alerts. Endings are listed
+            # longest-first so "ами" wins over "ам"/"а".
+            endings = "ами|ах|ам|ов|ом|а|у|е|и"
+            _check_regex_cache[key] = re.compile(
+                rf"(?<!\w)(?:{alternation})(?:{endings})?(?![а-яё])",
+                re.IGNORECASE | re.UNICODE,
+            )
+    return _check_regex_cache[key]
+
+
+def is_check_text(text: str, keywords: Iterable[str]) -> bool:
+    """True if the message advertises a redeemable check/multicheck.
+
+    Word-boundary matching (unlike the substring rules above) so common words
+    like "человечек" don't trigger a false positive, while inflections such as
+    "чеки"/"чеков"/"мультичеки" still match.
+    """
+    regex = _check_regex(keywords)
+    return bool(regex and text and regex.search(text))
 
 
 def is_giveaway_outcome_text(text: str) -> bool:

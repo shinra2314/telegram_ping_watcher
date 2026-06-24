@@ -33,6 +33,19 @@ from ._core import (
 DB_PATH = DEFAULT_DB_PATH
 BACKUP_DIR = DEFAULT_BACKUP_DIR
 
+from .access_windows import (
+    create_access_window,
+    create_disable_until_window,
+    deactivate_access_window,
+    get_access_audit,
+    get_access_window,
+    list_access_windows,
+    list_all_access_windows,
+    record_access_audit,
+    set_access_window_active,
+    set_member_default_policy,
+    set_member_timezone,
+)
 from .backups import backup_db_if_present, create_db_backup, list_db_backups
 from .boards import get_debt_board, get_giveaway_board, get_task_overview
 from .bot_access import (
@@ -80,7 +93,7 @@ from .giveaways import (
     update_giveaway_candidate_status,
     upsert_giveaway_candidate,
 )
-from .maintenance import cleanup_old_data
+from .maintenance import cleanup_old_data, purge_stale_checks
 from .market import get_market_history, save_market_snapshot
 from .outbox import cleanup_outbox, enqueue_outbox_event, get_outbox_after, get_outbox_stats
 from .pings import (

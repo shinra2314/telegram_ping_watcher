@@ -20,6 +20,9 @@ class AppState:
     bot_username: Optional[str] = None
     # Pending free-text inputs for the bot settings menus: sender_id -> {kind, scope, armed_at}.
     bot_pending_inputs: dict[int, dict] = field(default_factory=dict)
+    # Scheduled-access cache: tg_id -> (allowed, valid_until_utc, reason). Computed
+    # in bot_role, refreshed by access_scheduler_loop, invalidated on rule edits.
+    access_cache: dict[int, tuple[bool, datetime, str]] = field(default_factory=dict)
     connected_user_ids: set[int] = field(default_factory=set)
     pending_auths: dict[str, dict[str, Any]] = field(default_factory=dict)
     processed_msg_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
@@ -51,6 +54,7 @@ class AppState:
     ping_user_ids_resolved: set[str] = field(default_factory=set)  # lowercase usernames already attempted
     win_keywords: list = field(default_factory=list)
     giveaway_keywords: list = field(default_factory=list)
+    check_keywords: list = field(default_factory=list)
     high_priority_keywords: list = field(default_factory=list)
     ignore_keywords: list = field(default_factory=list)
     join_button_keywords: list = field(default_factory=list)
@@ -77,6 +81,14 @@ class AppState:
         "scan_run_id": None,
         "cancel_requested": False,
     })
+
+    def heartbeat(self, name: str) -> None:
+        """Record a successful cycle of a background job, for the watchdog.
+
+        Supervised loops run forever and never return, so the supervisor cannot
+        time their success — each loop calls this at the end of a healthy cycle
+        so ``watchdog_loop`` can tell a live job from one stuck failing."""
+        self.job_last_ok_at[name] = datetime.now()
 
     def remember_message(self, key: str, limit: int = 5000) -> bool:
         if key in self.processed_msg_ids:

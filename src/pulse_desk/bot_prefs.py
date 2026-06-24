@@ -15,6 +15,7 @@ DEFAULT_MEMBER_PREFS = {
     "mentions": True,
     "giveaways": True,
     "wins": True,
+    "checks": True,
     "deadlines": False,
     "digest": False,
 }
@@ -23,6 +24,7 @@ DEFAULT_MEMBER_PREFS = {
 KEYWORD_SCOPES = {
     "w": ("win_keywords", "🏆 Победы"),
     "g": ("giveaway_keywords", "🎁 Розыгрыши"),
+    "c": ("check_keywords", "💸 Чеки"),
     "h": ("high_priority_keywords", "⚡ Приоритет"),
     "i": ("ignore_keywords", "🚫 Игнор"),
 }
@@ -31,6 +33,7 @@ _TYPE_TO_PREF = {
     "mention": "mentions",
     "giveaway": "giveaways",
     "win": "wins",
+    "check": "checks",
     "deadline": "deadlines",
     "digest": "digest",
 }
@@ -117,6 +120,56 @@ def seconds_until_hhmm(now: datetime, hhmm: str) -> float:
     return (target - now).total_seconds()
 
 
+_WEEKDAYS = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+
+
+def parse_weekday_spec(text: str) -> list[int]:
+    """'mon-fri' -> [1..5]; 'sat,sun' -> [6,7]; wraps (fri-mon); [] if invalid."""
+    text = (text or "").strip().lower()
+    if not text:
+        return []
+    result: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a not in _WEEKDAYS or b not in _WEEKDAYS:
+                return []
+            start, end = _WEEKDAYS[a], _WEEKDAYS[b]
+            seq = range(start, end + 1) if start <= end else list(range(start, 8)) + list(range(1, end + 1))
+            result.update(seq)
+        elif part in _WEEKDAYS:
+            result.add(_WEEKDAYS[part])
+        else:
+            return []
+    return sorted(result)
+
+
+def parse_duration_to_seconds(text: str) -> Optional[int]:
+    """'2h' -> 7200, '30m' -> 1800, '1d' -> 86400, '1h30m' -> 5400. None if invalid."""
+    text = re.sub(r"\s+", "", (text or "").strip().lower())
+    if not text:
+        return None
+    matches = re.findall(r"(\d+)([dhm])", text)
+    if not matches or "".join(f"{n}{u}" for n, u in matches) != text:
+        return None
+    unit = {"d": 86400, "h": 3600, "m": 60}
+    return sum(int(n) * unit[u] for n, u in matches)
+
+
+def next_hhmm_datetime(now: datetime, hhmm: str) -> Optional[datetime]:
+    """Next occurrence of HH:MM at/after `now` (today if future, else tomorrow); None if invalid."""
+    norm = parse_hhmm(hhmm)
+    if not norm:
+        return None
+    target = now.replace(hour=int(norm[:2]), minute=int(norm[3:]), second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+
 def parse_quiet_hours_input(text: str) -> Optional[tuple[str, str]]:
     """Parse '23:00-08:00' into ('23:00', '08:00'); None if invalid."""
     parts = (text or "").split("-")
@@ -182,6 +235,7 @@ def render_member_prefs_text(prefs: dict) -> str:
             f"{mark('mentions')} Упоминания",
             f"{mark('giveaways')} Розыгрыши",
             f"{mark('wins')} Победы",
+            f"{mark('checks')} Чеки",
             f"{mark('deadlines')} Дедлайны",
             f"{mark('digest')} Ежедневный дайджест",
         ]

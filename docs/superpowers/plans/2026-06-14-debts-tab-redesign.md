@@ -331,7 +331,7 @@ $("debts-list").addEventListener("click", async (e) => {
     e.stopPropagation();
     const status = statusBtn.dataset.debtStatus;
     const mappedAction = { claimed: "claimed", scam: "scam", missed: "missed", missed_reply: "missed" }[status] || "missed";
-    await api(`/api/pings/${statusBtn.dataset.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ giveaway_status: status, action_status: mappedAction }) });
+    await api(`/api/pings/${statusBtn.dataset.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ giveaway_status: status, action_status: mappedAction }) });
     await loadDebts(); await loadDashboardSummary(); return;
   }
   if (e.target.closest("a")) return;
@@ -345,13 +345,13 @@ function updateBulkBtn() {
 }
 $("debts-bulk-btn")?.addEventListener("click", async () => {
   const ids = Array.from(state.debtSelection || []);
-  for (const id of ids) await api(`/api/pings/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ giveaway_status: "claimed", action_status: "claimed" }) });
+  for (const id of ids) await api(`/api/pings/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ giveaway_status: "claimed", action_status: "claimed" }) });
   state.debtSelection.clear(); updateBulkBtn(); await loadDebts(); await loadDashboardSummary();
 });
 $("debts-history-toggle")?.addEventListener("click", () => { const p = $("obsidian-panel"); if (p) p.hidden = !p.hidden; });
 ```
 
-> Note: confirm the existing status-update verb — current code uses `method: "PATCH"` at `app-main.js:198`. Match it exactly (the example above uses PATCH).
+> Note: status-update verb confirmed as `method: "PUT"` at `app-main.js:199`. Use PUT exactly across debtRow/focus/bulk.
 
 - [ ] **Step 2: Verify** — `node --check static/js/app-main.js`. Manual: click segments (filter), group headers (collapse), checkbox (select → bulk button), Забрал/Скам (row updates), history toggle (Obsidian panel shows/hides), row body (opens modal).
 
@@ -449,6 +449,6 @@ async def test_debt_board_stats_has_value_and_buckets(tmp_path, monkeypatch):
 ## Self-review notes
 
 - **Spec coverage:** P0 = arch §4 + visual §5 + queue/hero/focus/lens; P1 = §6 aggregates; P2 = §5 risk state + §7 risk auto; P3 = §7 quick actions/bulk/hotkeys; P4 = §4 history + §7 dележ. Metrics (§9) validated post-rollout, not code tasks.
-- **Verb consistency:** status updates use `PATCH /api/pings/{id}` (matches existing `app-main.js:198`); confirm at execution and keep identical across debtRow/focus/bulk.
+- **Verb consistency:** status updates use `PUT /api/pings/{id}` (matches existing `app-main.js:199`); keep identical across debtRow/focus/bulk.
 - **No new types** beyond `state.debtSegment/debtSelection/debtCollapsed` (declared in File structure) and the named render functions (all defined in Task 3).
 - **Risk:** DOM IDs consumed by handlers (`debts-list`, `debts-segments`, `debts-hero`, `debts-focus`, `debts-lens`, `obsidian-panel`) are created in Task 2 before Task 3/4 use them.

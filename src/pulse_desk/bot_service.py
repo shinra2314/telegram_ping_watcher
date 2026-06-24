@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import HTTPException
@@ -15,14 +15,18 @@ from telegram_ping_watcher import normalize_usernames
 
 from . import APP_VERSION
 from . import watch_settings as ws
+from .access_control import find_undoable, parse_repeat_rule, plan_undo, resolve_access, window_from_row
 from .analytics import build_analytics
-from .app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, LOG_FILE, logger, settings, state
+from .app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, CHECK_FRESH_MINUTES, LOG_FILE, logger, settings, state
 from .bot_notify import BOT_ASSETS_DIR
 from .bot_prefs import (
     KEYWORD_SCOPES,
+    next_hhmm_datetime,
+    parse_duration_to_seconds,
     parse_hhmm,
     parse_member_prefs,
     parse_quiet_hours_input,
+    parse_weekday_spec,
     render_keyword_list_text,
     render_member_prefs_text,
     render_notification_settings_text,
@@ -37,25 +41,37 @@ from .security import generate_access_key
 from .telegram_accounts import restart_monitoring, telegram_client_for_session
 
 
+_ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
+
+
 async def init_bot() -> None:
     import database
     from database import (
+        create_access_window,
         create_bot_key,
+        create_disable_until_window,
+        deactivate_access_window,
         delete_broadcast_messages,
         get_bot_key_by_secret,
         get_bot_member,
         get_broadcast_messages,
+        get_access_audit,
+        list_all_access_windows,
         get_giveaway_board,
         get_market_history,
         get_pings,
         get_recent_giveaway_actions,
+        list_access_windows,
         list_bot_keys,
         list_bot_members,
         mark_ping_read as mark_ping_read_db,
+        record_access_audit,
         record_giveaway_action,
         revoke_bot_key,
+        set_access_window_active,
         set_bot_member_blocked,
         set_bot_member_prefs,
+        set_member_default_policy,
         set_setting,
         toggle_favorite,
         touch_bot_member,
@@ -95,15 +111,57 @@ async def init_bot() -> None:
                             pass
             return ids
 
+        async def _access_decision(sender_id: int, member: dict):
+            """Cached schedule decision for a member: (allowed, reason, until_utc).
+
+            Source of truth is computed here, not a stored flag — so access stays
+            correct even if the scheduler loop is down. The cache only skips repeat
+            SQL until the next window boundary."""
+            now = datetime.now(timezone.utc)
+            cached = state.access_cache.get(sender_id)
+            if cached and now < cached[1]:
+                return cached[0], cached[2], cached[1]
+            rows = await list_access_windows(sender_id)
+            decision = resolve_access(member, [window_from_row(r) for r in rows], now)
+            until = decision.until or (now + timedelta(minutes=1))
+            state.access_cache[sender_id] = (decision.allowed, until, decision.reason)
+            return decision.allowed, decision.reason, until
+
+        def _until_phrase(until: Optional[datetime]) -> str:
+            if not until:
+                return ""
+            return f" до {until.astimezone().strftime('%d.%m %H:%M')}"
+
         async def bot_role(sender_id: int) -> Optional[str]:
-            """Resolve a Telegram user to 'admin', 'viewer', or None (no access)."""
+            """Resolve a Telegram user to 'admin', 'viewer', or None (no access).
+
+            Admins bypass the schedule; members are additionally gated by their
+            access windows (see access_control.resolve_access)."""
             if sender_id in _bot_admin_chat_ids():
                 return "admin"
             member = await get_bot_member(sender_id)
-            if member and not member.get("blocked"):
-                await touch_bot_member(sender_id)
-                return member.get("role") or "viewer"
-            return None
+            if not member or member.get("blocked"):
+                return None
+            await touch_bot_member(sender_id)
+            allowed, _reason, _until = await _access_decision(sender_id, member)
+            if not allowed:
+                return None
+            return member.get("role") or "viewer"
+
+        async def access_block_notice(sender_id: int) -> Optional[str]:
+            """User-facing message if a known member is currently closed by schedule."""
+            if sender_id in _bot_admin_chat_ids():
+                return None
+            member = await get_bot_member(sender_id)
+            if not member or member.get("blocked"):
+                return None
+            allowed, _reason, until = await _access_decision(sender_id, member)
+            if allowed:
+                return None
+            return (
+                "⏰ **Доступ к боту сейчас закрыт по расписанию.**\n"
+                f"Откроется автоматически{_until_phrase(until)}."
+            )
 
         async def deny_non_admin(event) -> bool:
             """True if the sender must be blocked from an owner-only action."""
@@ -118,8 +176,9 @@ async def init_bot() -> None:
         def main_menu_buttons(role: str) -> list[list[Button]]:
             rows = [
                 [Button.inline("📊 Статистика", b"menu_stats"), Button.inline("🎁 Розыгрыши", b"menu_giveaways")],
-                [Button.inline("🕐 Последние", b"menu_recent"), Button.inline("💹 Курсы", b"menu_market")],
-                [Button.inline("🛰 Статус", b"menu_status"), Button.inline("❓ Помощь", b"menu_help")],
+                [Button.inline("💸 Чеки", b"menu_checks"), Button.inline("🕐 Последние", b"menu_recent")],
+                [Button.inline("💹 Курсы", b"menu_market"), Button.inline("🛰 Статус", b"menu_status")],
+                [Button.inline("❓ Помощь", b"menu_help")],
             ]
             if role == "admin":
                 rows.append([
@@ -162,6 +221,9 @@ async def init_bot() -> None:
             async def inner(event):
                 role = await bot_role(event.sender_id)
                 if role is None:
+                    notice = await access_block_notice(event.sender_id)
+                    if notice:
+                        await event.respond(notice)
                     return
                 await handler(event, role)
             inner.__name__ = getattr(handler, "__name__", "inner")
@@ -207,6 +269,7 @@ async def init_bot() -> None:
                 "• /status — состояние аккаунтов",
                 "• /giveaways — розыгрыши",
                 "• /recent `[N]` — последние упоминания",
+                "• /checks — найденные чеки",
                 "• /search `<текст>` — поиск",
                 "• /market — курсы",
                 "• /settings — настройки и уведомления",
@@ -222,6 +285,7 @@ async def init_bot() -> None:
                     "• /newkey `[метка]` — создать ключ",
                     "• /keys — список ключей",
                     "• /members `[запрос]` — пользователи / поиск",
+                    "• /access `<user>` — доступ по расписанию",
                     "• /actions — действия по розыгрышам",
                     "• /settings — настройки мониторинга",
                 ]
@@ -300,6 +364,21 @@ async def init_bot() -> None:
                 )
             return "\n\n".join(result)
 
+        async def render_checks(n: int = 10) -> str:
+            cutoff = (datetime.now() - timedelta(minutes=CHECK_FRESH_MINUTES)).replace(microsecond=0).isoformat()
+            rows = await get_pings(limit=n, chat_type="check", date_from=cutoff)
+            if not rows:
+                return "💸 **Чеки**\n" + DIV + "\n📭 __Чеков пока нет.__"
+            result = [f"💸 **Чеки** ({len(rows)})", DIV]
+            for row in rows:
+                link = row.get("link") or ""
+                result.append(
+                    f"• `{_fmt_dt(row.get('detected_at'))}` · {row['chat']}\n"
+                    f"{(row.get('text') or '')[:160]}"
+                    + (f"\n🔗 {link}" if link else "")
+                )
+            return "\n\n".join(result)
+
         async def render_market() -> str:
             market = await get_market_history(limit=1)
             if not market:
@@ -332,6 +411,7 @@ async def init_bot() -> None:
             "pf_me": "mentions",
             "pf_gw": "giveaways",
             "pf_wn": "wins",
+            "pf_ch": "checks",
             "pf_dl": "deadlines",
             "pf_dg": "digest",
         }
@@ -444,8 +524,8 @@ async def init_bot() -> None:
             buttons = [
                 [Button.inline("🔔 Включить всё" if prefs.get("muted") else "🔕 Отключить всё", b"pf_mu")],
                 [toggle_btn("Упоминания", "mentions", b"pf_me"), toggle_btn("Розыгрыши", "giveaways", b"pf_gw")],
-                [toggle_btn("Победы", "wins", b"pf_wn"), toggle_btn("Дедлайны", "deadlines", b"pf_dl")],
-                [toggle_btn("Дайджест", "digest", b"pf_dg")],
+                [toggle_btn("Победы", "wins", b"pf_wn"), toggle_btn("Чеки", "checks", b"pf_ch")],
+                [toggle_btn("Дедлайны", "deadlines", b"pf_dl"), toggle_btn("Дайджест", "digest", b"pf_dg")],
                 [Button.inline("⬅️ Меню", b"menu_main")],
             ]
             return render_member_prefs_text(prefs), buttons
@@ -628,6 +708,10 @@ async def init_bot() -> None:
 
         # ---- redeem / onboarding -------------------------------------------
         async def grant_access(event, key: dict) -> None:
+            existing = await get_bot_member(event.sender_id)
+            if existing and existing.get("blocked"):
+                await event.respond("🚫 **Доступ отключён владельцем.**")
+                return
             sender = await event.get_sender()
             uname = getattr(sender, "username", "") or ""
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
@@ -667,7 +751,7 @@ async def init_bot() -> None:
                 return
             role = await bot_role(event.sender_id)
             if role is None:
-                await event.respond(locked_text)
+                await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             welcome_banner = BOT_ASSETS_DIR / "welcome.png"
             if welcome_banner.exists():
@@ -696,7 +780,7 @@ async def init_bot() -> None:
         async def menu_handler(event):
             role = await bot_role(event.sender_id)
             if role is None:
-                await event.respond(locked_text)
+                await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             await event.respond(menu_caption(role), buttons=main_menu_buttons(role))
 
@@ -768,6 +852,11 @@ async def init_bot() -> None:
                     + (f"\n🔗 {link}" if link else "")
                 )
             await event.respond("\n\n".join(result), buttons=main_menu_buttons(role), link_preview=False)
+
+        @bot_client.on(events.NewMessage(pattern="/checks"))
+        @viewer_only
+        async def checks_handler(event, role):
+            await event.respond(await render_checks(10), buttons=main_menu_buttons(role), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
         @viewer_only
@@ -887,8 +976,219 @@ async def init_bot() -> None:
                     btn = Button.inline("🚫 Заблокировать", f"blockmember_{m['tg_id']}".encode())
                 await event.respond(
                     f"👤 **{m.get('name') or '—'}** ({uname})\n🔑 {m.get('key_label') or '—'}  ·  {badge}\n🕐 {seen}",
-                    buttons=[[btn]],
+                    buttons=[
+                        [btn],
+                        [
+                            Button.inline("⏰ Доступ", f"accshow_{m['tg_id']}".encode()),
+                            Button.inline("🔴 Выкл", f"accoff_{m['tg_id']}".encode()),
+                            Button.inline("🟢 Вкл", f"accon_{m['tg_id']}".encode()),
+                        ],
+                    ],
                 )
+
+        # ---- scheduled access management (owner only) ----------------------
+        async def _resolve_member_arg(query: str) -> Optional[dict]:
+            q = query.strip().lstrip("@").lower()
+            members = await list_bot_members()
+            for m in members:
+                if q == str(m.get("tg_id")) or q == (m.get("tg_username") or "").lower():
+                    return m
+            for m in members:
+                if q and q in (m.get("name") or "").lower():
+                    return m
+            return None
+
+        def _describe_repeat(rep: dict, row: dict) -> str:
+            tz = row.get("timezone") or "UTC"
+            rtype = rep.get("type")
+            if rtype == "daily":
+                return f"ежедневно {rep.get('from', '?')}–{rep.get('to', '?')} ({tz})"
+            if rtype == "weekly":
+                days = ",".join(_ACCESS_DAY_NAMES.get(d, str(d)) for d in rep.get("days", []))
+                return f"{days or '—'} {rep.get('from', '?')}–{rep.get('to', '?')} ({tz})"
+            if rtype == "cron":
+                return f"cron `{rep.get('expr', '?')}` · {rep.get('dur_min', '?')} мин ({tz})"
+            if rtype == "none":
+                return f"разово {_fmt_dt(row.get('start_at'))} → {_fmt_dt(row.get('end_at')) if row.get('end_at') else 'бессрочно'}"
+            return str(rep)
+
+        async def render_member_access(member: dict) -> str:
+            tg = int(member["tg_id"])
+            rows = await list_access_windows(tg)
+            decision = resolve_access(member, [window_from_row(r) for r in rows], datetime.now(timezone.utc))
+            lines = [
+                f"⏰ **Доступ** · {member.get('name') or tg}",
+                DIV,
+                f"Сейчас: {'🟢 открыт' if decision.allowed else '🔴 закрыт'}  ·  по умолчанию: `{member.get('access_default_policy', 'allow')}`",
+            ]
+            if not rows:
+                lines.append("\n__Правил нет — действует политика по умолчанию.__")
+            else:
+                lines.append("\n📋 **Окна**")
+                for r in rows:
+                    kind = "✅ разрешает" if r["enabled"] else "🚫 запрещает"
+                    lines.append(f"`#{r['id']}` · {kind} · prio {r['priority']}\n   {_describe_repeat(parse_repeat_rule(r['repeat_rule']), r)}")
+            lines.append("\n_off [18:00|2h] · on · work 09:00-18:00 mon-fri [TZ] · mute 23:00-08:00 · cron · del <id> · undo · log_")
+            return "\n".join(lines)
+
+        async def render_access_overview() -> str:
+            members = await list_bot_members()
+            grouped = await list_all_access_windows()
+            now = datetime.now(timezone.utc)
+            lines = ["⏰ **Ограничения доступа**", DIV]
+            restricted = []
+            for m in members:
+                if m.get("blocked"):
+                    continue
+                tg = int(m["tg_id"])
+                d = resolve_access(m, [window_from_row(r) for r in grouped.get(tg, [])], now)
+                if not d.allowed:
+                    restricted.append((m, d))
+            if not restricted:
+                lines.append("✅ Сейчас все участники открыты.")
+            else:
+                for m, d in restricted:
+                    uname = f"@{m['tg_username']}" if m.get("tg_username") else "—"
+                    until = f" до {d.until.astimezone().strftime('%d.%m %H:%M')}" if d.until else ""
+                    lines.append(f"🔴 {m.get('name') or '—'} ({uname}){until}")
+            lines.append("\n_Подробно: /access <user>_")
+            return "\n".join(lines)
+
+        async def _open_member_access(tg: int, actor_id: int) -> int:
+            """Cancel manual blackouts (the high-priority one-shots created by 'off')."""
+            cancelled_ids: list[int] = []
+            for w in await list_access_windows(tg):
+                if not w["enabled"] and w["priority"] >= 1000:
+                    await deactivate_access_window(int(w["id"]))
+                    cancelled_ids.append(int(w["id"]))
+            await record_access_audit(tg, None, "manual_on", f"admin:{actor_id}", None, {"cancelled_ids": cancelled_ids})
+            state.access_cache.pop(tg, None)
+            return len(cancelled_ids)
+
+        async def _apply_undo(tg: int, plan: dict) -> None:
+            op = plan.get("op")
+            if op == "deactivate" and plan.get("schedule_id"):
+                await deactivate_access_window(int(plan["schedule_id"]))
+            elif op == "reactivate" and plan.get("schedule_id"):
+                await set_access_window_active(int(plan["schedule_id"]), True)
+            elif op == "reactivate_many":
+                for sid in plan.get("schedule_ids", []):
+                    await set_access_window_active(int(sid), True)
+            elif op == "set_policy" and plan.get("policy"):
+                await set_member_default_policy(tg, plan["policy"])
+
+        @bot_client.on(events.NewMessage(pattern=r"/access(?:\s+(.+))?"))
+        @safe
+        async def access_handler(event):
+            if await deny_non_admin(event):
+                return
+            raw = (event.pattern_match.group(1) or "").strip()
+            if not raw:
+                await event.respond(await render_access_overview(), buttons=main_menu_buttons("admin"))
+                return
+            parts = raw.split()
+            member = await _resolve_member_arg(parts[0])
+            if not member:
+                await event.respond(f"❌ Не нашёл участника «{parts[0]}». Список: /members")
+                return
+            tg = int(member["tg_id"])
+            state.access_cache.pop(tg, None)
+            args = parts[1:]
+            sub = args[0].lower() if args else "show"
+
+            if sub in ("show", "rules", "status"):
+                await event.respond(await render_member_access(member))
+                return
+            if sub == "on":
+                cancelled = await _open_member_access(tg, event.sender_id)
+                await event.respond(f"🟢 Доступ открыт. Снято ограничений: {cancelled}\n\n" + await render_member_access(member))
+                return
+            if sub == "off":
+                until_iso, human = None, "бессрочно"
+                if len(args) >= 2:
+                    dur = parse_duration_to_seconds(args[1])
+                    if dur:
+                        until = datetime.now(timezone.utc) + timedelta(seconds=dur)
+                        until_iso, human = until.replace(microsecond=0, tzinfo=None).isoformat(), f"на {args[1]}"
+                    else:
+                        target_local = next_hhmm_datetime(datetime.now().astimezone(), args[1])
+                        if not target_local:
+                            await event.respond("❌ Формат: `/access <user> off [18:00|2h]`")
+                            return
+                        until_iso = target_local.astimezone(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat()
+                        human = f"до {target_local.strftime('%d.%m %H:%M')}"
+                row = await create_disable_until_window(tg, until_iso, created_by=event.sender_id)
+                await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": until_iso})
+                state.access_cache.pop(tg, None)
+                await event.respond(f"🔴 Доступ закрыт ({human}).\n\n" + await render_member_access(member))
+                return
+            if sub == "cron":
+                # /access user cron "<expr>" <dur_min> [TZ]
+                m = re.search(r'"([^"]+)"|\'([^\']+)\'', raw)
+                expr = (m.group(1) or m.group(2)) if m else None
+                tail = raw[m.end():].split() if m else []
+                if not expr or not tail or not tail[0].isdigit():
+                    await event.respond('❌ Формат: `/access <user> cron "0 9 * * 1-5" 540 [TZ]`')
+                    return
+                tz = tail[1] if len(tail) >= 2 else (member.get("timezone") or "UTC")
+                repeat = {"type": "cron", "expr": expr, "dur_min": int(tail[0])}
+                await set_member_default_policy(tg, "deny")
+                row = await create_access_window(tg, enabled=True, repeat_rule=repeat, timezone=tz, priority=200, label="cron", created_by=event.sender_id)
+                await record_access_audit(tg, int(row["id"]), "create", f"admin:{event.sender_id}", None, repeat)
+                state.access_cache.pop(tg, None)
+                await event.respond(f"✅ Cron-окно #{row['id']} добавлено (tz=`{tz}`).\n\n" + await render_member_access(member))
+                return
+            if sub in ("work", "mute"):
+                if len(args) < 2 or not parse_quiet_hours_input(args[1]):
+                    await event.respond("❌ Формат: `/access <user> work 09:00-18:00 mon-fri [TZ]`")
+                    return
+                frm, to = parse_quiet_hours_input(args[1])
+                days = parse_weekday_spec(args[2]) if len(args) >= 3 else []
+                tz = args[3] if len(args) >= 4 else (member.get("timezone") or "UTC")
+                repeat = {"type": "weekly" if days else "daily", "from": frm, "to": to}
+                if days:
+                    repeat["days"] = days
+                enabled = sub == "work"
+                if enabled:
+                    await set_member_default_policy(tg, "deny")
+                row = await create_access_window(tg, enabled=enabled, repeat_rule=repeat, timezone=tz, priority=200, label=sub, created_by=event.sender_id)
+                await record_access_audit(tg, int(row["id"]), "create", f"admin:{event.sender_id}", None, repeat)
+                state.access_cache.pop(tg, None)
+                await event.respond(f"✅ Окно #{row['id']} добавлено (tz=`{tz}`).\n\n" + await render_member_access(member))
+                return
+            if sub == "del":
+                if len(args) < 2 or not args[1].isdigit():
+                    await event.respond("❌ Формат: `/access <user> del <id>`")
+                    return
+                await deactivate_access_window(int(args[1]))
+                await record_access_audit(tg, int(args[1]), "delete", f"admin:{event.sender_id}", None, None)
+                state.access_cache.pop(tg, None)
+                await event.respond(f"🗑 Окно #{args[1]} удалено.\n\n" + await render_member_access(member))
+                return
+            if sub == "undo":
+                target = find_undoable(await get_access_audit(tg, limit=50))
+                if not target:
+                    await event.respond("↩️ Нечего отменять.")
+                    return
+                plan = plan_undo(target)
+                await _apply_undo(tg, plan)
+                await record_access_audit(
+                    tg, target.get("schedule_id"), "undo", f"admin:{event.sender_id}",
+                    None, {"undone_audit_id": int(target["id"]), "plan": plan},
+                )
+                state.access_cache.pop(tg, None)
+                await event.respond(f"↩️ Отменено: {target['action']} (запись #{target['id']}).\n\n" + await render_member_access(member))
+                return
+            if sub in ("log", "audit"):
+                log = await get_access_audit(tg)
+                if not log:
+                    await event.respond("📭 История доступа пуста.")
+                    return
+                lines = [f"🧾 **История доступа** · {member.get('name') or tg}", DIV]
+                lines += [f"`{_fmt_dt(a['created_at'])}` · {a['action']} · _{a['actor']}_" for a in log]
+                await event.respond("\n".join(lines))
+                return
+            await event.respond("❓ Подкоманды: `show · on · off [18:00|2h] · work <range> <days> [TZ] · mute <range> [TZ] · cron \"<expr>\" <min> · del <id> · undo · log`")
 
         @bot_client.on(events.NewMessage(pattern="/actions"))
         @safe
@@ -926,6 +1226,11 @@ async def init_bot() -> None:
                     else:
                         await handle_pending_input(event, role, pending)
                 return
+            # A known member closed by schedule gets the reason, not the locked banner.
+            notice = await access_block_notice(event.sender_id)
+            if notice:
+                await event.respond(notice)
+                return
             # Treat a bare message as a possible access key for non-members.
             key = await get_bot_key_by_secret((event.message.text or "").strip())
             if key:
@@ -957,6 +1262,9 @@ async def init_bot() -> None:
                 return
             if data == "menu_recent":
                 await safe_edit(event, await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
+                return
+            if data == "menu_checks":
+                await safe_edit(event, await render_checks(10), buttons=main_menu_buttons(role), link_preview=False)
                 return
             if data == "menu_market":
                 await safe_edit(event, await render_market(), buttons=main_menu_buttons(role))
@@ -996,7 +1304,7 @@ async def init_bot() -> None:
                 return
 
             # ---- owner-only menu + actions ----
-            admin_prefixes = ("revokekey_", "blockmember_", "unblockmember_", "fav_", "read_", "gconfirm_", "gskip_", "hidebc_")
+            admin_prefixes = ("revokekey_", "blockmember_", "unblockmember_", "fav_", "read_", "gconfirm_", "gskip_", "hidebc_", "accshow_", "accoff_", "accon_")
             if data in ("menu_keys", "menu_scan", "menu_logs", "menu_restart") or data.startswith(admin_prefixes):
                 if role != "admin":
                     await event.answer("Только владелец", alert=True)
@@ -1089,6 +1397,29 @@ async def init_bot() -> None:
                 await event.answer(note, alert=bool(failed))
                 return
 
+            # ---- scheduled access quick actions (owner only, gated above) ----
+            if data.startswith(("accshow_", "accoff_", "accon_")):
+                tg = _cb_id(data)
+                if tg is None:
+                    await event.answer("Некорректная команда", alert=True)
+                    return
+                member = await get_bot_member(tg)
+                if not member:
+                    await event.answer("Участник не найден", alert=True)
+                    return
+                if data.startswith("accoff_"):
+                    row = await create_disable_until_window(tg, None, created_by=event.sender_id)
+                    await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": None})
+                    state.access_cache.pop(tg, None)
+                    await event.answer("🔴 Доступ закрыт")
+                elif data.startswith("accon_"):
+                    cancelled = await _open_member_access(tg, event.sender_id)
+                    await event.answer(f"🟢 Доступ открыт ({cancelled})")
+                else:
+                    state.access_cache.pop(tg, None)
+                await safe_edit(event, await render_member_access(member))
+                return
+
             # ---- legacy data-mutating actions (owner only, gated above) ----
             ping_id = _cb_id(data)
             if data.startswith(("fav_", "read_", "gconfirm_", "gskip_")) and ping_id is None:
@@ -1126,6 +1457,7 @@ async def init_bot() -> None:
                 BotCommand("giveaways", "Розыгрыши"),
                 BotCommand("recent", "Последние упоминания"),
                 BotCommand("latest", "Последние 5"),
+                BotCommand("checks", "Найденные чеки"),
                 BotCommand("search", "Поиск"),
                 BotCommand("market", "Курсы"),
                 BotCommand("settings", "Настройки и уведомления"),
@@ -1140,6 +1472,7 @@ async def init_bot() -> None:
                     BotCommand("newkey", "Создать ключ"),
                     BotCommand("keys", "Ключи доступа"),
                     BotCommand("members", "Пользователи"),
+                    BotCommand("access", "Доступ по расписанию"),
                     BotCommand("actions", "История действий по розыгрышам"),
                     BotCommand("restart", "Перезапустить мониторинг"),
                 ]

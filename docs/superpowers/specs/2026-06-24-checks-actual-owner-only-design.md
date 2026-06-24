@@ -81,12 +81,13 @@ keyword (например латинских) матчится только го
 
 Источник истины для видимого — фильтр запроса, не лаг очистки.
 
-- `_build_pings_filters` получает новый параметр `detected_after: Optional[str]`
-  → `WHERE detected_at >= ?`.
-- `read_pings`: при `chat_type == "check"` подставляет
-  `detected_after = now - CHECK_FRESH_MINUTES` (UTC-isо, как `now_iso`).
+- Переиспользуем существующий `date_from` (`_build_pings_filters` уже даёт
+  `WHERE detected_at >= ?`) — новый параметр не нужен.
+- `read_pings`: при `chat_type == "check"` поджимает
+  `date_from = max(date_from, now - CHECK_FRESH_MINUTES)` (локальный
+  `datetime.now()` без микросекунд — как пишет `now_iso` в `detected_at`).
 - Бот `bot_service.render_checks` (`get_pings(chat_type="check")`) — тот же
-  отсёк по времени, для консистентности.
+  отсёк по времени через `date_from`, для консистентности.
 
 ### 5. Удаление старых из БД (R4)
 
@@ -121,8 +122,8 @@ DELETE FROM pings
 ```
 скан → process_ping_message → is_check_text (фикс R5) → save_ping(is_check=1)
 веб: чип(admin) → /api/pings?chat_type=check
-       → гейт роли (403 для viewer) → get_pings(detected_after = now-60м)
-бот: /checks → render_checks → get_pings(chat_type=check, detected_after=now-60м)
+       → гейт роли (403 для viewer) → get_pings(date_from = now-60м)
+бот: /checks → render_checks → get_pings(chat_type=check, date_from=now-60м)
 фон: auto_scan_loop → purge_stale_checks(60) → DELETE pings+fts (щадя fav/win)
 ```
 
@@ -145,7 +146,7 @@ DELETE FROM pings
 - `purge_stale_checks`: удаляет чек с `detected_at` старше окна; **не** удаляет
   свежий, `is_favorite=1`, `is_win=1`; чистит `pings_fts`.
 - `read_pings`: viewer + `chat_type=check` → 403; admin → ок.
-- `_build_pings_filters`: `detected_after` даёт `detected_at >= ?`.
+- веб-гейт: viewer + `chat_type=check` → 403; admin видит только свежие.
 
 ## Вне рамок
 

@@ -17,6 +17,7 @@ anyio==4.13.0
 certifi==2026.4.22
 click==8.3.3
 colorama==0.4.6
+croniter==6.2.2
 fastapi==0.136.1
 h11==0.16.0
 httpcore==1.0.9
@@ -32,6 +33,7 @@ rsa==4.9.1
 pywebpush==2.0.0
 starlette==1.0.0
 Telethon==1.43.2
+tzdata==2026.2
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.46.0

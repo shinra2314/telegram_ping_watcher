@@ -29,6 +29,7 @@ async def init_db() -> None:
                 status TEXT DEFAULT 'new',
                 is_favorite BOOLEAN DEFAULT 0,
                 is_win BOOLEAN DEFAULT 0,
+                is_check BOOLEAN DEFAULT 0,
                 detected_at TEXT,
                 auto_joined BOOLEAN DEFAULT 0,
                 is_giveaway BOOLEAN DEFAULT 0,
@@ -47,6 +48,7 @@ async def init_db() -> None:
             "status": "ALTER TABLE pings ADD COLUMN status TEXT DEFAULT 'new'",
             "is_favorite": "ALTER TABLE pings ADD COLUMN is_favorite BOOLEAN DEFAULT 0",
             "is_win": "ALTER TABLE pings ADD COLUMN is_win BOOLEAN DEFAULT 0",
+            "is_check": "ALTER TABLE pings ADD COLUMN is_check BOOLEAN DEFAULT 0",
             "detected_at": "ALTER TABLE pings ADD COLUMN detected_at TEXT",
             "auto_joined": "ALTER TABLE pings ADD COLUMN auto_joined BOOLEAN DEFAULT 0",
             "is_giveaway": "ALTER TABLE pings ADD COLUMN is_giveaway BOOLEAN DEFAULT 0",
@@ -295,6 +297,10 @@ async def init_db() -> None:
         bot_members_columns = await _columns(db, "bot_members")
         if "notification_prefs" not in bot_members_columns:
             await db.execute("ALTER TABLE bot_members ADD COLUMN notification_prefs TEXT DEFAULT ''")
+        if "access_default_policy" not in bot_members_columns:
+            await db.execute("ALTER TABLE bot_members ADD COLUMN access_default_policy TEXT NOT NULL DEFAULT 'allow'")
+        if "timezone" not in bot_members_columns:
+            await db.execute("ALTER TABLE bot_members ADD COLUMN timezone TEXT DEFAULT ''")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS bot_broadcast_messages (
@@ -303,6 +309,40 @@ async def init_db() -> None:
                 tg_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS access_schedule (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id          INTEGER NOT NULL,
+                enabled        INTEGER NOT NULL DEFAULT 1,
+                active         INTEGER NOT NULL DEFAULT 1,
+                start_at       TEXT,
+                end_at         TEXT,
+                timezone       TEXT NOT NULL DEFAULT 'UTC',
+                repeat_rule    TEXT NOT NULL DEFAULT '{"type":"none"}',
+                priority       INTEGER NOT NULL DEFAULT 100,
+                label          TEXT DEFAULT '',
+                created_by     INTEGER,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL,
+                FOREIGN KEY (tg_id) REFERENCES bot_members(tg_id) ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS access_audit (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id       INTEGER NOT NULL,
+                schedule_id INTEGER,
+                action      TEXT NOT NULL,
+                actor       TEXT NOT NULL,
+                old_value   TEXT,
+                new_value   TEXT,
+                created_at  TEXT NOT NULL
             )
             """
         )
@@ -357,6 +397,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_is_giveaway ON pings(is_giveaway)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_giveaway_status ON pings(giveaway_status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_is_win ON pings(is_win)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_is_check ON pings(is_check)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_is_favorite ON pings(is_favorite)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_priority_score ON pings(priority_score)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_priority_label ON pings(priority_label)")
@@ -374,6 +415,10 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_giveaway_candidates_score ON giveaway_candidates(score)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_giveaway_actions_ping ON giveaway_actions(ping_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_token ON bot_broadcast_messages(token)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_user ON access_schedule(tg_id, active)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_window ON access_schedule(start_at, end_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_priority ON access_schedule(tg_id, priority DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_access_audit_user ON access_audit(tg_id, created_at)")
         await db.commit()
 
 

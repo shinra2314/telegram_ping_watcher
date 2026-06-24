@@ -72,11 +72,11 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                 """
                 INSERT INTO pings (
                     date, chat, chat_id, sender, sender_id, message_id, mentions,
-                    link, text, chat_type, detected_at, is_win, auto_joined, is_giveaway,
+                    link, text, chat_type, detected_at, is_win, is_check, auto_joined, is_giveaway,
                     giveaway_status, priority_score, priority_label, note,
                     deadline_at, deadline_source, deadline_text, reminder_at, reminder_sent_at, action_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.get("date"),
@@ -91,6 +91,7 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                     record.get("chat_type"),
                     detected_at,
                     1 if record.get("is_win") else 0,
+                    1 if record.get("is_check") else 0,
                     1 if record.get("auto_joined") else 0,
                     1 if record.get("is_giveaway") else 0,
                     record.get("giveaway_status") or ("pending" if (record.get("is_giveaway") or record.get("is_win")) else ""),
@@ -129,7 +130,8 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         link = COALESCE(NULLIF(?, ''), link),
                         text = COALESCE(?, text),
                         chat_type = COALESCE(NULLIF(?, ''), chat_type),
-                        is_win = ?, auto_joined = ?, is_giveaway = ?,
+                        is_win = ?, is_check = CASE WHEN ? = 1 THEN 1 ELSE is_check END,
+                        auto_joined = ?, is_giveaway = ?,
                         giveaway_status = CASE
                             WHEN ? = 1 AND (giveaway_status IS NULL OR giveaway_status = '') THEN 'pending'
                             WHEN ? = 0 THEN ''
@@ -169,6 +171,7 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         record.get("text"),
                         record.get("chat_type"),
                         1 if record.get("is_win") else 0,
+                        1 if record.get("is_check") else 0,
                         1 if record.get("auto_joined") else 0,
                         1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
                         1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
@@ -228,6 +231,8 @@ def _build_pings_filters(
             _add_where(where, params, "is_giveaway = 1")
         elif chat_type == "win":
             _add_where(where, params, "is_win = 1")
+        elif chat_type == "check":
+            _add_where(where, params, "is_check = 1")
         elif chat_type == "auto_joined":
             _add_where(where, params, "auto_joined = 1")
         elif chat_type == "important":

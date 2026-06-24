@@ -50,6 +50,7 @@ def bootstrap_state() -> None:
     state.ping_regex = build_ping_regex(state.ping_usernames)
     state.win_keywords = [item.strip() for item in settings.win_keywords.split(",") if item.strip()]
     state.giveaway_keywords = [item.strip() for item in settings.giveaway_keywords.split(",") if item.strip()]
+    state.check_keywords = [item.strip() for item in settings.check_keywords.split(",") if item.strip()]
     state.high_priority_keywords = list(HIGH_PRIORITY_KEYWORDS_DEFAULT)
     state.ignore_keywords = []
     state.join_button_keywords = [item.strip() for item in settings.join_button_keywords.split(",") if item.strip()]
@@ -161,6 +162,7 @@ def default_keyword_settings() -> dict[str, list[str]]:
     return {
         "win_keywords": state.win_keywords,
         "giveaway_keywords": state.giveaway_keywords,
+        "check_keywords": state.check_keywords,
         "high_priority_keywords": state.high_priority_keywords,
         "ignore_keywords": state.ignore_keywords,
     }
@@ -182,6 +184,7 @@ async def load_keyword_settings() -> dict[str, list[str]]:
 def apply_keyword_settings(values: dict[str, list[str]]) -> None:
     state.win_keywords = values.get("win_keywords") or state.win_keywords
     state.giveaway_keywords = values.get("giveaway_keywords") or state.giveaway_keywords
+    state.check_keywords = values.get("check_keywords") or state.check_keywords
     state.high_priority_keywords = values.get("high_priority_keywords") or state.high_priority_keywords
     state.ignore_keywords = values.get("ignore_keywords") or []
 

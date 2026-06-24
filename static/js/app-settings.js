@@ -185,14 +185,70 @@
           </div>
         </div>`).join("")}</div>` : "<div class='muted'>Ключей пока нет.</div>";
       const members = data.members || [];
-      membersBox.innerHTML = members.length ? `<div class="backup-list">${members.map(m => `
+      let restricted = {};
+      try {
+        const r = await api("/api/access/restricted", { silent: true });
+        (r.users || []).forEach(u => { restricted[u.tg_id] = u; });
+      } catch (e) { /* access API optional */ }
+      membersBox.innerHTML = members.length ? `<div class="backup-list">${members.map(m => {
+        const acc = restricted[m.tg_id];
+        const accBadge = m.blocked
+          ? ""
+          : (acc
+              ? `<span class="badge bad">🔴 закрыт${acc.until ? " до " + fmtDate(acc.until) : ""}</span>`
+              : `<span class="badge good">🟢 доступ открыт</span>`);
+        return `
         <div class="backup-item">
-          <div class="row"><strong>${esc(m.name || "—")}</strong><span class="badge">${m.tg_username ? "@" + esc(m.tg_username) : "—"}</span><span class="badge ${m.blocked ? "bad" : "good"}">${m.blocked ? "заблокирован" : "активен"}</span></div>
+          <div class="row"><strong>${esc(m.name || "—")}</strong><span class="badge">${m.tg_username ? "@" + esc(m.tg_username) : "—"}</span><span class="badge ${m.blocked ? "bad" : "good"}">${m.blocked ? "заблокирован" : "активен"}</span>${accBadge}</div>
           <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
             <span class="muted">ключ: ${esc(m.key_label || "—")} · ${m.last_seen_at ? fmtDate(m.last_seen_at) : "—"}</span>
             <button class="btn ${m.blocked ? "" : "bad"}" data-block-member="${m.tg_id}" data-blocked="${m.blocked ? 1 : 0}"><i data-lucide="${m.blocked ? "user-check" : "user-x"}"></i>${m.blocked ? "Разблокировать" : "Заблокировать"}</button>
           </div>
-        </div>`).join("")}</div>` : "<div class='muted'>Пользователей пока нет.</div>";
+          ${m.blocked ? "" : `<div class="deadline-row" style="gap:.4rem;flex-wrap:wrap;margin-top:.3rem">
+            <button class="btn" data-access-off="${m.tg_id}" data-mode="2h"><i data-lucide="clock"></i>Выкл 2ч</button>
+            <button class="btn" data-access-off="${m.tg_id}" data-mode="morning"><i data-lucide="moon"></i>До утра</button>
+            <button class="btn good" data-access-on="${m.tg_id}"><i data-lucide="unlock"></i>Открыть</button>
+            <button class="btn" data-access-windows="${m.tg_id}"><i data-lucide="calendar-clock"></i>Окна</button>
+            <button class="btn" data-access-undo="${m.tg_id}"><i data-lucide="undo-2"></i>Отменить</button>
+          </div>
+          <div id="acc-d-${m.tg_id}" class="muted" style="margin-top:.3rem"></div>`}
+        </div>`;
+      }).join("")}</div>` : "<div class='muted'>Пользователей пока нет.</div>";
+      lucide.createIcons();
+    }
+
+    async function renderAccessDetail(tgId, container) {
+      if (!container) return;
+      if (container.dataset.open === "1") { container.innerHTML = ""; container.dataset.open = "0"; return; }
+      let data;
+      try {
+        data = await api(`/api/access/${tgId}`, { silent: true });
+      } catch (e) {
+        container.innerHTML = "<span class='muted'>Недоступно.</span>";
+        return;
+      }
+      container.dataset.open = "1";
+      const wins = data.windows || [];
+      const eff = data.effective || {};
+      const describe = (w) => {
+        let rep = {};
+        try { rep = typeof w.repeat_rule === "string" ? JSON.parse(w.repeat_rule) : (w.repeat_rule || {}); } catch (e) {}
+        const tz = w.timezone || "UTC";
+        if (rep.type === "daily") return `ежедневно ${rep.from}–${rep.to} (${tz})`;
+        if (rep.type === "weekly") return `дни ${(rep.days || []).join(",")} ${rep.from}–${rep.to} (${tz})`;
+        if (rep.type === "cron") return `cron «${rep.expr}» · ${rep.dur_min} мин (${tz})`;
+        return `разово ${w.start_at ? fmtDate(w.start_at) : "—"} → ${w.end_at ? fmtDate(w.end_at) : "бессрочно"}`;
+      };
+      const rows = wins.map(w => `
+        <div class="row" style="gap:.4rem;justify-content:space-between;border-top:1px solid var(--border,#333);padding:.25rem 0">
+          <span>${w.enabled ? "✅" : "🚫"} <code>#${w.id}</code> prio ${w.priority} · ${esc(describe(w))}</span>
+          <button class="btn bad" data-access-del-window="${w.id}" data-tg="${tgId}"><i data-lucide="trash-2"></i></button>
+        </div>`).join("") || "<div class='muted'>Окон нет — действует политика по умолчанию.</div>";
+      container.innerHTML = `
+        <div style="border:1px solid var(--border,#333);border-radius:8px;padding:.5rem;margin-top:.2rem">
+          <div class="row" style="gap:.4rem"><strong>Сейчас:</strong> ${eff.allowed ? "🟢 открыт" : "🔴 закрыт"} <span class="badge">по умолчанию: ${esc(data.default_policy || "allow")}</span>${data.timezone ? `<span class="badge">TZ: ${esc(data.timezone)}</span>` : ""}</div>
+          ${rows}
+        </div>`;
       lucide.createIcons();
     }
 

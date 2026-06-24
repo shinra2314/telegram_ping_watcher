@@ -141,6 +141,7 @@
       if (btn.dataset.quick === "win") $("type-filter").value = "win";
       if (btn.dataset.quick === "giveaway") $("type-filter").value = "giveaway";
       if (btn.dataset.quick === "important") { $("type-filter").value = "important"; $("sort-by").value = "priority_score"; }
+      if (btn.dataset.quick === "check") $("type-filter").value = "check";
       document.querySelectorAll("#quick-filters .chip").forEach(chip => chip.classList.toggle("primary", chip === btn && btn.dataset.quick !== "reset"));
       loadPings(false);
     });
@@ -608,6 +609,49 @@
         const blocked = blockBtn.dataset.blocked === "1";
         await api(`/api/bot/access/members/${blockBtn.dataset.blockMember}/block`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocked: !blocked }), button: blockBtn });
         await loadBotAccess();
+        return;
+      }
+      const accOff = e.target.closest("[data-access-off]");
+      if (accOff) {
+        let until;
+        if (accOff.dataset.mode === "2h") {
+          until = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+        } else {
+          const d = new Date(); d.setHours(9, 0, 0, 0);
+          if (d <= new Date()) d.setDate(d.getDate() + 1);
+          until = d.toISOString();
+        }
+        await api(`/api/access/${accOff.dataset.accessOff}/disable-until`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ until }), button: accOff });
+        showToast("Доступ закрыт", "success");
+        await loadBotAccess();
+        return;
+      }
+      const accOn = e.target.closest("[data-access-on]");
+      if (accOn) {
+        await api(`/api/access/${accOn.dataset.accessOn}/enable`, { method: "POST", button: accOn });
+        showToast("Доступ открыт", "success");
+        await loadBotAccess();
+        return;
+      }
+      const accUndo = e.target.closest("[data-access-undo]");
+      if (accUndo) {
+        const res = await api(`/api/access/${accUndo.dataset.accessUndo}/undo`, { method: "POST", button: accUndo });
+        showToast(res.undone ? `Отменено: ${res.undone.action}` : "Нечего отменять", res.undone ? "success" : "warn");
+        await loadBotAccess();
+        return;
+      }
+      const accWin = e.target.closest("[data-access-windows]");
+      if (accWin) {
+        await renderAccessDetail(accWin.dataset.accessWindows, document.getElementById(`acc-d-${accWin.dataset.accessWindows}`));
+        return;
+      }
+      const accDel = e.target.closest("[data-access-del-window]");
+      if (accDel) {
+        if (!confirm("Удалить окно расписания?")) return;
+        await api(`/api/access/windows/${accDel.dataset.accessDelWindow}`, { method: "DELETE", button: accDel });
+        const cont = document.getElementById(`acc-d-${accDel.dataset.tg}`);
+        if (cont) cont.dataset.open = "0";
+        await renderAccessDetail(accDel.dataset.tg, cont);
         return;
       }
     });

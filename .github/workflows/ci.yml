@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        # Install the pinned runtime set + dev tools directly. The project is not
+        # pip-installed (it runs from a checkout, and tests put src/ on sys.path
+        # themselves), so no build backend is involved.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pytest>=8.0" "pytest-asyncio>=0.24" "pytest-cov>=5.0" "ruff>=0.13"
+
+      - name: Lint (ruff)
+        run: python -m ruff check .
+
+      - name: Tests (pytest)
+        # `python -m` puts the repo root on sys.path so `database`/`routers`/`main`
+        # import without installing the project.
+        run: python -m pytest -q

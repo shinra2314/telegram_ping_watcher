@@ -308,7 +308,7 @@ async def full_history_scan() -> None:
             for task in asyncio.as_completed(tasks):
                 if state.scan_cancel_event.is_set():
                     break
-                found = await task
+                await task  # count is tracked via scan_status["found"], not the return value
                 scan_status["processed_accounts"] += 1
                 await update_scan_run(
                     scan_run_id,

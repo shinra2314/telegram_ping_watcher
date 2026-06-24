@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     telegram_reconnect_base_seconds: int = Field(default=20, alias="TELEGRAM_RECONNECT_BASE_SECONDS")
     telegram_reconnect_max_seconds: int = Field(default=300, alias="TELEGRAM_RECONNECT_MAX_SECONDS")
     telegram_reconnect_jitter_seconds: int = Field(default=15, alias="TELEGRAM_RECONNECT_JITTER_SECONDS")
+    watchdog_enabled: bool = Field(default=True, alias="WATCHDOG_ENABLED")
+    watchdog_poll_seconds: int = Field(default=60, alias="WATCHDOG_POLL_SECONDS")
     market_poll_seconds: int = Field(default=300, alias="MARKET_POLL_SECONDS")
     market_alert_change_pct: float = Field(default=5.0, alias="MARKET_ALERT_CHANGE_PCT")
     market_retention_days: int = Field(default=7, alias="MARKET_RETENTION_DAYS")
@@ -100,6 +102,15 @@ class Settings(BaseSettings):
     giveaway_keywords: str = Field(
         default="фаст,конкурс,розыгрыш,условия,условие,итоги",
         alias="GIVEAWAY_KEYWORDS",
+    )
+    check_keywords: str = Field(
+        default="чек,мультичек",
+        alias="CHECK_KEYWORDS",
+    )
+    check_fresh_minutes: int = Field(
+        default=60,
+        alias="CHECK_FRESH_MINUTES",
+        description="Checks older than this (minutes) are hidden from views and purged from the DB.",
     )
     join_button_keywords: str = Field(
         default="участвовать,participate,join,вступить,зарегистрироваться,register",

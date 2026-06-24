@@ -9,7 +9,7 @@ so it has no coupling to main.py module globals.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -29,7 +29,7 @@ from database import (
     update_ping_meta,
 )
 from pulse_desk.api_models import PingMetaRequest
-from pulse_desk.app_ctx import get_current_role, logger, require_admin
+from pulse_desk.app_ctx import CHECK_FRESH_MINUTES, get_current_role, logger, require_admin
 from pulse_desk.live import publish_live_event
 from pulse_desk.statuses import ACTION_STATUSES, GIVEAWAY_STATUSES, PING_STATUSES
 
@@ -46,7 +46,7 @@ async def _record_event(level: str, source: str, message: str, context: Optional
 
 @router.get("/api/pings")
 async def read_pings(
-    _: str = Depends(get_current_role),
+    role: str = Depends(get_current_role),
     limit: int = Query(0, ge=0),
     offset: int = Query(0, ge=0),
     chat_type: str = "all",
@@ -67,6 +67,14 @@ async def read_pings(
     source_score_min: Optional[float] = None,
     tag: Optional[str] = Query(None),
 ):
+    if chat_type == "check":
+        # Redeemable checks are owner-only and ephemeral: gate to admin and
+        # never surface ones detected longer ago than the freshness window.
+        if role != "admin":
+            raise HTTPException(status_code=403, detail="Checks are owner-only")
+        cutoff = (datetime.now() - timedelta(minutes=CHECK_FRESH_MINUTES)).replace(microsecond=0).isoformat()
+        if not date_from or date_from < cutoff:
+            date_from = cutoff
     if grouped:
         return await get_pings_grouped(limit=limit, chat_type=chat_type, search=search, mention=mention)
     return await get_pings(

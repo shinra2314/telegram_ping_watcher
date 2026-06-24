@@ -181,7 +181,7 @@ class KeywordScopesTests(unittest.TestCase):
         keys = {scope[0] for scope in KEYWORD_SCOPES.values()}
         self.assertEqual(
             keys,
-            {"win_keywords", "giveaway_keywords", "high_priority_keywords", "ignore_keywords"},
+            {"win_keywords", "giveaway_keywords", "check_keywords", "high_priority_keywords", "ignore_keywords"},
         )
 
 

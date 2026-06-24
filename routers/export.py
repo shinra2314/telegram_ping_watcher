@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from database import get_pings
-from pulse_desk.app_ctx import get_current_role, logger, require_admin, settings, state
+from pulse_desk.app_ctx import logger, require_admin, settings, state
 from pulse_desk.digest import format_digest
 
 

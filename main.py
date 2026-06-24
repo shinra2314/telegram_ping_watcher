@@ -33,6 +33,7 @@ from pulse_desk.app_ctx import (
 from pulse_desk.bot_service import init_bot
 from pulse_desk.common import record_app_event, start_background_task, start_supervised
 from pulse_desk.loops import (
+    access_scheduler_loop,
     auto_scan_loop,
     digest_loop,
     fetch_market_data,
@@ -40,6 +41,7 @@ from pulse_desk.loops import (
     reminder_loop,
     source_score_loop,
     startup_maintenance,
+    watchdog_loop,
 )
 from pulse_desk.process_supervisor import get_supervisor
 from pulse_desk.push import generate_vapid_keys
@@ -93,12 +95,15 @@ async def lifespan(app: FastAPI):
     start_supervised("daily-digest", digest_loop, backoff_base=60.0, backoff_max=3600.0)
     start_supervised("source-scores", source_score_loop, backoff_base=30.0, backoff_max=600.0)
     start_supervised("obsidian-sync", obsidian_sync_loop, backoff_base=30.0, backoff_max=600.0)
+    start_supervised("access-scheduler", access_scheduler_loop, backoff_base=15.0, backoff_max=600.0)
     start_background_task("startup-maintenance", startup_maintenance())
     logger.info("Starting monitoring: %s sessions found", len(state.session_names))
     await record_app_event("INFO", "app", "Application started", {"sessions": len(state.session_names), "version": APP_VERSION})
     for name in state.session_names:
         start_background_task(f"telegram-start:{name}", start_client(name))
     start_supervised("auto-scan", auto_scan_loop, backoff_base=30.0, backoff_max=900.0)
+    if settings.watchdog_enabled:
+        start_supervised("watchdog", watchdog_loop, backoff_base=15.0, backoff_max=300.0)
     # Launcher: register external services (Discord bot etc.) and autostart any
     # marked autostart=true, so one Pulse Desk process brings up the whole stack.
     try:
@@ -130,6 +135,7 @@ app = FastAPI(title="Pulse Desk Multi-Account", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
+from routers import access as access_router  # noqa: E402
 from routers import analytics as analytics_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import backups as backups_router  # noqa: E402
@@ -148,6 +154,7 @@ from routers import scan as scan_router  # noqa: E402
 from routers import settings as settings_router  # noqa: E402
 from routers import system as system_router  # noqa: E402
 
+app.include_router(access_router.router)
 app.include_router(analytics_router.router)
 app.include_router(auth_router.router)
 app.include_router(backups_router.router)

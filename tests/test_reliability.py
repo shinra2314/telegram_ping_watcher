@@ -36,7 +36,7 @@ import database  # noqa: E402
 # Force database module to use the test path
 database.DB_PATH = TEST_DB_PATH
 
-from pulse_desk.jobs import runtime_health, start_supervised_task, start_tracked_task  # noqa: E402
+from pulse_desk.jobs import runtime_health, start_supervised_task  # noqa: E402
 from pulse_desk.live_hub import LiveHub  # noqa: E402
 from pulse_desk.runtime import AppState  # noqa: E402
 

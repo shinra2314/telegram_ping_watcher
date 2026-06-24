@@ -40,6 +40,7 @@ from pulse_desk.app_ctx import (
 from pulse_desk.common import now_iso
 from pulse_desk.jobs import runtime_health
 from pulse_desk.security import is_weak_token
+from pulse_desk.watchdog import classify_job, default_thresholds
 
 router = APIRouter()
 
@@ -69,9 +70,27 @@ async def health():
         db_size_bytes = database.DB_PATH.stat().st_size if database.DB_PATH.exists() else 0
     except Exception:
         db_size_bytes = 0
+    # Engine health: which critical jobs have gone silent or died (same logic the
+    # watchdog uses to page the admin). Surfaced so the dashboard can show it too.
+    thresholds = default_thresholds(
+        scan_interval_seconds=ws.SCAN_INTERVAL_SECONDS,
+        market_poll_seconds=ws.MARKET_POLL_SECONDS,
+    )
+    now = datetime.now()
+    unhealthy_jobs = []
+    for name, threshold in thresholds.items():
+        task = state.background_tasks.get(name)
+        running = bool(task) and not task.done()
+        ref = state.job_last_ok_at.get(name) or state.job_started_at.get(name)
+        age = int((now - ref).total_seconds()) if ref else None
+        h = classify_job(name, running=running, age_seconds=age, threshold_seconds=threshold)
+        if not h.healthy:
+            unhealthy_jobs.append({"job": name, "reason": h.reason, "age_seconds": h.age_seconds})
+    healthy = not info.get("missing_background_tasks") and info.get("accounts_ok") and not unhealthy_jobs
     info.update(
         {
-            "status": "ok" if not info.get("missing_background_tasks") and info.get("accounts_ok") else "degraded",
+            "status": "ok" if healthy else "degraded",
+            "unhealthy_jobs": unhealthy_jobs,
             "time": now_iso(),
             "version": APP_VERSION,
             "db_size_bytes": db_size_bytes,

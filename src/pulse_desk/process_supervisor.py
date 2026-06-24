@@ -17,7 +17,6 @@ Design goals (see docs/DASHBOARD.md):
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
 import threading

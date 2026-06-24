@@ -12,11 +12,11 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 from telegram_ping_watcher import chat_type_from_entity, message_looks_like_broadcast_channel, message_to_record
 
 from .app_ctx import logger, state
-from .bot_notify import send_bot_notification
+from .bot_notify import send_bot_notification, send_check_notification
 from .common import now_iso, record_app_event
 from .deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from .giveaway_actions import analyze_and_store_giveaway
-from .giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
+from .giveaways import giveaway_outcome_resolution, is_check_text, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
 from .live import publish_live_event
 from .push import send_push
 
@@ -29,6 +29,10 @@ def check_is_win(text: str) -> bool:
 
 def check_is_giveaway(text: str, chat_type: str = "") -> bool:
     return matches_strict_giveaway_rule(text, chat_type, state.giveaway_keywords)
+
+
+def check_is_check(text: str) -> bool:
+    return is_check_text(text, state.check_keywords)
 
 
 def priority_label(score: int) -> str:
@@ -334,11 +338,21 @@ async def process_ping_message(
     if chat_type != "channel":
         return None
     await resolve_ping_user_ids(client)
+    is_check = check_is_check(getattr(message, "raw_text", "") or "")
     record = await message_to_record(client, message, state.ping_regex, state.ping_usernames, tracked_ids=state.ping_user_ids or None)
     if not record:
-        return None
+        # Checks rarely mention a tracked username — capture them anyway.
+        if not is_check:
+            return None
+        record = await message_to_record(
+            client, message, state.ping_regex, state.ping_usernames,
+            require_mentions=False, tracked_ids=state.ping_user_ids or None,
+        )
+        if not record:
+            return None
     record["chat_type"] = chat_type
     record["detected_at"] = now_iso()
+    record["is_check"] = is_check
     record["is_win"] = check_is_win(record["text"])
     record["is_giveaway"] = check_is_giveaway(record["text"], record["chat_type"])
     apply_giveaway_state(record)
@@ -383,7 +397,10 @@ async def process_ping_message(
             },
         )
     if notify and existing is None:
-        await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
+        if record.get("is_check"):
+            await send_check_notification(record, ping_id=ping_id)
+        else:
+            await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
     if notify and existing is None and ping_id:
         saved_record = {**record, "id": ping_id}
         asyncio.create_task(fan_push_ping(saved_record))

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from telethon import Button
@@ -10,6 +10,7 @@ from telethon import Button
 from . import watch_settings as ws
 from .app_ctx import (
     ADMIN_ID,
+    CHECK_FRESH_MINUTES,
     MARKET_RETENTION_DAYS,
     PINGS_RETENTION_DAYS,
     STARTUP_SCAN_WAIT_SECONDS,
@@ -23,6 +24,7 @@ from .common import now_iso, record_app_event, start_supervised
 from .digest import format_digest
 from .live import publish_live_event
 from .scan_engine import full_history_scan
+from .watchdog import JobHealth, classify_job, default_thresholds, diff_health, format_age
 
 
 async def fetch_market_data() -> None:
@@ -61,6 +63,7 @@ async def fetch_market_data() -> None:
         except Exception:
             logger.exception("Market data fetch failed after retries")
 
+        state.heartbeat("market-fetch")
         await asyncio.sleep(ws.MARKET_POLL_SECONDS)
 
 
@@ -111,6 +114,7 @@ async def reminder_loop() -> None:
                 await mark_reminder_sent(int(reminder["id"]))
                 await record_app_event("WARNING", "reminder", "Deadline reminder sent", {"ping_id": ping_id, "deadline_at": deadline_at})
                 await publish_live_event("reminder", {"ping_id": ping_id, "chat": chat, "deadline_at": deadline_at})
+            state.heartbeat("reminders")
         except Exception:
             logger.exception("Reminder loop failed")
         await asyncio.sleep(60)
@@ -141,6 +145,70 @@ async def digest_loop() -> None:
         await asyncio.sleep(61)
 
 
+async def _notify_access_flip(tg_id: int, allowed: bool, until) -> None:
+    """Send a member a heads-up when their scheduled access opens/closes."""
+    if not state.bot_client:
+        return
+    if allowed:
+        msg = "🟢 **Доступ к боту открыт.**\nМожно пользоваться командами — /menu."
+    else:
+        phrase = f" до {until.astimezone().strftime('%d.%m %H:%M')}" if until else ""
+        msg = f"🔴 **Доступ к боту закрыт по расписанию**{phrase}.\nОткроется автоматически."
+    try:
+        await state.bot_client.send_message(int(tg_id), msg, link_preview=False)
+    except Exception as exc:
+        logger.warning("Failed to notify member %s of access flip: %s", tg_id, exc)
+
+
+async def access_scheduler_loop() -> None:
+    """Keep the scheduled-access cache warm and notify members on boundary flips.
+
+    NOT the source of truth — ``bot_role`` recomputes access on demand, so a
+    missed tick only delays a notification, never grants/denies wrongly. On a
+    fresh start ``last_state`` is empty, so the first pass primes the cache
+    silently (no spurious "access changed" messages after a restart)."""
+    from database import list_all_access_windows, list_bot_members, record_access_audit
+
+    from .access_control import resolve_access, window_from_row
+
+    last_state: dict[int, bool] = {}
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            members = await list_bot_members()
+            windows_by_user = await list_all_access_windows()
+            seen: set[int] = set()
+            for m in members:
+                if m.get("blocked"):
+                    continue
+                tg = int(m["tg_id"])
+                seen.add(tg)
+                windows = [window_from_row(r) for r in windows_by_user.get(tg, [])]
+                decision = resolve_access(m, windows, now)
+                until = decision.until or (now + timedelta(minutes=1))
+                state.access_cache[tg] = (decision.allowed, until, decision.reason)
+                prev = last_state.get(tg)
+                if prev is not None and prev != decision.allowed:
+                    await record_access_audit(
+                        tg, None, "flip", "scheduler",
+                        {"allowed": prev}, {"allowed": decision.allowed, "reason": decision.reason},
+                    )
+                    await _notify_access_flip(tg, decision.allowed, until)
+                    await record_app_event(
+                        "INFO", "access", "Scheduled access flipped",
+                        {"tg_id": tg, "allowed": decision.allowed, "reason": decision.reason},
+                    )
+                    await publish_live_event("access-changed", {"tg_id": tg, "allowed": decision.allowed})
+                last_state[tg] = decision.allowed
+            # Drop state for members that disappeared so they don't leak.
+            for gone in set(last_state) - seen:
+                last_state.pop(gone, None)
+            state.heartbeat("access-scheduler")
+        except Exception:
+            logger.exception("Access scheduler loop failed")
+        await asyncio.sleep(45)
+
+
 async def obsidian_sync_loop() -> None:
     """Poll the Obsidian Долги note and reconcile it with the debt board."""
     from .obsidian_debts import sync_once
@@ -162,13 +230,14 @@ async def source_score_loop() -> None:
         try:
             await recalculate_source_scores()
             await cleanup_outbox(days=2, max_events=2500)
+            state.heartbeat("source-scores")
         except Exception:
             logger.exception("Source score recalculation failed")
         await asyncio.sleep(300)
 
 
 async def auto_scan_loop() -> None:
-    from database import cleanup_old_data
+    from database import cleanup_old_data, purge_stale_checks
 
     start_supervised("market-volatility", monitor_market_volatility, backoff_base=60.0, backoff_max=1800.0)
     if ws.STARTUP_SCAN_DELAY_SECONDS:
@@ -192,12 +261,89 @@ async def auto_scan_loop() -> None:
             )
             if vacuum_due:
                 last_vacuum = datetime.now()
-            if stats.get("pings") or stats.get("market_history") or stats.get("vacuumed"):
+            stale_checks = await purge_stale_checks(minutes=CHECK_FRESH_MINUTES)
+            if stale_checks:
+                stats["stale_checks"] = stale_checks
+            if stats.get("pings") or stats.get("market_history") or stats.get("vacuumed") or stale_checks:
                 await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
+            state.heartbeat("auto-scan")
         except Exception:
             logger.exception("Automatic scan loop failed")
             state.last_scan_status = "error"
         await asyncio.sleep(ws.SCAN_INTERVAL_SECONDS)
+
+
+def _collect_job_health() -> list[JobHealth]:
+    """Snapshot the health of every monitored background job right now."""
+    thresholds = default_thresholds(
+        scan_interval_seconds=ws.SCAN_INTERVAL_SECONDS,
+        market_poll_seconds=ws.MARKET_POLL_SECONDS,
+    )
+    now = datetime.now()
+    healths: list[JobHealth] = []
+    for name, threshold in thresholds.items():
+        task = state.background_tasks.get(name)
+        running = bool(task) and not task.done()
+        ref = state.job_last_ok_at.get(name) or state.job_started_at.get(name)
+        age = int((now - ref).total_seconds()) if ref else None
+        healths.append(classify_job(name, running=running, age_seconds=age, threshold_seconds=threshold))
+    return healths
+
+
+async def _alert_job_unhealthy(health: JobHealth) -> None:
+    if health.reason == "missing":
+        detail = "не запущена — упала и не перезапустилась"
+        level = "ERROR"
+    else:
+        detail = f"молчит {format_age(health.age_seconds)} (порог {format_age(health.threshold_seconds)})"
+        level = "ERROR" if health.name == "auto-scan" else "WARNING"
+    msg = (
+        "🛑 **Сбой фоновой задачи**\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"Задача: `{health.name}`\n"
+        f"Статус: {detail}\n\n"
+        "Движок мог перестать ловить события. Проверьте /logs или перезапустите приложение."
+    )
+    await send_admin_bot_message(msg)
+    await record_app_event(
+        level, "watchdog", f"Background job unhealthy: {health.name}",
+        {"reason": health.reason, "age_seconds": health.age_seconds},
+    )
+    await publish_live_event(
+        "job-unhealthy",
+        {"job": health.name, "reason": health.reason, "age_seconds": health.age_seconds},
+    )
+
+
+async def _alert_job_recovered(health: JobHealth) -> None:
+    await send_admin_bot_message(f"✅ **Задача восстановилась**: `{health.name}` снова отвечает.")
+    await record_app_event("INFO", "watchdog", f"Background job recovered: {health.name}", None)
+    await publish_live_event("job-recovered", {"job": health.name})
+
+
+async def watchdog_loop() -> None:
+    """Page the admin when a critical background job dies or stops reporting.
+
+    Pure decision logic lives in ``watchdog.py``; this loop only gathers ages,
+    sends Telegram alerts, and remembers which jobs are already flagged so the
+    admin is notified once per outage (plus one recovery message). It is itself
+    supervised, so if it crashes the supervisor restarts it."""
+    poll = max(20, int(settings.watchdog_poll_seconds or 60))
+    unhealthy: set[str] = set()
+    while not state.shutting_down:
+        try:
+            healths = _collect_job_health()
+            new_alerts, recoveries = diff_health(unhealthy, healths)
+            for health in new_alerts:
+                unhealthy.add(health.name)
+                await _alert_job_unhealthy(health)
+            for health in recoveries:
+                unhealthy.discard(health.name)
+                await _alert_job_recovered(health)
+        except Exception:
+            logger.exception("Watchdog loop failed")
+        state.heartbeat("watchdog")
+        await asyncio.sleep(poll)
 
 
 async def startup_maintenance() -> None:

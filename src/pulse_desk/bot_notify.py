@@ -10,7 +10,7 @@ from telethon import Button
 from .app_ctx import ADMIN_ID, BASE_DIR, logger, state
 from .bot_prefs import filter_broadcast_members, notification_type_of
 from .common import flood_wait_seconds, record_app_event
-from .watch_settings import load_notification_settings, notification_matches, should_throttle_notification
+from .watch_settings import is_quiet_time, load_notification_settings, notification_matches, should_throttle_notification
 
 try:
     from telethon.errors import FloodWaitError
@@ -35,7 +35,9 @@ async def ensure_bot_connected() -> bool:
 
 def notification_image_path(record: dict[str, Any]) -> Optional[str]:
     """Pick the branded header image for a ping notification, if present on disk."""
-    if record.get("is_win"):
+    if record.get("is_check"):
+        name = "notify_check.png"
+    elif record.get("is_win"):
         name = "notify_win.png"
     elif record.get("is_giveaway"):
         name = "notify_giveaway.png"
@@ -118,6 +120,55 @@ async def broadcast_member_notification(
         except Exception as exc:
             logger.warning("Failed to notify bot member %s: %s", tg_id, exc)
     return delivered
+
+
+async def send_check_notification(record: dict[str, Any], ping_id: Optional[int] = None) -> None:
+    """Alert admin + opted-in members about a detected check/multicheck.
+
+    Unlike ``send_bot_notification`` this bypasses the username/keyword match
+    filters (checks rarely satisfy them) but still honours the global on/off
+    switch and quiet hours.
+    """
+    from database import save_broadcast_messages
+
+    if not state.bot_client:
+        return
+    try:
+        settings = await load_notification_settings()
+        if not settings.get("enabled", True) or is_quiet_time(settings):
+            return
+        is_multi = "мультичек" in (record.get("text") or "").lower()
+        title = "💸 Найден мультичек" if is_multi else "💸 Найден чек"
+        header_image = notification_image_path(record)
+        excerpt_limit = 600 if header_image else 800
+        msg = (
+            f"**{title}**\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"💬 Чат: `{record.get('chat', 'unknown')}`\n"
+            f"👤 От: {record.get('sender', 'unknown')}\n\n"
+            f"{(record.get('text') or '')[:excerpt_limit]}"
+        )
+        link = record.get("link")
+        has_link = bool(link) and not link.startswith("нет ")
+        buttons: list[list[Button]] = []
+        if has_link:
+            buttons.append([Button.url("🔗 Открыть в Telegram", link)])
+        if ping_id:
+            buttons.append([
+                Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
+                Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
+            ])
+        member_buttons: Optional[list[list[Button]]] = [[Button.url("Открыть в Telegram", link)]] if has_link else None
+        delivered = await broadcast_member_notification(msg, member_buttons, file=header_image, notif_type="check")
+        if delivered:
+            token = secrets_module.token_hex(4)
+            await save_broadcast_messages(token, delivered)
+            buttons.append([Button.inline(f"🙈 Скрыть у друзей ({len(delivered)})", data=f"hidebc_{token}")])
+        sent = await send_admin_bot_message(msg, buttons=buttons, file=header_image)
+        if not sent:
+            logger.error("Failed to send check notification after retries")
+    except Exception:
+        logger.exception("Failed to send check notification")
 
 
 async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None, auto_joined: bool = False) -> None:

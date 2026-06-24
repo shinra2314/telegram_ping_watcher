@@ -48,3 +48,24 @@ async def cleanup_old_data(
             except Exception:
                 pass
     return stats
+
+
+async def purge_stale_checks(minutes: int = 60) -> int:
+    """Delete redeemable-check pings older than ``minutes``.
+
+    CryptoBot чеки are grabbed within minutes; a stale one is dead weight. Only
+    *pure* ephemeral checks are removed — checks the owner favourited or that
+    turned out to be wins are spared (they carry value beyond the check). The
+    ``pings_fts`` virtual table has no delete trigger, so its rows are removed
+    first, mirroring ``database.delete_ping``. Returns the number deleted.
+    """
+    cutoff = (datetime.now() - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+    selector = "is_check = 1 AND is_favorite = 0 AND is_win = 0 AND detected_at < ?"
+    async with _connect() as db:
+        await db.execute(
+            f"DELETE FROM pings_fts WHERE rowid IN (SELECT id FROM pings WHERE {selector})",
+            (cutoff,),
+        )
+        cur = await db.execute(f"DELETE FROM pings WHERE {selector}", (cutoff,))
+        await db.commit()
+        return int(cur.rowcount or 0)

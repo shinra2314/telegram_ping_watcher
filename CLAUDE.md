@@ -58,8 +58,9 @@ main.py (~160 lines)
   No business logic and no endpoints live here anymore.
 
 routers/                   — ALL HTTP endpoints. One module per area:
-  analytics, auth, backups, boards, bot_access, export, giveaways, launcher,
-  live (SSE), lookups, market, obsidian, pings, push, scan, settings, system.
+  access (scheduled access), analytics, auth, backups, boards, bot_access,
+  export, giveaways, launcher, live (SSE), lookups, market, obsidian, pings,
+  push, scan, settings, system.
   Registered in main.py via app.include_router(). They import singletons from
   src/pulse_desk/app_ctx.py — NEVER from main (avoids circular imports).
   New endpoint groups go here, not in main.py.
@@ -82,9 +83,13 @@ src/pulse_desk/
   scan_engine.py    — full_history_scan, scan_single_account, mention backfill
   giveaway_actions.py — Safe giveaway join: analysis, button detection, confirm
   bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
-  bot_service.py    — init_bot: inline menus, slash commands, access keys
+  bot_service.py    — init_bot: inline menus, slash commands, access keys,
+                      /access scheduled-access management
+  access_control.py — Pure schedule resolution (Window/Decision, window_contains,
+                      resolve_access, next_boundary). Zoneinfo/DST-aware, no I/O,
+                      fully unit-tested. Source of truth for bot_role gating
   loops.py          — Background loops: market, reminders, digest, scores,
-                      auto-scan, obsidian-sync, startup maintenance
+                      auto-scan, obsidian-sync, access-scheduler, startup maintenance
   obsidian_debts.py — Two-way sync of the Debts board with an Obsidian
                       `Долги.md` note: parse/normalise/reconcile (pure, unit
                       tested) + atomic write w/ dated backup. Note wins on
@@ -113,7 +118,7 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 14)
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 16)
   schema.py   — init_db + migrations   backups.py  — file backups
   pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
   giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards
@@ -122,6 +127,7 @@ database/                  — SQLite layer (aiosqlite), split per area.
   events.py   — app event log          settings_kv.py — key-value settings
   outbox.py   — SSE outbox             push.py — push subscriptions
   bot_access.py — bot keys/members     stats.py / maintenance.py — stats, cleanup
+  access_windows.py — scheduled-access windows (access_schedule) + audit
   WAL mode + FK enabled + 5 s busy timeout everywhere.
 
 telegram_ping_watcher.py   — Telethon client helpers and message parsing utilities
@@ -145,6 +151,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `reminders` | Fires deadline reminders (admin + opted-in bot members) | — |
 | `daily-digest` | Sends daily ping digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 09:00) | — |
 | `source-scores` | Recalculates channel reliability scores | — |
+| `access-scheduler` | Warms the scheduled-access cache and notifies members when their access window opens/closes (not the source of truth — `bot_role` recomputes on demand) | — |
 | `obsidian-sync` | Reconciles the Debts board with the Obsidian `Долги.md` note (note wins; syncs the claimed/done bit, appends newly detected wins) | `OBSIDIAN_DEBTS_PATH`, `OBSIDIAN_SYNC_ENABLED`, `OBSIDIAN_SYNC_WRITE`, `OBSIDIAN_SYNC_POLL_SECONDS` |
 | `market-monitor` | Fetches crypto prices, alerts on volatility | `MARKET_POLL_SECONDS` |
 | `bot-service` | Telegram bot for notifications + inline menus | `TELEGRAM_BOT_TOKEN` (optional) |

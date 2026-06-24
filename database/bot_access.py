@@ -78,8 +78,7 @@ async def upsert_bot_member(tg_id: int, tg_username: str, name: str, key_id: Opt
                 name = excluded.name,
                 key_id = excluded.key_id,
                 role = excluded.role,
-                last_seen_at = excluded.last_seen_at,
-                blocked = 0
+                last_seen_at = excluded.last_seen_at
             """,
             (tg_id, tg_username or "", name or "", key_id, role or "viewer", _now_iso(), _now_iso()),
         )

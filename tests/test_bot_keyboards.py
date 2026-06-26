@@ -153,9 +153,10 @@ class ManagementKeyboardTests(unittest.TestCase):
 
     def test_member_access_close_open(self):
         datas = [b.data for row in member_access_keyboard(7) for b in row]
-        self.assertIn(b"acc:close:7", datas)
-        self.assertIn(b"acc:open:7", datas)
-        self.assertIn(b"mem:open:7", datas)
+        for cb in (b"acc:close:7", b"acc:close2h:7", b"acc:open:7",
+                   b"acc:morning:7", b"acc:undo:7", b"acc:log:7",
+                   b"mem:open:7", b"mem:access:7"):
+            self.assertIn(cb, datas)
 
     def test_keys_keyboard_create_and_back(self):
         datas = [b.data for row in keys_keyboard() for b in row]

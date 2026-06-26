@@ -107,8 +107,14 @@ def member_card_keyboard(tg: int, blocked: bool) -> list[list[Button]]:
 
 def member_access_keyboard(tg: int) -> list[list[Button]]:
     return [
-        [Button.inline("🔴 Закрыть", f"acc:close:{tg}".encode()), Button.inline("🟢 Открыть", f"acc:open:{tg}".encode())],
-        [Button.inline("⬅️ Назад", f"mem:open:{tg}".encode()), Button.inline("🔄 Обновить", f"mem:access:{tg}".encode())],
+        [Button.inline("🔴 Закрыть", f"acc:close:{tg}".encode()),
+         Button.inline("🔴 На 2ч", f"acc:close2h:{tg}".encode()),
+         Button.inline("🟢 Открыть", f"acc:open:{tg}".encode())],
+        [Button.inline("🔴 До утра", f"acc:morning:{tg}".encode()),
+         Button.inline("↩️ Отмена", f"acc:undo:{tg}".encode()),
+         Button.inline("🧾 История", f"acc:log:{tg}".encode())],
+        [Button.inline("⬅️ Назад", f"mem:open:{tg}".encode()),
+         Button.inline("🔄 Обновить", f"mem:access:{tg}".encode())],
     ]
 
 

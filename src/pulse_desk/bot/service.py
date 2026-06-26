@@ -40,6 +40,7 @@ from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, fmt_dt, help_text, main_menu_buttons, menu_caption
+from .keyboards import back_home, section_nav
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -738,22 +739,22 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/help"))
         @viewer_only
         async def help_handler(event, role):
-            await event.respond(help_text(role), buttons=main_menu_buttons(role))
+            await event.respond(help_text(role), buttons=section_nav(b"menu_help"))
 
         @bot_client.on(events.NewMessage(pattern="/stats"))
         @viewer_only
         async def stats_handler(event, role):
-            await event.respond(await render_stats(), buttons=main_menu_buttons(role))
+            await event.respond(await render_stats(), buttons=section_nav(b"menu_stats"))
 
         @bot_client.on(events.NewMessage(pattern="/status"))
         @viewer_only
         async def status_handler(event, role):
-            await event.respond(await render_status(), buttons=main_menu_buttons(role))
+            await event.respond(await render_status(), buttons=section_nav(b"menu_status"))
 
         @bot_client.on(events.NewMessage(pattern="/giveaways"))
         @viewer_only
         async def giveaways_handler(event, role):
-            await event.respond(await render_giveaways(), buttons=main_menu_buttons(role), link_preview=False)
+            await event.respond(await render_giveaways(), buttons=section_nav(b"menu_giveaways"), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/recent"))
         @viewer_only
@@ -763,12 +764,12 @@ async def init_bot() -> None:
                 n = max(1, min(20, int(parts[1]))) if len(parts) > 1 else 5
             except (ValueError, IndexError):
                 n = 5
-            await event.respond(await render_recent(n), buttons=main_menu_buttons(role), link_preview=False)
+            await event.respond(await render_recent(n), buttons=section_nav(b"menu_recent"), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/latest"))
         @viewer_only
         async def latest_handler(event, role):
-            await event.respond(await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
+            await event.respond(await render_recent(5), buttons=section_nav(b"menu_recent"), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/search"))
         @viewer_only
@@ -779,7 +780,7 @@ async def init_bot() -> None:
                 return
             rows = await get_pings(limit=5, search=parts[1])
             if not rows:
-                await event.respond("🔎 __Ничего не найдено.__", buttons=main_menu_buttons(role))
+                await event.respond("🔎 __Ничего не найдено.__", buttons=back_home())
                 return
             result = ["🔎 **Результаты поиска**", DIV]
             for row in rows:
@@ -788,17 +789,17 @@ async def init_bot() -> None:
                     f"• `{fmt_dt(row.get('detected_at'))}` · {row['chat']}\n{(row.get('text') or '')[:160]}"
                     + (f"\n🔗 {link}" if link else "")
                 )
-            await event.respond("\n\n".join(result), buttons=main_menu_buttons(role), link_preview=False)
+            await event.respond("\n\n".join(result), buttons=back_home(), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/checks"))
         @viewer_only
         async def checks_handler(event, role):
-            await event.respond(await render_checks(10), buttons=main_menu_buttons(role), link_preview=False)
+            await event.respond(await render_checks(10), buttons=section_nav(b"menu_checks"), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
         @viewer_only
         async def market_handler(event, role):
-            await event.respond(await render_market(), buttons=main_menu_buttons(role))
+            await event.respond(await render_market(), buttons=section_nav(b"menu_market"))
 
         @bot_client.on(events.NewMessage(pattern="/ping"))
         @viewer_only
@@ -1186,25 +1187,25 @@ async def init_bot() -> None:
 
             # ---- menu navigation (any authenticated role) ----
             if data == "menu_help":
-                await safe_edit(event, help_text(role), buttons=main_menu_buttons(role))
+                await safe_edit(event, help_text(role), buttons=section_nav(b"menu_help"))
                 return
             if data == "menu_stats":
-                await safe_edit(event, await render_stats(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_stats(), buttons=section_nav(b"menu_stats"))
                 return
             if data == "menu_status":
-                await safe_edit(event, await render_status(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_status(), buttons=section_nav(b"menu_status"))
                 return
             if data == "menu_giveaways":
-                await safe_edit(event, await render_giveaways(), buttons=main_menu_buttons(role), link_preview=False)
+                await safe_edit(event, await render_giveaways(), buttons=section_nav(b"menu_giveaways"), link_preview=False)
                 return
             if data == "menu_recent":
-                await safe_edit(event, await render_recent(5), buttons=main_menu_buttons(role), link_preview=False)
+                await safe_edit(event, await render_recent(5), buttons=section_nav(b"menu_recent"), link_preview=False)
                 return
             if data == "menu_checks":
-                await safe_edit(event, await render_checks(10), buttons=main_menu_buttons(role), link_preview=False)
+                await safe_edit(event, await render_checks(10), buttons=section_nav(b"menu_checks"), link_preview=False)
                 return
             if data == "menu_market":
-                await safe_edit(event, await render_market(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_market(), buttons=section_nav(b"menu_market"))
                 return
 
             if data == "menu_main":

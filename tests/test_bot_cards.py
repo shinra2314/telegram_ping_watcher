@@ -148,5 +148,38 @@ class GiveawayCardTests(unittest.TestCase):
         self.assertIn("Дедлайн: `—`", out)
 
 
+from pulse_desk.bot.cards import management_card, member_card, members_header
+
+
+class ManagementCardTests(unittest.TestCase):
+    def test_management_header(self):
+        self.assertIn("**УПРАВЛЕНИЕ**", management_card())
+
+    def test_members_header_count(self):
+        self.assertIn("3", members_header(3))
+
+    def test_members_header_empty(self):
+        self.assertIn("📭", members_header(0))
+
+
+class MemberCardTests(unittest.TestCase):
+    MEMBER = {
+        "tg_id": 7, "tg_username": "ivan", "name": "Иван",
+        "key_label": "friends", "blocked": 0, "last_seen_at": "2026-06-26T13:50:00",
+    }
+
+    def test_shows_username_key_and_open_state(self):
+        out = member_card(self.MEMBER, access_open=True)
+        self.assertIn("@ivan", out)
+        self.assertIn("friends", out)
+        self.assertIn("активен", out)
+        self.assertIn("открыт", out)
+
+    def test_blocked_and_closed(self):
+        out = member_card(dict(self.MEMBER, blocked=1), access_open=False)
+        self.assertIn("заблокирован", out)
+        self.assertIn("закрыт", out)
+
+
 if __name__ == "__main__":
     unittest.main()

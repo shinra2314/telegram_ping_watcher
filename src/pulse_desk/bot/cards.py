@@ -121,3 +121,32 @@ def giveaway_card(ping: dict) -> str:
     if ping.get("link"):
         lines.append(f"🔗 {ping['link']}")
     return "\n".join(lines)
+
+
+def management_card() -> str:
+    return header("⚙️", "Управление", "Домой › Управление") + "\nВыберите раздел 👇"
+
+
+def members_header(count: int) -> str:
+    out = header("👥", "Люди", "Домой › Управление › Люди")
+    if count == 0:
+        return out + "\n" + empty("Пока никого.")
+    return out + f"\nУчастников: `{count}` · нажми на запись 👇"
+
+
+def member_card(member: dict, access_open: bool) -> str:
+    tg = member.get("tg_id")
+    uname = f"@{member['tg_username']}" if member.get("tg_username") else "—"
+    blocked = bool(member.get("blocked"))
+    crumb = f"Домой › Управление › Люди › {member.get('name') or tg}"
+    state_line = (
+        f"{'🚫 заблокирован' if blocked else '🟢 активен'}  ·  "
+        f"⏰ {'🟢 открыт' if access_open else '🔴 закрыт'}"
+    )
+    return "\n".join([
+        header("👤", str(member.get("name") or tg), crumb),
+        uname,
+        kv("🔑", "Ключ", member.get("key_label") or "—"),
+        state_line,
+        kv("🕐", "Был", fmt_dt(member.get("last_seen_at"))),
+    ])

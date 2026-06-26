@@ -24,8 +24,8 @@ def fmt_dt(value: Optional[str]) -> str:
 
 def main_menu_buttons(role: str) -> list[list[Button]]:
     rows = [
-        [Button.inline("🎁 Розыгрыши", b"menu_giveaways"), Button.inline("💸 Чеки", b"menu_checks")],
-        [Button.inline("🕐 Последние", b"menu_recent"), Button.inline("📊 Сводка", b"menu_summary")],
+        [Button.inline("🎁 Розыгрыши", b"menu_giveaways"), Button.inline("💸 Чеки", b"mon:feed:check")],
+        [Button.inline("🕐 Последние", b"mon:feed:all"), Button.inline("📊 Сводка", b"menu_summary")],
     ]
     if role == "admin":
         rows.append([

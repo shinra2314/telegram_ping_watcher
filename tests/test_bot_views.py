@@ -49,6 +49,12 @@ class MainMenuButtonsTests(unittest.TestCase):
             self.assertNotIn("🛰 Статус", labels)
             self.assertNotIn("💹 Курсы", labels)
 
+    def test_feed_buttons_target_monitoring(self):
+        rows = main_menu_buttons("viewer")
+        data = {b.text: b.data for row in rows for b in row}
+        self.assertEqual(data["🕐 Последние"], b"mon:feed:all")
+        self.assertEqual(data["💸 Чеки"], b"mon:feed:check")
+
     def test_admin_has_owner_controls(self):
         labels = self._labels("admin")
         self.assertIn("🔑 Ключи", labels)

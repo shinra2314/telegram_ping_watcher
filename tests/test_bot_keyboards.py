@@ -37,5 +37,64 @@ class BackHomeTests(unittest.TestCase):
         self.assertEqual(rows[0][0].text, "⬅️ Домой")
 
 
+from pulse_desk.bot.keyboards import MON_FILTERS, feed_keyboard, ping_card_keyboard
+
+
+class FeedKeyboardTests(unittest.TestCase):
+    ITEMS = [(842, "🔥 14:02 @chan"), (840, "• 13:40 @chan2")]
+
+    def test_each_item_is_a_row_opening_that_ping(self):
+        rows = feed_keyboard(self.ITEMS, "all")
+        self.assertEqual(rows[0][0].data, b"mon:open:842")
+        self.assertEqual(rows[1][0].data, b"mon:open:840")
+
+    def test_filter_row_has_all_filters(self):
+        rows = feed_keyboard(self.ITEMS, "all")
+        filt = rows[len(self.ITEMS)]
+        datas = [b.data for b in filt]
+        self.assertIn(b"mon:feed:all", datas)
+        self.assertIn(b"mon:feed:check", datas)
+        self.assertIn(b"mon:feed:win", datas)
+        self.assertIn(b"mon:feed:important", datas)
+
+    def test_active_filter_is_marked(self):
+        rows = feed_keyboard(self.ITEMS, "check")
+        filt = rows[len(self.ITEMS)]
+        active = [b.text for b in filt if b.data == b"mon:feed:check"][0]
+        inactive = [b.text for b in filt if b.data == b"mon:feed:all"][0]
+        self.assertNotEqual(active, "Чеки")
+        self.assertEqual(inactive, "Все")
+
+    def test_footer_home_and_refresh_keep_filter(self):
+        rows = feed_keyboard(self.ITEMS, "win")
+        footer = rows[-1]
+        self.assertEqual(footer[0].data, b"menu_main")
+        self.assertEqual(footer[1].data, b"mon:feed:win")
+
+    def test_empty_feed_still_has_filter_and_footer(self):
+        rows = feed_keyboard([], "all")
+        self.assertEqual(len(rows), 2)  # filter row + footer
+
+
+class PingCardKeyboardTests(unittest.TestCase):
+    def test_admin_gets_fav_and_read(self):
+        rows = ping_card_keyboard(842, is_admin=True)
+        datas = [b.data for row in rows for b in row]
+        self.assertIn(b"ping:fav:842", datas)
+        self.assertIn(b"ping:read:842", datas)
+
+    def test_viewer_has_no_mutating_actions(self):
+        rows = ping_card_keyboard(842, is_admin=False)
+        datas = [b.data for row in rows for b in row]
+        self.assertNotIn(b"ping:fav:842", datas)
+        self.assertNotIn(b"ping:read:842", datas)
+
+    def test_back_returns_to_feed_and_refresh_reopens(self):
+        rows = ping_card_keyboard(842, is_admin=False)
+        footer = rows[-1]
+        self.assertEqual(footer[0].data, b"mon:feed:all")
+        self.assertEqual(footer[1].data, b"mon:open:842")
+
+
 if __name__ == "__main__":
     unittest.main()

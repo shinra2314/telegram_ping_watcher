@@ -42,11 +42,12 @@ from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, fmt_dt, help_text, main_menu_buttons
 from .keyboards import (
     MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
-    giveaway_feed_keyboard, ping_card_keyboard, section_nav,
+    giveaway_feed_keyboard, keys_keyboard, management_grid, member_access_keyboard,
+    member_card_keyboard, members_list_keyboard, ping_card_keyboard, section_nav,
 )
 from .cards import (
-    feed_badge, feed_header, giveaway_card, giveaways_header,
-    home_card, ping_card, summary_card,
+    feed_badge, feed_header, giveaway_card, giveaways_header, management_card,
+    member_card, members_header, home_card, ping_card, summary_card,
 )
 
 
@@ -295,6 +296,28 @@ async def init_bot() -> None:
             if not ping:
                 return None
             return giveaway_card(ping), giveaway_card_keyboard(ping_id)
+
+        async def render_management():
+            return management_card(), management_grid()
+
+        async def render_members():
+            members = await list_bot_members()
+            items = []
+            for m in members:
+                tg = int(m["tg_id"])
+                uname = f"@{m['tg_username']}" if m.get("tg_username") else ""
+                dot_ = "🚫" if m.get("blocked") else "🟢"
+                label = f"{dot_} {m.get('name') or tg} {uname}".strip()
+                items.append((tg, label[:48]))
+            return members_header(len(members)), members_list_keyboard(items)
+
+        async def open_member_view(tg: int):
+            member = await get_bot_member(tg)
+            if not member:
+                return None
+            rows = await list_access_windows(tg)
+            decision = resolve_access(member, [window_from_row(r) for r in rows], datetime.now(timezone.utc))
+            return member_card(member, decision.allowed), member_card_keyboard(tg, bool(member.get("blocked")))
 
         async def render_market() -> str:
             market = await get_market_history(limit=1)
@@ -1282,6 +1305,82 @@ async def init_bot() -> None:
                     text, kb = res
                     await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
+                if seg[0] in ("adm", "mem", "acc"):
+                    if role != "admin":
+                        await event.answer("Только владелец", alert=True)
+                        return
+                    if seg[0] == "adm" and seg[1] == "home":
+                        text, kb = await render_management()
+                        await safe_edit(event, text, buttons=kb)
+                        return
+                    if seg[0] == "adm" and seg[1] == "members":
+                        text, kb = await render_members()
+                        await safe_edit(event, text, buttons=kb)
+                        return
+                    if seg[0] == "adm" and seg[1] == "access":
+                        await safe_edit(
+                            event, await render_access_overview(),
+                            buttons=[[Button.inline("⬅️ Управление", b"adm:home")]],
+                        )
+                        return
+                    if seg[0] == "adm" and seg[1] == "newkey":
+                        secret = generate_access_key()
+                        await create_bot_key("", secret, "viewer", None)
+                        link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
+                        body = "🔑 **Новый ключ**\n" + DIV + f"\n🔐 `{secret}`"
+                        if link:
+                            body += f"\n🔗 {link}"
+                        await event.respond(body, link_preview=False)
+                        await event.answer("Ключ создан")
+                        return
+                    if seg[0] in ("mem", "acc") and len(seg) >= 3:
+                        try:
+                            tg = int(seg[2])
+                        except ValueError:
+                            await event.answer("Некорректная команда", alert=True)
+                            return
+                        if seg[0] == "mem" and seg[1] == "open":
+                            res = await open_member_view(tg)
+                            if res is None:
+                                await event.answer("Участник не найден", alert=True)
+                                return
+                            text, kb = res
+                            await safe_edit(event, text, buttons=kb)
+                            return
+                        if seg[0] == "mem" and seg[1] in ("block", "unblock"):
+                            await set_bot_member_blocked(tg, seg[1] == "block")
+                            state.access_cache.pop(tg, None)
+                            await event.answer("Заблокирован" if seg[1] == "block" else "Разблокирован")
+                            res = await open_member_view(tg)
+                            if res is not None:
+                                text, kb = res
+                                await safe_edit(event, text, buttons=kb)
+                            return
+                        if seg[0] == "mem" and seg[1] == "access":
+                            member = await get_bot_member(tg)
+                            if not member:
+                                await event.answer("Участник не найден", alert=True)
+                                return
+                            await safe_edit(event, await render_member_access(member), buttons=member_access_keyboard(tg))
+                            return
+                        if seg[0] == "acc" and seg[1] in ("close", "open"):
+                            member = await get_bot_member(tg)
+                            if not member:
+                                await event.answer("Участник не найден", alert=True)
+                                return
+                            if seg[1] == "close":
+                                row = await create_disable_until_window(tg, None, created_by=event.sender_id)
+                                await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": None})
+                                state.access_cache.pop(tg, None)
+                                await event.answer("🔴 Доступ закрыт")
+                            else:
+                                cancelled = await _open_member_access(tg, event.sender_id)
+                                await event.answer(f"🟢 Доступ открыт ({cancelled})")
+                            member = await get_bot_member(tg)
+                            await safe_edit(event, await render_member_access(member), buttons=member_access_keyboard(tg))
+                            return
+                    await event.answer("Неизвестная команда", alert=True)
+                    return
 
             # ---- menu navigation (any authenticated role) ----
             if data == "menu_help":
@@ -1353,7 +1452,7 @@ async def init_bot() -> None:
                     return
 
             if data == "menu_keys":
-                await safe_edit(event, await render_keys_text(), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_keys_text(), buttons=keys_keyboard())
                 return
             if data == "menu_scan":
                 if state.scan_lock.locked():

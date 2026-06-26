@@ -1363,19 +1363,55 @@ async def init_bot() -> None:
                                 return
                             await safe_edit(event, await render_member_access(member), buttons=member_access_keyboard(tg))
                             return
-                        if seg[0] == "acc" and seg[1] in ("close", "open"):
+                        if seg[0] == "acc" and seg[1] in ("close", "open", "close2h", "morning", "undo", "log"):
                             member = await get_bot_member(tg)
                             if not member:
                                 await event.answer("Участник не найден", alert=True)
                                 return
-                            if seg[1] == "close":
-                                row = await create_disable_until_window(tg, None, created_by=event.sender_id)
-                                await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": None})
-                                state.access_cache.pop(tg, None)
-                                await event.answer("🔴 Доступ закрыт")
-                            else:
+                            if seg[1] == "log":
+                                log = await get_access_audit(tg)
+                                lines = ["🧾 **История доступа**", DIV]
+                                if not log:
+                                    lines.append("📭 __Пусто.__")
+                                else:
+                                    lines += [f"`{fmt_dt(a['created_at'])}` · {a['action']} · _{a['actor']}_" for a in log]
+                                await safe_edit(
+                                    event, "\n".join(lines),
+                                    buttons=[[Button.inline("⬅️ Назад", f"mem:access:{tg}".encode())]],
+                                )
+                                return
+                            if seg[1] == "open":
                                 cancelled = await _open_member_access(tg, event.sender_id)
                                 await event.answer(f"🟢 Доступ открыт ({cancelled})")
+                            elif seg[1] == "undo":
+                                target = find_undoable(await get_access_audit(tg, limit=50))
+                                if not target:
+                                    await event.answer("Нечего отменять", alert=True)
+                                else:
+                                    plan = plan_undo(target)
+                                    await _apply_undo(tg, plan)
+                                    await record_access_audit(
+                                        tg, target.get("schedule_id"), "undo", f"admin:{event.sender_id}",
+                                        None, {"undone_audit_id": int(target["id"]), "plan": plan},
+                                    )
+                                    state.access_cache.pop(tg, None)
+                                    await event.answer("↩️ Отменено")
+                            else:
+                                until_iso = None
+                                note = "🔴 Доступ закрыт"
+                                if seg[1] == "close2h":
+                                    until = datetime.now(timezone.utc) + timedelta(hours=2)
+                                    until_iso = until.replace(microsecond=0, tzinfo=None).isoformat()
+                                    note = "🔴 Закрыт на 2ч"
+                                elif seg[1] == "morning":
+                                    target_local = next_hhmm_datetime(datetime.now().astimezone(), "08:00")
+                                    if target_local:
+                                        until_iso = target_local.astimezone(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat()
+                                    note = "🔴 Закрыт до 08:00"
+                                row = await create_disable_until_window(tg, until_iso, created_by=event.sender_id)
+                                await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": until_iso})
+                                state.access_cache.pop(tg, None)
+                                await event.answer(note)
                             member = await get_bot_member(tg)
                             await safe_edit(event, await render_member_access(member), buttons=member_access_keyboard(tg))
                             return

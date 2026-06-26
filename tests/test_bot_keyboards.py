@@ -122,5 +122,46 @@ class GiveawayKeyboardTests(unittest.TestCase):
         self.assertEqual(len(datas), 2)  # read-only: only back + refresh
 
 
+from pulse_desk.bot.keyboards import (
+    keys_keyboard, management_grid, member_access_keyboard,
+    member_card_keyboard, members_list_keyboard,
+)
+
+
+class ManagementKeyboardTests(unittest.TestCase):
+    def test_hub_has_core_sections(self):
+        datas = [b.data for row in management_grid() for b in row]
+        for cb in (b"st", b"menu_keys", b"adm:members", b"adm:access",
+                   b"menu_scan", b"menu_logs", b"menu_restart", b"menu_main"):
+            self.assertIn(cb, datas)
+
+    def test_members_list_rows_open_member(self):
+        rows = members_list_keyboard([(7, "🟢 Иван")])
+        self.assertEqual(rows[0][0].data, b"mem:open:7")
+        self.assertEqual(rows[-1][0].data, b"adm:home")
+
+    def test_member_card_block_toggle(self):
+        active = [b.data for row in member_card_keyboard(7, blocked=False) for b in row]
+        self.assertIn(b"mem:block:7", active)
+        blocked = [b.data for row in member_card_keyboard(7, blocked=True) for b in row]
+        self.assertIn(b"mem:unblock:7", blocked)
+
+    def test_member_card_has_access_and_back(self):
+        datas = [b.data for row in member_card_keyboard(7, blocked=False) for b in row]
+        self.assertIn(b"mem:access:7", datas)
+        self.assertIn(b"adm:members", datas)
+
+    def test_member_access_close_open(self):
+        datas = [b.data for row in member_access_keyboard(7) for b in row]
+        self.assertIn(b"acc:close:7", datas)
+        self.assertIn(b"acc:open:7", datas)
+        self.assertIn(b"mem:open:7", datas)
+
+    def test_keys_keyboard_create_and_back(self):
+        datas = [b.data for row in keys_keyboard() for b in row]
+        self.assertIn(b"adm:newkey", datas)
+        self.assertIn(b"adm:home", datas)
+
+
 if __name__ == "__main__":
     unittest.main()

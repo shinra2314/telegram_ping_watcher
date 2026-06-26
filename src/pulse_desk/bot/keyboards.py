@@ -71,3 +71,49 @@ def giveaway_card_keyboard(ping_id: int) -> list[list[Button]]:
         Button.inline("⬅️ Назад", b"menu_giveaways"),
         Button.inline("🔄 Обновить", f"gw:open:{ping_id}".encode()),
     ]]
+
+
+def management_grid() -> list[list[Button]]:
+    return [
+        [Button.inline("⚙️ Настройки", b"st"), Button.inline("🔑 Ключи", b"menu_keys")],
+        [Button.inline("👥 Люди", b"adm:members"), Button.inline("⏰ Доступ", b"adm:access")],
+        [Button.inline("🔄 Скан", b"menu_scan"), Button.inline("📜 Логи", b"menu_logs")],
+        [Button.inline("♻️ Рестарт", b"menu_restart"), Button.inline("⬅️ Домой", b"menu_main")],
+    ]
+
+
+def members_list_keyboard(items: list[tuple[int, str]]) -> list[list[Button]]:
+    rows: list[list[Button]] = [
+        [Button.inline(label, f"mem:open:{tg}".encode())] for tg, label in items
+    ]
+    rows.append([
+        Button.inline("⬅️ Управление", b"adm:home"),
+        Button.inline("🔄 Обновить", b"adm:members"),
+    ])
+    return rows
+
+
+def member_card_keyboard(tg: int, blocked: bool) -> list[list[Button]]:
+    toggle = (
+        Button.inline("✅ Разблокировать", f"mem:unblock:{tg}".encode())
+        if blocked else
+        Button.inline("🚫 Заблокировать", f"mem:block:{tg}".encode())
+    )
+    return [
+        [toggle, Button.inline("⏰ Доступ", f"mem:access:{tg}".encode())],
+        [Button.inline("⬅️ Назад", b"adm:members"), Button.inline("🔄 Обновить", f"mem:open:{tg}".encode())],
+    ]
+
+
+def member_access_keyboard(tg: int) -> list[list[Button]]:
+    return [
+        [Button.inline("🔴 Закрыть", f"acc:close:{tg}".encode()), Button.inline("🟢 Открыть", f"acc:open:{tg}".encode())],
+        [Button.inline("⬅️ Назад", f"mem:open:{tg}".encode()), Button.inline("🔄 Обновить", f"mem:access:{tg}".encode())],
+    ]
+
+
+def keys_keyboard() -> list[list[Button]]:
+    return [
+        [Button.inline("➕ Создать ключ", b"adm:newkey")],
+        [Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")],
+    ]

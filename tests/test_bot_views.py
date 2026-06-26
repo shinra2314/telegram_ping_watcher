@@ -36,10 +36,18 @@ class MainMenuButtonsTests(unittest.TestCase):
 
     def test_viewer_has_no_admin_controls(self):
         labels = self._labels("viewer")
-        self.assertIn("📊 Статистика", labels)
+        self.assertIn("📊 Сводка", labels)
+        self.assertIn("🎁 Розыгрыши", labels)
         self.assertIn("🔔 Мои уведомления", labels)
         self.assertNotIn("⚙️ Настройки", labels)
         self.assertNotIn("🔑 Ключи", labels)
+
+    def test_summary_replaces_split_views(self):
+        for role in ("viewer", "admin"):
+            labels = self._labels(role)
+            self.assertIn("📊 Сводка", labels)
+            self.assertNotIn("🛰 Статус", labels)
+            self.assertNotIn("💹 Курсы", labels)
 
     def test_admin_has_owner_controls(self):
         labels = self._labels("admin")

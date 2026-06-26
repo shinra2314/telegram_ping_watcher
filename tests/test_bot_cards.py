@@ -68,5 +68,48 @@ class SummaryCardTests(unittest.TestCase):
         self.assertNotIn("BTC", out)
 
 
+from pulse_desk.bot.cards import feed_badge, feed_header, ping_card
+
+
+class FeedRenderTests(unittest.TestCase):
+    def test_badge_by_priority(self):
+        self.assertEqual(feed_badge("critical"), "🔥")
+        self.assertEqual(feed_badge("high"), "⚡")
+        self.assertEqual(feed_badge("normal"), "•")
+
+    def test_header_has_breadcrumb_and_count(self):
+        out = feed_header("Чеки", 5)
+        self.assertIn("**МОНИТОРИНГ**", out)
+        self.assertIn("Чеки", out)
+        self.assertIn("5", out)
+
+    def test_empty_feed_header(self):
+        out = feed_header("Все", 0)
+        self.assertIn("📭", out)
+
+
+class PingCardTests(unittest.TestCase):
+    PING = {
+        "id": 842, "detected_at": "2026-06-26T14:02:31", "chat": "@chan",
+        "priority_label": "critical", "is_giveaway": 1, "is_win": 0, "is_check": 0,
+        "text": "Поздравляем, вы выиграли подарок номер 17 в нашем розыгрыше!",
+        "link": "https://t.me/chan/123",
+    }
+
+    def test_shows_id_chat_and_full_text(self):
+        out = ping_card(self.PING)
+        self.assertIn("#842", out)
+        self.assertIn("@chan", out)
+        self.assertIn("подарок номер 17", out)
+        self.assertIn("https://t.me/chan/123", out)
+
+    def test_shows_giveaway_tag(self):
+        self.assertIn("🎁", ping_card(self.PING))
+
+    def test_missing_text_falls_back(self):
+        out = ping_card(dict(self.PING, text=None, link=None))
+        self.assertIn("—", out)
+
+
 if __name__ == "__main__":
     unittest.main()

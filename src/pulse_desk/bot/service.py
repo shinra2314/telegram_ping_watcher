@@ -40,8 +40,14 @@ from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, fmt_dt, help_text, main_menu_buttons
-from .keyboards import MON_FILTERS, back_home, feed_keyboard, ping_card_keyboard, section_nav
-from .cards import feed_badge, feed_header, home_card, ping_card, summary_card
+from .keyboards import (
+    MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
+    giveaway_feed_keyboard, ping_card_keyboard, section_nav,
+)
+from .cards import (
+    feed_badge, feed_header, giveaway_card, giveaways_header,
+    home_card, ping_card, summary_card,
+)
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -272,23 +278,23 @@ async def init_bot() -> None:
                 "👤 **Аккаунты**\n" + ("\n".join(account_lines) if account_lines else "  __нет аккаунтов__")
             )
 
-        async def render_giveaways() -> str:
+        async def render_giveaways():
             board = await get_giveaway_board(limit=10)
-            buckets = board.get("buckets") or {}
             stats = board.get("stats") or {}
-            lines = [
-                "🎁 **Розыгрыши**",
-                DIV,
-                f"⏳ Ожидание: `{stats.get('waiting', 0)}`  ·  🎁 Призы: `{stats.get('to_claim', 0)}`  ·  ❗ Срочные: `{stats.get('urgent', 0)}`",
-            ]
-            urgent = buckets.get("urgent") or []
-            if urgent:
-                lines.append("\n⚠️ **Срочное**")
-                for row in urgent[:5]:
-                    lines.append(f"  • `{fmt_dt(row.get('deadline_at'))}` · {row.get('chat') or '?'}\n    {(row.get('text') or '')[:110]}")
-            else:
-                lines.append("\n✅ __Срочных розыгрышей нет.__")
-            return "\n".join(lines)
+            need = (board.get("buckets") or {}).get("need_action") or []
+            items = []
+            for r in need[:8]:
+                deadline = r.get("deadline_at")
+                when = fmt_dt(deadline) if deadline else fmt_dt(r.get("detected_at"))
+                label = f"{feed_badge(r.get('priority_label'))} {when} {r.get('chat') or '?'}"
+                items.append((int(r["id"]), label[:48]))
+            return giveaways_header(stats, len(need)), giveaway_feed_keyboard(items)
+
+        async def open_giveaway_view(ping_id: int):
+            ping = await get_ping_by_id(ping_id)
+            if not ping:
+                return None
+            return giveaway_card(ping), giveaway_card_keyboard(ping_id)
 
         async def render_market() -> str:
             market = await get_market_history(limit=1)
@@ -307,7 +313,7 @@ async def init_bot() -> None:
         async def render_home(role: str) -> str:
             analytics = await build_analytics()
             board = await get_giveaway_board(limit=10)
-            urgent = (board.get("stats") or {}).get("urgent", 0)
+            urgent = (board.get("stats") or {}).get("overdue", 0)
             cutoff = (
                 datetime.now(timezone.utc) - timedelta(minutes=CHECK_FRESH_MINUTES)
             ).replace(microsecond=0).isoformat()
@@ -793,7 +799,8 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/giveaways"))
         @viewer_only
         async def giveaways_handler(event, role):
-            await event.respond(await render_giveaways(), buttons=section_nav(b"menu_giveaways"), link_preview=False)
+            text, kb = await render_giveaways()
+            await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/recent"))
         @viewer_only
@@ -1262,6 +1269,19 @@ async def init_bot() -> None:
                         text, kb = res
                         await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
+                if seg[0] == "gw" and len(seg) >= 3 and seg[1] == "open":
+                    try:
+                        pid = int(seg[2])
+                    except ValueError:
+                        await event.answer("Некорректная команда", alert=True)
+                        return
+                    res = await open_giveaway_view(pid)
+                    if res is None:
+                        await event.answer("Розыгрыш не найден", alert=True)
+                        return
+                    text, kb = res
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
 
             # ---- menu navigation (any authenticated role) ----
             if data == "menu_help":
@@ -1274,7 +1294,8 @@ async def init_bot() -> None:
                 await safe_edit(event, await render_status(), buttons=section_nav(b"menu_status"))
                 return
             if data == "menu_giveaways":
-                await safe_edit(event, await render_giveaways(), buttons=section_nav(b"menu_giveaways"), link_preview=False)
+                text, kb = await render_giveaways()
+                await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_recent":
                 text, kb = await render_feed("all")

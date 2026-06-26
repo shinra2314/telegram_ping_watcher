@@ -40,8 +40,8 @@ from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, fmt_dt, help_text, main_menu_buttons
-from .keyboards import back_home, section_nav
-from .cards import home_card, summary_card
+from .keyboards import MON_FILTERS, back_home, feed_keyboard, ping_card_keyboard, section_nav
+from .cards import feed_badge, feed_header, home_card, ping_card, summary_card
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -62,6 +62,7 @@ async def init_bot() -> None:
         list_all_access_windows,
         get_giveaway_board,
         get_market_history,
+        get_ping_by_id,
         get_pings,
         get_recent_giveaway_actions,
         list_access_windows,
@@ -386,6 +387,25 @@ async def init_bot() -> None:
                 "last_scan": f"{last_scan} · {state.last_scan_status or '—'}",
             }
             return summary_card(analytics=analytics, market=market, system=system)
+
+        FEED_LABELS = dict(MON_FILTERS)
+
+        async def render_feed(active: str = "all"):
+            if active not in FEED_LABELS:
+                active = "all"
+            rows = await get_pings(limit=8, chat_type=active)
+            items = []
+            for r in rows:
+                hhmm = fmt_dt(r.get("detected_at"))[-5:]
+                label = f"{feed_badge(r.get('priority_label'))} {hhmm} {r.get('chat') or '?'}"
+                items.append((int(r["id"]), label[:48]))
+            return feed_header(FEED_LABELS[active], len(rows)), feed_keyboard(items, active)
+
+        async def open_ping_view(ping_id: int, is_admin: bool):
+            ping = await get_ping_by_id(ping_id)
+            if not ping:
+                return None
+            return ping_card(ping), ping_card_keyboard(ping_id, is_admin)
 
         async def render_keys_text() -> str:
             keys = await list_bot_keys()
@@ -811,17 +831,14 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/recent"))
         @viewer_only
         async def recent_handler(event, role):
-            parts = (event.message.text or "").split(" ", 1)
-            try:
-                n = max(1, min(20, int(parts[1]))) if len(parts) > 1 else 5
-            except (ValueError, IndexError):
-                n = 5
-            await event.respond(await render_recent(n), buttons=section_nav(b"menu_recent"), link_preview=False)
+            text, kb = await render_feed("all")
+            await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/latest"))
         @viewer_only
         async def latest_handler(event, role):
-            await event.respond(await render_recent(5), buttons=section_nav(b"menu_recent"), link_preview=False)
+            text, kb = await render_feed("all")
+            await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/search"))
         @viewer_only
@@ -846,7 +863,8 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/checks"))
         @viewer_only
         async def checks_handler(event, role):
-            await event.respond(await render_checks(10), buttons=section_nav(b"menu_checks"), link_preview=False)
+            text, kb = await render_feed("check")
+            await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
         @viewer_only
@@ -1237,6 +1255,47 @@ async def init_bot() -> None:
                 await event.answer("Доступ запрещён", alert=True)
                 return
 
+            # ---- structured `domain:action:arg` callbacks ----
+            if ":" in data:
+                seg = data.split(":")
+                if seg[0] == "mon" and len(seg) >= 2 and seg[1] == "feed":
+                    text, kb = await render_feed(seg[2] if len(seg) > 2 else "all")
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
+                if seg[0] == "mon" and len(seg) >= 3 and seg[1] == "open":
+                    try:
+                        pid = int(seg[2])
+                    except ValueError:
+                        await event.answer("Некорректная команда", alert=True)
+                        return
+                    res = await open_ping_view(pid, role == "admin")
+                    if res is None:
+                        await event.answer("Запись не найдена", alert=True)
+                        return
+                    text, kb = res
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
+                if seg[0] == "ping" and len(seg) >= 3 and seg[1] in ("fav", "read"):
+                    if role != "admin":
+                        await event.answer("Только владелец", alert=True)
+                        return
+                    try:
+                        pid = int(seg[2])
+                    except ValueError:
+                        await event.answer("Некорректная команда", alert=True)
+                        return
+                    if seg[1] == "fav":
+                        await toggle_favorite(pid)
+                        await event.answer("Избранное обновлено")
+                    else:
+                        await mark_ping_read_db(pid)
+                        await event.answer("Отмечено как прочитанное")
+                    res = await open_ping_view(pid, True)
+                    if res is not None:
+                        text, kb = res
+                        await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
+
             # ---- menu navigation (any authenticated role) ----
             if data == "menu_help":
                 await safe_edit(event, help_text(role), buttons=section_nav(b"menu_help"))
@@ -1251,10 +1310,12 @@ async def init_bot() -> None:
                 await safe_edit(event, await render_giveaways(), buttons=section_nav(b"menu_giveaways"), link_preview=False)
                 return
             if data == "menu_recent":
-                await safe_edit(event, await render_recent(5), buttons=section_nav(b"menu_recent"), link_preview=False)
+                text, kb = await render_feed("all")
+                await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_checks":
-                await safe_edit(event, await render_checks(10), buttons=section_nav(b"menu_checks"), link_preview=False)
+                text, kb = await render_feed("check")
+                await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_market":
                 await safe_edit(event, await render_market(), buttons=section_nav(b"menu_market"))

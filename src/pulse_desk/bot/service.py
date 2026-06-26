@@ -290,39 +290,6 @@ async def init_bot() -> None:
                 lines.append("\n✅ __Срочных розыгрышей нет.__")
             return "\n".join(lines)
 
-        async def render_recent(n: int = 5) -> str:
-            rows = await get_pings(limit=n)
-            if not rows:
-                return "🕐 **Последние**\n" + DIV + "\n📭 __Упоминаний пока нет.__"
-            result = [f"🕐 **Последние {len(rows)}**", DIV]
-            for row in rows:
-                priority = row.get("priority_label") or ""
-                badge = "🔥" if priority == "critical" else "⚡" if priority == "high" else "•"
-                link = row.get("link") or ""
-                result.append(
-                    f"{badge} `{fmt_dt(row.get('detected_at'))}` · {row['chat']}\n"
-                    f"{(row.get('text') or '')[:160]}"
-                    + (f"\n🔗 {link}" if link else "")
-                )
-            return "\n\n".join(result)
-
-        async def render_checks(n: int = 10) -> str:
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(minutes=CHECK_FRESH_MINUTES)
-            ).replace(microsecond=0).isoformat()
-            rows = await get_pings(limit=n, chat_type="check", message_date_from=cutoff)
-            if not rows:
-                return "💸 **Чеки**\n" + DIV + "\n📭 __Чеков пока нет.__"
-            result = [f"💸 **Чеки** ({len(rows)})", DIV]
-            for row in rows:
-                link = row.get("link") or ""
-                result.append(
-                    f"• `{fmt_dt(row.get('detected_at'))}` · {row['chat']}\n"
-                    f"{(row.get('text') or '')[:160]}"
-                    + (f"\n🔗 {link}" if link else "")
-                )
-            return "\n\n".join(result)
-
         async def render_market() -> str:
             market = await get_market_history(limit=1)
             if not market:

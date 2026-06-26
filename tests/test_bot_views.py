@@ -57,10 +57,13 @@ class MainMenuButtonsTests(unittest.TestCase):
 
     def test_admin_has_owner_controls(self):
         labels = self._labels("admin")
-        self.assertIn("🔑 Ключи", labels)
-        self.assertIn("⚙️ Настройки", labels)
-        self.assertIn("♻️ Рестарт", labels)
+        self.assertIn("⚙️ Управление", labels)
         self.assertNotIn("🔔 Мои уведомления", labels)
+        self.assertNotIn("🔑 Ключи", labels)  # moved into the hub
+
+    def test_admin_management_button_targets_hub(self):
+        data = {b.text: b.data for row in main_menu_buttons("admin") for b in row}
+        self.assertEqual(data["⚙️ Управление"], b"adm:home")
 
 
 class HelpTextTests(unittest.TestCase):

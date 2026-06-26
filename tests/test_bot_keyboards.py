@@ -96,5 +96,31 @@ class PingCardKeyboardTests(unittest.TestCase):
         self.assertEqual(footer[1].data, b"mon:open:842")
 
 
+from pulse_desk.bot.keyboards import giveaway_card_keyboard, giveaway_feed_keyboard
+
+
+class GiveawayKeyboardTests(unittest.TestCase):
+    def test_items_open_giveaway(self):
+        rows = giveaway_feed_keyboard([(50, "⏰ 06-27 @gw")])
+        self.assertEqual(rows[0][0].data, b"gw:open:50")
+
+    def test_feed_footer_home_and_refresh(self):
+        rows = giveaway_feed_keyboard([])
+        footer = rows[-1]
+        self.assertEqual(footer[0].data, b"menu_main")
+        self.assertEqual(footer[1].data, b"menu_giveaways")
+
+    def test_card_back_to_section_and_refresh(self):
+        rows = giveaway_card_keyboard(50)
+        footer = rows[-1]
+        self.assertEqual(footer[0].data, b"menu_giveaways")
+        self.assertEqual(footer[1].data, b"gw:open:50")
+
+    def test_card_has_no_action_buttons(self):
+        datas = [b.data for row in giveaway_card_keyboard(50) for b in row]
+        self.assertNotIn(b"ping:fav:50", datas)
+        self.assertEqual(len(datas), 2)  # read-only: only back + refresh
+
+
 if __name__ == "__main__":
     unittest.main()

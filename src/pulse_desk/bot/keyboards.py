@@ -51,3 +51,23 @@ def ping_card_keyboard(ping_id: int, is_admin: bool) -> list[list[Button]]:
         Button.inline("🔄 Обновить", f"mon:open:{ping_id}".encode()),
     ])
     return rows
+
+
+def giveaway_feed_keyboard(items: list[tuple[int, str]]) -> list[list[Button]]:
+    """Giveaways section: one row per candidate, then home/refresh."""
+    rows: list[list[Button]] = [
+        [Button.inline(label, f"gw:open:{pid}".encode())] for pid, label in items
+    ]
+    rows.append([
+        Button.inline("⬅️ Домой", b"menu_main"),
+        Button.inline("🔄 Обновить", b"menu_giveaways"),
+    ])
+    return rows
+
+
+def giveaway_card_keyboard(ping_id: int) -> list[list[Button]]:
+    """Read-only candidate card: back to the section + refresh."""
+    return [[
+        Button.inline("⬅️ Назад", b"menu_giveaways"),
+        Button.inline("🔄 Обновить", f"gw:open:{ping_id}".encode()),
+    ]]

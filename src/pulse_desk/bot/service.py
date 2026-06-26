@@ -39,8 +39,9 @@ from ..live import publish_live_event
 from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
-from .views import DIV, fmt_dt, help_text, main_menu_buttons, menu_caption
+from .views import DIV, fmt_dt, help_text, main_menu_buttons
 from .keyboards import back_home, section_nav
+from .cards import home_card, summary_card
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -334,6 +335,57 @@ async def init_bot() -> None:
                 f"💎 TON: `${m.get('the-open-network', {}).get('usd', 0):.3f}`\n"
                 f"🟣 SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
             )
+
+        async def render_home(role: str) -> str:
+            analytics = await build_analytics()
+            board = await get_giveaway_board(limit=10)
+            urgent = (board.get("stats") or {}).get("urgent", 0)
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=CHECK_FRESH_MINUTES)
+            ).replace(microsecond=0).isoformat()
+            fresh = await get_pings(limit=50, chat_type="check", message_date_from=cutoff)
+            last_scan = fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
+            if state.last_scan_status:
+                last_scan = f"{last_scan} · {state.last_scan_status}"
+            return home_card(
+                role=role,
+                new_pings=analytics["new_pings"],
+                urgent=urgent,
+                accounts_online=analytics["accounts_online"],
+                accounts_total=len(state.accounts_state),
+                fresh_checks=len(fresh),
+                last_scan=last_scan,
+            )
+
+        async def render_summary() -> str:
+            analytics = await build_analytics()
+            market_rows = await get_market_history(limit=1)
+            market = None
+            if market_rows:
+                m = market_rows[0]
+                market = {
+                    "btc": m.get("bitcoin", {}).get("usd", 0),
+                    "eth": m.get("ethereum", {}).get("usd", 0),
+                    "ton": m.get("the-open-network", {}).get("usd", 0),
+                    "sol": m.get("solana", {}).get("usd", 0),
+                }
+            accounts_online = sum(1 for a in list(state.accounts_state.values()) if a.get("status") == "online")
+            try:
+                db_mb = database.DB_PATH.stat().st_size / 1024 / 1024 if database.DB_PATH.exists() else 0
+            except Exception:
+                db_mb = 0
+            uptime_sec = int((datetime.now() - state.started_at).total_seconds())
+            uptime = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
+            last_scan = fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
+            system = {
+                "version": APP_VERSION,
+                "uptime": uptime,
+                "db_mb": db_mb,
+                "accounts_online": accounts_online,
+                "accounts_total": len(state.accounts_state),
+                "last_scan": f"{last_scan} · {state.last_scan_status or '—'}",
+            }
+            return summary_card(analytics=analytics, market=market, system=system)
 
         async def render_keys_text() -> str:
             keys = await list_bot_keys()
@@ -694,11 +746,11 @@ async def init_bot() -> None:
             welcome_banner = BOT_ASSETS_DIR / "welcome.png"
             if welcome_banner.exists():
                 try:
-                    await event.respond(menu_caption(role), buttons=main_menu_buttons(role), file=str(welcome_banner))
+                    await event.respond(await render_home(role), buttons=main_menu_buttons(role), file=str(welcome_banner))
                     return
                 except Exception:
                     logger.warning("Failed to send welcome banner, falling back to text", exc_info=True)
-            await event.respond(menu_caption(role), buttons=main_menu_buttons(role))
+            await event.respond(await render_home(role), buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern=r"/redeem(?:\s+(\S+))?"))
         @safe
@@ -720,7 +772,7 @@ async def init_bot() -> None:
             if role is None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
-            await event.respond(menu_caption(role), buttons=main_menu_buttons(role))
+            await event.respond(await render_home(role), buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern="/settings"))
         @viewer_only
@@ -1207,9 +1259,12 @@ async def init_bot() -> None:
             if data == "menu_market":
                 await safe_edit(event, await render_market(), buttons=section_nav(b"menu_market"))
                 return
+            if data == "menu_summary":
+                await safe_edit(event, await render_summary(), buttons=section_nav(b"menu_summary"))
+                return
 
             if data == "menu_main":
-                await safe_edit(event, menu_caption(role), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_home(role), buttons=main_menu_buttons(role))
                 return
 
             if data == "noop":

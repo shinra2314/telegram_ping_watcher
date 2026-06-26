@@ -111,5 +111,42 @@ class PingCardTests(unittest.TestCase):
         self.assertIn("—", out)
 
 
+from pulse_desk.bot.cards import giveaway_card, giveaways_header
+
+
+class GiveawaysHeaderTests(unittest.TestCase):
+    STATS = {"claim_prize": 3, "overdue": 2, "waiting_result": 5}
+
+    def test_shows_counts(self):
+        out = giveaways_header(self.STATS, need_count=4)
+        self.assertIn("**РОЗЫГРЫШИ**", out)
+        self.assertIn("К действию: `4`", out)
+        self.assertIn("Призы: `3`", out)
+        self.assertIn("Просрочено: `2`", out)
+
+    def test_empty_need_shows_calm_state(self):
+        out = giveaways_header(self.STATS, need_count=0)
+        self.assertIn("📭", out)
+
+
+class GiveawayCardTests(unittest.TestCase):
+    PING = {
+        "id": 50, "detected_at": "2026-06-26T10:00:00", "deadline_at": "2026-06-27T18:00:00",
+        "chat": "@gw", "priority_label": "high",
+        "text": "Розыгрыш 100 TON среди подписчиков!", "link": "https://t.me/gw/9",
+    }
+
+    def test_shows_deadline_id_text_link(self):
+        out = giveaway_card(self.PING)
+        self.assertIn("#50", out)
+        self.assertIn("06-27 18:00", out)
+        self.assertIn("100 TON", out)
+        self.assertIn("https://t.me/gw/9", out)
+
+    def test_missing_deadline_shows_dash(self):
+        out = giveaway_card(dict(self.PING, deadline_at=None))
+        self.assertIn("Дедлайн: `—`", out)
+
+
 if __name__ == "__main__":
     unittest.main()

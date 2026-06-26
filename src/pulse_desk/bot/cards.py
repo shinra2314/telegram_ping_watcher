@@ -96,3 +96,28 @@ def ping_card(ping: dict) -> str:
     if ping.get("link"):
         lines.append(f"🔗 {ping['link']}")
     return "\n".join(lines)
+
+
+def giveaways_header(stats: dict, need_count: int) -> str:
+    out = header("🎁", "Розыгрыши", "Домой › Розыгрыши")
+    line1 = f"{kv('🟢', 'К действию', need_count)}   {kv('🏆', 'Призы', stats.get('claim_prize', 0))}"
+    line2 = f"{kv('⏰', 'Просрочено', stats.get('overdue', 0))}   {kv('⏳', 'Ждут', stats.get('waiting_result', 0))}"
+    body = f"{line1}\n{line2}"
+    if need_count == 0:
+        body += "\n" + empty("Срочных нет — всё под контролем.")
+    return f"{out}\n{body}"
+
+
+def giveaway_card(ping: dict) -> str:
+    badge = feed_badge(ping.get("priority_label"))
+    crumb = f"Домой › Розыгрыши › #{ping.get('id')}"
+    deadline = ping.get("deadline_at")
+    lines = [
+        header(badge, f"Розыгрыш #{ping.get('id')}", crumb),
+        f"⏰ Дедлайн: `{fmt_dt(deadline) if deadline else '—'}`  ·  {ping.get('chat') or '?'}",
+        DIV,
+        (ping.get("text") or "—")[:_PING_TEXT_CAP],
+    ]
+    if ping.get("link"):
+        lines.append(f"🔗 {ping['link']}")
+    return "\n".join(lines)

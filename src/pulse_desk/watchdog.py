@@ -59,7 +59,12 @@ def diff_health(
     return new_alerts, recoveries
 
 
-def default_thresholds(*, scan_interval_seconds: int, market_poll_seconds: int) -> dict[str, int]:
+def default_thresholds(
+    *,
+    scan_interval_seconds: int,
+    market_poll_seconds: int,
+    flood_wait_max_seconds: int = 1800,
+) -> dict[str, int]:
     """Max seconds each monitored job may go without a successful cycle.
 
     Derived from each job's natural cadence × slack + grace, so widening a
@@ -67,9 +72,16 @@ def default_thresholds(*, scan_interval_seconds: int, market_poll_seconds: int) 
     never produces a false "stale" alert. Only always-on critical jobs are
     listed — optional/feature-gated loops (digest, obsidian-sync) are excluded
     to avoid paging about a feature that is simply turned off.
+
+    ``auto-scan`` reports progress *per channel* while it works (see
+    ``scan_engine.scan_single_account``), so the only legitimately silent gaps
+    are the idle sleep between sweeps and a single capped ``FloodWait`` stall.
+    Its window is therefore ``interval + flood_wait_max + grace`` — wide enough
+    that a throttled-but-healthy scan never pages, while a wedged loop (no
+    progress at all) still trips after the window.
     """
     return {
-        "auto-scan": max(600, scan_interval_seconds * 2 + 300),
+        "auto-scan": max(600, scan_interval_seconds + flood_wait_max_seconds + 300),
         "reminders": 600,
         "source-scores": 1200,
         "access-scheduler": 360,

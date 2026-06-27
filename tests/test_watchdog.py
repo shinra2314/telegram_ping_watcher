@@ -79,6 +79,23 @@ class ThresholdTests(unittest.TestCase):
         wide = default_thresholds(scan_interval_seconds=3600, market_poll_seconds=300)
         self.assertGreater(wide["auto-scan"], narrow["auto-scan"])
 
+    def test_auto_scan_window_absorbs_idle_plus_one_flood_wait(self):
+        # A healthy scan can go silent for one idle interval plus a single
+        # capped FloodWait stall; the window must clear that or it false-pages.
+        t = default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, flood_wait_max_seconds=1800
+        )
+        self.assertGreaterEqual(t["auto-scan"], 900 + 1800)
+
+    def test_auto_scan_window_widens_with_flood_wait_cap(self):
+        low = default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, flood_wait_max_seconds=600
+        )
+        high = default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, flood_wait_max_seconds=1800
+        )
+        self.assertGreater(high["auto-scan"], low["auto-scan"])
+
     def test_critical_jobs_present(self):
         t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300)
         for name in ("auto-scan", "reminders", "source-scores", "access-scheduler", "market-fetch"):

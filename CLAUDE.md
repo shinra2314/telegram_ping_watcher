@@ -147,7 +147,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 
 | Job | Purpose | Key env var |
 |-----|---------|-------------|
-| `auto-scan` | Sweeps channels for new messages | `SCAN_INTERVAL_SECONDS` (default 900 s) |
+| `auto-scan` | Sweeps channels for new messages; also runs retention each sweep: age cleanup, unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`), and a size cap that evicts oldest non-favorite/non-win pings (archived to `pulse_desk_archive.db` first) + VACUUM | `SCAN_INTERVAL_SECONDS` (default 900 s), `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS` |
 | `reminders` | Fires deadline reminders (admin + opted-in bot members) | — |
 | `daily-digest` | Sends daily ping digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 09:00) | — |
 | `source-scores` | Recalculates channel reliability scores | — |

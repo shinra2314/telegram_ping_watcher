@@ -75,6 +75,11 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
     iter_limit = None if history_limit <= 0 else history_limit
 
     async def mark_processed_units(units: int = 1) -> None:
+        # Progress heartbeat: a long sweep (many channels, flood waits) is the
+        # engine working, not failing. Beat per processed unit so the watchdog
+        # reads "alive" throughout — only a wedged scan with zero progress goes
+        # silent past its window. The auto-scan loop still beats per full cycle.
+        state.heartbeat("auto-scan")
         scan_status["processed_usernames"] += units
         if scan_status.get("scan_run_id"):
             await update_scan_run(

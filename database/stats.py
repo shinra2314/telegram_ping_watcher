@@ -6,6 +6,7 @@ from typing import Any
 import aiosqlite
 
 from ._core import _connect, _now_iso
+from .maintenance import archive_db_path, db_size_bytes
 
 
 async def get_account_ping_stats() -> list[dict[str, Any]]:
@@ -62,7 +63,15 @@ async def get_db_stats() -> dict[str, int]:
         total = (await (await db.execute("SELECT COUNT(*) AS count FROM pings")).fetchone())["count"]
         unique_chats = (await (await db.execute("SELECT COUNT(DISTINCT chat_id) AS count FROM pings")).fetchone())["count"]
         favorites = (await (await db.execute("SELECT COUNT(*) AS count FROM pings WHERE is_favorite = 1")).fetchone())["count"]
-        return {"total": total, "unique_chats": unique_chats, "favorites": favorites}
+    archive_path = archive_db_path()
+    archive_size = archive_path.stat().st_size if archive_path.exists() else 0
+    return {
+        "total": total,
+        "unique_chats": unique_chats,
+        "favorites": favorites,
+        "size_bytes": db_size_bytes(),
+        "archive_size_bytes": archive_size,
+    }
 
 
 async def get_detailed_stats() -> dict[str, Any]:

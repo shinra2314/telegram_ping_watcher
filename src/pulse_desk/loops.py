@@ -10,9 +10,14 @@ from telethon import Button
 from . import watch_settings as ws
 from .app_ctx import (
     ADMIN_ID,
+    AUDIT_RETENTION_DAYS,
     CHECK_FRESH_MINUTES,
+    DB_ARCHIVE_ENABLED,
+    DB_MAX_SIZE_MB,
+    FLOOD_WAIT_MAX_SECONDS,
     MARKET_RETENTION_DAYS,
     PINGS_RETENTION_DAYS,
+    SCAN_RUNS_RETENTION,
     STARTUP_SCAN_WAIT_SECONDS,
     VACUUM_INTERVAL_HOURS,
     logger,
@@ -237,7 +242,12 @@ async def source_score_loop() -> None:
 
 
 async def auto_scan_loop() -> None:
-    from database import cleanup_old_data, purge_stale_checks
+    from database import (
+        cleanup_old_data,
+        cleanup_unbounded_tables,
+        enforce_db_size_cap,
+        purge_stale_checks,
+    )
 
     start_supervised("market-volatility", monitor_market_volatility, backoff_base=60.0, backoff_max=1800.0)
     if ws.STARTUP_SCAN_DELAY_SECONDS:
@@ -264,7 +274,15 @@ async def auto_scan_loop() -> None:
             stale_checks = await purge_stale_checks(minutes=CHECK_FRESH_MINUTES)
             if stale_checks:
                 stats["stale_checks"] = stale_checks
-            if stats.get("pings") or stats.get("market_history") or stats.get("vacuumed") or stale_checks:
+            unbounded = await cleanup_unbounded_tables(
+                scan_runs_keep=SCAN_RUNS_RETENTION, audit_days=AUDIT_RETENTION_DAYS
+            )
+            stats.update({key: value for key, value in unbounded.items() if value})
+            cap = await enforce_db_size_cap(DB_MAX_SIZE_MB, archive=DB_ARCHIVE_ENABLED)
+            if cap.get("pings_deleted"):
+                stats["size_cap"] = cap
+            if any(stats.get(key) for key in ("pings", "market_history", "vacuumed")) or stale_checks \
+                    or any(unbounded.values()) or cap.get("pings_deleted"):
                 await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
             state.heartbeat("auto-scan")
         except Exception:
@@ -278,6 +296,7 @@ def _collect_job_health() -> list[JobHealth]:
     thresholds = default_thresholds(
         scan_interval_seconds=ws.SCAN_INTERVAL_SECONDS,
         market_poll_seconds=ws.MARKET_POLL_SECONDS,
+        flood_wait_max_seconds=FLOOD_WAIT_MAX_SECONDS,
     )
     now = datetime.now()
     healths: list[JobHealth] = []

@@ -156,6 +156,26 @@ class CheckFilterDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["chat"], "Crypto Channel")
         self.assertEqual(rows[0]["is_check"], 1)
 
+    async def test_message_date_from_filters_by_message_date(self):
+        # "Actual" = message date within window, even if detected just now.
+        now = datetime.now().astimezone()  # tz-aware, like real message dates
+        detected = now.replace(tzinfo=None, microsecond=0).isoformat()
+        fresh = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
+        stale = (now - timedelta(hours=13)).replace(microsecond=0).isoformat()
+        await database.save_ping({
+            "chat": "A", "chat_id": 1, "message_id": 1, "link": "https://t.me/a/1",
+            "text": "чек на 5 TON", "chat_type": "channel",
+            "date": fresh, "detected_at": detected, "is_check": True,
+        })
+        await database.save_ping({
+            "chat": "B", "chat_id": 2, "message_id": 2, "link": "https://t.me/b/2",
+            "text": "чек на 5 TON", "chat_type": "channel",
+            "date": stale, "detected_at": detected, "is_check": True,
+        })
+        cutoff = (now - timedelta(hours=12)).replace(microsecond=0).isoformat()
+        rows = await database.get_pings(chat_type="check", message_date_from=cutoff)
+        self.assertEqual({r["message_id"] for r in rows}, {1})
+
 
 class PurgeStaleChecksTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

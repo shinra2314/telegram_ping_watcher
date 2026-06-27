@@ -9,7 +9,7 @@ so it has no coupling to main.py module globals.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -67,14 +67,16 @@ async def read_pings(
     source_score_min: Optional[float] = None,
     tag: Optional[str] = Query(None),
 ):
+    message_date_from: Optional[str] = None
     if chat_type == "check":
         # Redeemable checks are owner-only and ephemeral: gate to admin and
-        # never surface ones detected longer ago than the freshness window.
+        # surface only "actual" ones — those whose Telegram message date is
+        # within the freshness window (default 12h).
         if role != "admin":
             raise HTTPException(status_code=403, detail="Checks are owner-only")
-        cutoff = (datetime.now() - timedelta(minutes=CHECK_FRESH_MINUTES)).replace(microsecond=0).isoformat()
-        if not date_from or date_from < cutoff:
-            date_from = cutoff
+        message_date_from = (
+            datetime.now(timezone.utc) - timedelta(minutes=CHECK_FRESH_MINUTES)
+        ).replace(microsecond=0).isoformat()
     if grouped:
         return await get_pings_grouped(limit=limit, chat_type=chat_type, search=search, mention=mention)
     return await get_pings(
@@ -89,6 +91,7 @@ async def read_pings(
         search=search,
         date_from=date_from,
         date_to=date_to,
+        message_date_from=message_date_from,
         priority_min=priority_min,
         action_status=action_status,
         deadline_from=deadline_from,

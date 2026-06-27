@@ -26,7 +26,9 @@ except Exception as _exc:  # missing aiosqlite/httpx or unloadable settings (e.g
 
 
 class CheckAccessTests(unittest.TestCase):
-    """Checks are owner-only and show only fresh (≤ CHECK_FRESH_MINUTES) rows."""
+    """Checks are owner-only and show only "actual" rows — those whose Telegram
+    message date is within CHECK_FRESH_MINUTES (default 12h), regardless of when
+    a (back-fill) scan detected them."""
 
     def setUp(self):
         if not DEPS_OK:
@@ -47,18 +49,21 @@ class CheckAccessTests(unittest.TestCase):
 
     async def _seed(self):
         await database.init_db()
-        now = datetime.now()
+        # tz-aware, mirroring real Telegram message dates (astimezone isoformat).
+        now = datetime.now().astimezone()
         fresh = (now - timedelta(minutes=5)).replace(microsecond=0).isoformat()
-        stale = (now - timedelta(hours=3)).replace(microsecond=0).isoformat()
+        stale = (now - timedelta(hours=13)).replace(microsecond=0).isoformat()
+        # Both detected "just now": only the message date decides freshness.
+        detected = now.replace(tzinfo=None, microsecond=0).isoformat()
         await database.save_ping({
             "chat": "Crypto", "chat_id": 1, "message_id": 1,
             "link": "https://t.me/c/1", "text": "свежий чек на 5 TON",
-            "chat_type": "channel", "detected_at": fresh, "is_check": True,
+            "chat_type": "channel", "date": fresh, "detected_at": detected, "is_check": True,
         })
         await database.save_ping({
             "chat": "Crypto", "chat_id": 2, "message_id": 2,
             "link": "https://t.me/c/2", "text": "старый чек на 5 TON",
-            "chat_type": "channel", "detected_at": stale, "is_check": True,
+            "chat_type": "channel", "date": stale, "detected_at": detected, "is_check": True,
         })
 
     def _client(self, role: str) -> TestClient:
@@ -75,7 +80,7 @@ class CheckAccessTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         message_ids = {row["message_id"] for row in resp.json()}
-        self.assertEqual(message_ids, {1})  # stale check (id 2) excluded
+        self.assertEqual(message_ids, {1})  # stale-by-message-date check (id 2) excluded
 
     def test_viewer_can_still_read_non_checks(self):
         resp = self._client("viewer").get("/api/pings", params={"chat_type": "all"})

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import HTTPException
@@ -11,7 +11,7 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 
 from telegram_ping_watcher import chat_type_from_entity, message_looks_like_broadcast_channel, message_to_record
 
-from .app_ctx import logger, state
+from .app_ctx import CHECK_FRESH_MINUTES, logger, state
 from .bot_notify import send_bot_notification, send_check_notification
 from .common import now_iso, record_app_event
 from .deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
@@ -36,6 +36,18 @@ def check_is_check(text: str) -> bool:
     return is_check_text(text, state.check_keywords) and not check_addressed_to_other(
         text, state.ping_usernames
     )
+
+
+def check_is_fresh(record: dict[str, Any]) -> bool:
+    """True if the check's Telegram message date is within the freshness window.
+
+    A history/backfill sweep can surface checks posted days ago; their link is
+    long dead, so we must not notify for them. ``record_reference_datetime``
+    reads the message ``date`` (falling back to ``detected_at``) as local-naive,
+    matching ``datetime.now()``.
+    """
+    age = datetime.now() - record_reference_datetime(record)
+    return age <= timedelta(minutes=CHECK_FRESH_MINUTES)
 
 
 def priority_label(score: int) -> str:
@@ -401,7 +413,11 @@ async def process_ping_message(
         )
     if notify and existing is None:
         if record.get("is_check"):
-            await send_check_notification(record, ping_id=ping_id)
+            # Only notify for "actual" checks — message posted within the window.
+            if check_is_fresh(record):
+                await send_check_notification(record, ping_id=ping_id)
+            else:
+                logger.info("Stale check skipped (message older than %s min): %s", CHECK_FRESH_MINUTES, record.get("chat"))
         else:
             await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
     if notify and existing is None and ping_id:

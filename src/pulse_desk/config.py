@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     flood_wait_max_seconds: int = Field(default=1800, alias="FLOOD_WAIT_MAX_SECONDS")
     backup_retention: int = Field(default=10, alias="BACKUP_RETENTION")
     pending_auth_ttl_seconds: int = Field(default=600, alias="PENDING_AUTH_TTL_SECONDS")
+    db_max_size_mb: int = Field(default=1024, alias="DB_MAX_SIZE_MB")  # main DB file size cap; 0 = disabled
+    db_archive_enabled: bool = Field(default=True, alias="DB_ARCHIVE_ENABLED")  # copy old pings to pulse_desk_archive.db before deleting
+    scan_runs_retention: int = Field(default=500, alias="SCAN_RUNS_RETENTION")  # keep newest N scan_runs; 0 = off
+    audit_retention_days: int = Field(default=90, alias="AUDIT_RETENTION_DAYS")  # settings_history/access_audit/giveaway_actions age cap; 0 = off
 
     # Obsidian "Долги" note two-way sync (all optional; empty path = disabled).
     obsidian_debts_path: str = Field(default="", alias="OBSIDIAN_DEBTS_PATH")

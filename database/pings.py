@@ -215,6 +215,7 @@ def _build_pings_filters(
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    message_date_from: Optional[str] = None,
     priority_min: Optional[int] = None,
     action_status: Optional[str] = None,
     deadline_from: Optional[str] = None,
@@ -290,6 +291,10 @@ def _build_pings_filters(
         _add_where(where, params, "detected_at >= ?", date_from)
     if date_to:
         _add_where(where, params, "detected_at <= ?", date_to)
+    if message_date_from:
+        # Filter on the Telegram message date (column `date`), not detection time.
+        # `datetime()` normalises both sides to UTC so tz-offset suffixes compare right.
+        _add_where(where, params, "datetime(date) >= datetime(?)", message_date_from)
     if priority_min is not None:
         _add_where(where, params, "priority_score >= ?", priority_min)
     if action_status:
@@ -469,6 +474,7 @@ async def get_pings(
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    message_date_from: Optional[str] = None,
     priority_min: Optional[int] = None,
     action_status: Optional[str] = None,
     deadline_from: Optional[str] = None,
@@ -488,6 +494,7 @@ async def get_pings(
             search=search,
             date_from=date_from,
             date_to=date_to,
+            message_date_from=message_date_from,
             priority_min=priority_min,
             action_status=action_status,
             deadline_from=deadline_from,

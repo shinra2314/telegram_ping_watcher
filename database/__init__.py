@@ -93,7 +93,14 @@ from .giveaways import (
     update_giveaway_candidate_status,
     upsert_giveaway_candidate,
 )
-from .maintenance import cleanup_old_data, purge_stale_checks
+from .maintenance import (
+    archive_db_path,
+    cleanup_old_data,
+    cleanup_unbounded_tables,
+    db_size_bytes,
+    enforce_db_size_cap,
+    purge_stale_checks,
+)
 from .market import get_market_history, save_market_snapshot
 from .outbox import cleanup_outbox, enqueue_outbox_event, get_outbox_after, get_outbox_stats
 from .pings import (

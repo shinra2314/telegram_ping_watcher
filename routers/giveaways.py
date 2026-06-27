@@ -17,7 +17,6 @@ from pulse_desk.app_ctx import get_current_role, require_admin, state
 from pulse_desk.common import record_app_event
 from pulse_desk.giveaway_actions import (
     analyze_and_store_giveaway,
-    confirm_safe_giveaway_join,
     find_giveaway_action_client,
     load_giveaway_message,
 )
@@ -52,11 +51,6 @@ async def refresh_giveaway_deadline_api(ping_id: int):
     if not state.clients:
         raise HTTPException(400, "No connected Telegram accounts")
     return await refresh_ping_deadline(state.clients[0], ping_id)
-
-
-@router.post("/api/giveaways/{ping_id}/confirm", dependencies=[Depends(require_admin)])
-async def confirm_giveaway_api(ping_id: int):
-    return await confirm_safe_giveaway_join(ping_id, actor="admin")
 
 
 @router.post("/api/giveaways/{ping_id}/skip", dependencies=[Depends(require_admin)])

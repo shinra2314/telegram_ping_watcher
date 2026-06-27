@@ -140,6 +140,51 @@ async def cleanup_unbounded_tables(*, scan_runs_keep: int = 500, audit_days: int
     return stats
 
 
+async def cleanup_archive_db(retention_days: int = 30, *, vacuum: bool = False) -> dict[str, int]:
+    """Prune records older than ``retention_days`` from the archive DB.
+
+    The ``pulse_desk_archive.db`` *file* is kept (it holds evicted-ping history),
+    but its rows are aged out so it cannot grow forever. ``detected_at`` is the
+    record's creation timestamp. The archive ``pings`` table is a bare column
+    copy with no FTS/triggers, so a plain batched ``DELETE`` is enough. No-op
+    (zeros) when the file or table is absent, or ``retention_days <= 0``.
+    ``VACUUM`` runs only when rows were deleted and ``vacuum`` is set.
+    """
+    stats = {"archive_pings": 0, "archive_vacuumed": 0}
+    if not retention_days or retention_days <= 0:
+        return stats
+    arch_path = archive_db_path()
+    if not arch_path.exists():
+        return stats
+    cutoff = (datetime.now() - timedelta(days=retention_days)).replace(microsecond=0).isoformat()
+    async with aiosqlite.connect(str(arch_path)) as db:
+        await db.execute("PRAGMA busy_timeout=5000")
+        has_table = await (await db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pings'"
+        )).fetchone()
+        if not has_table:
+            return stats
+        total = 0
+        while True:
+            cur = await db.execute(
+                "DELETE FROM pings WHERE id IN (SELECT id FROM pings WHERE detected_at < ? LIMIT 1000)",
+                (cutoff,),
+            )
+            deleted = cur.rowcount or 0
+            total += deleted
+            if deleted < 1000:
+                break
+        await db.commit()
+        stats["archive_pings"] = total
+        if total and vacuum:
+            try:
+                await db.execute("VACUUM")
+                stats["archive_vacuumed"] = 1
+            except Exception:
+                pass
+    return stats
+
+
 async def enforce_db_size_cap(max_mb: int, *, archive: bool = True) -> dict[str, int]:
     """Keep the main DB under ``max_mb`` by evicting the oldest low-value pings.
 

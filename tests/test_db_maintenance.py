@@ -196,5 +196,55 @@ class SizeCapTests(unittest.TestCase):
         return pings, fts, arch
 
 
+class ArchiveRetentionTests(unittest.TestCase):
+    def setUp(self):
+        database.DB_PATH = TEST_DB_PATH
+        asyncio.run(database.init_db())
+        self._archive = database.archive_db_path()
+        self._archive.unlink(missing_ok=True)
+
+    def tearDown(self):
+        self._archive.unlink(missing_ok=True)
+
+    def _seed_archive(self) -> None:
+        async def _do():
+            import aiosqlite
+            async with aiosqlite.connect(str(self._archive)) as db:
+                await db.execute(
+                    "CREATE TABLE pings (id INTEGER PRIMARY KEY, chat TEXT, detected_at TEXT)"
+                )
+                # Three stale (>30d) + two fresh.
+                for days in (120, 60, 31, 5, 0):
+                    await db.execute(
+                        "INSERT INTO pings (chat, detected_at) VALUES ('chat', ?)", (_iso(days),)
+                    )
+                await db.commit()
+        asyncio.run(_do())
+
+    async def _archive_count(self) -> int:
+        import aiosqlite
+        async with aiosqlite.connect(str(self._archive)) as db:
+            return (await (await db.execute("SELECT COUNT(*) FROM pings")).fetchone())[0]
+
+    def test_prunes_old_archive_records(self):
+        self._seed_archive()
+        stats = asyncio.run(database.cleanup_archive_db(30, vacuum=True))
+        self.assertEqual(stats["archive_pings"], 3)   # 120/60/31 days old removed
+        self.assertEqual(stats["archive_vacuumed"], 1)
+        self.assertEqual(asyncio.run(self._archive_count()), 2)  # 5d/0d kept
+
+    def test_disabled_keeps_everything(self):
+        self._seed_archive()
+        stats = asyncio.run(database.cleanup_archive_db(0))
+        self.assertEqual(stats["archive_pings"], 0)
+        self.assertEqual(asyncio.run(self._archive_count()), 5)
+
+    def test_missing_archive_is_noop(self):
+        # No file on disk → zeros, no crash, no file created.
+        stats = asyncio.run(database.cleanup_archive_db(30))
+        self.assertEqual(stats["archive_pings"], 0)
+        self.assertFalse(self._archive.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

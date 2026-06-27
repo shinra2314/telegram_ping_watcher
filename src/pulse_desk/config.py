@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     db_archive_enabled: bool = Field(default=True, alias="DB_ARCHIVE_ENABLED")  # copy old pings to pulse_desk_archive.db before deleting
     scan_runs_retention: int = Field(default=500, alias="SCAN_RUNS_RETENTION")  # keep newest N scan_runs; 0 = off
     audit_retention_days: int = Field(default=90, alias="AUDIT_RETENTION_DAYS")  # settings_history/access_audit/giveaway_actions age cap; 0 = off
+    archive_retention_days: int = Field(default=30, alias="ARCHIVE_RETENTION_DAYS")  # pulse_desk_archive.db record age cap (days); file kept, rows aged out; 0 = keep forever
 
     # Obsidian "Долги" note two-way sync (all optional; empty path = disabled).
     obsidian_debts_path: str = Field(default="", alias="OBSIDIAN_DEBTS_PATH")

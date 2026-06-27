@@ -10,6 +10,7 @@ from telethon import Button
 from . import watch_settings as ws
 from .app_ctx import (
     ADMIN_ID,
+    ARCHIVE_RETENTION_DAYS,
     AUDIT_RETENTION_DAYS,
     CHECK_FRESH_MINUTES,
     DB_ARCHIVE_ENABLED,
@@ -243,6 +244,7 @@ async def source_score_loop() -> None:
 
 async def auto_scan_loop() -> None:
     from database import (
+        cleanup_archive_db,
         cleanup_old_data,
         cleanup_unbounded_tables,
         enforce_db_size_cap,
@@ -281,8 +283,11 @@ async def auto_scan_loop() -> None:
             cap = await enforce_db_size_cap(DB_MAX_SIZE_MB, archive=DB_ARCHIVE_ENABLED)
             if cap.get("pings_deleted"):
                 stats["size_cap"] = cap
+            archive = await cleanup_archive_db(ARCHIVE_RETENTION_DAYS, vacuum=vacuum_due)
+            if archive.get("archive_pings"):
+                stats["archive_pings"] = archive["archive_pings"]
             if any(stats.get(key) for key in ("pings", "market_history", "vacuumed")) or stale_checks \
-                    or any(unbounded.values()) or cap.get("pings_deleted"):
+                    or any(unbounded.values()) or cap.get("pings_deleted") or archive.get("archive_pings"):
                 await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
             state.heartbeat("auto-scan")
         except Exception:

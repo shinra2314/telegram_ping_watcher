@@ -95,6 +95,7 @@ from .giveaways import (
 )
 from .maintenance import (
     archive_db_path,
+    cleanup_archive_db,
     cleanup_old_data,
     cleanup_unbounded_tables,
     db_size_bytes,

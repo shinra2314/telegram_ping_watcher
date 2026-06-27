@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from telethon import Button
 
-from .app_ctx import ADMIN_ID, BASE_DIR, logger, state
+from .app_ctx import ADMIN_ID, BASE_DIR, CHECK_NOTIFY_TARGET, logger, state
 from .bot_prefs import filter_broadcast_members, notification_type_of
 from .common import flood_wait_seconds, record_app_event
 from .watch_settings import is_quiet_time, load_notification_settings, notification_matches, should_throttle_notification
@@ -47,15 +47,29 @@ def notification_image_path(record: dict[str, Any]) -> Optional[str]:
     return str(path) if path.exists() else None
 
 
-async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> bool:
-    if not state.bot_client or not ADMIN_ID:
+def _resolve_peer(target: Any) -> Any:
+    """Normalise a notify target: numeric strings → int chat id, else pass through
+    (a @username / channel that Telethon resolves)."""
+    if isinstance(target, str):
+        stripped = target.strip()
+        if stripped.lstrip("-").isdigit():
+            return int(stripped)
+        return stripped
+    return target
+
+
+async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> bool:
+    """Send a single bot message to an arbitrary peer with flood-wait retries."""
+    if not state.bot_client or peer in (None, ""):
         return False
+    target = _resolve_peer(peer)
+    buttons = buttons or None  # Telethon rejects an empty markup list
     for attempt in range(3):
         try:
             if not await ensure_bot_connected():
                 return False
             try:
-                await state.bot_client.send_message(ADMIN_ID, message, buttons=buttons, link_preview=False, file=file)
+                await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, file=file)
             except FloodWaitError:
                 raise
             except Exception:
@@ -63,7 +77,7 @@ async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Bu
                     raise
                 # Media upload failed — fall back to plain text once.
                 file = None
-                await state.bot_client.send_message(ADMIN_ID, message, buttons=buttons, link_preview=False)
+                await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False)
             return True
         except FloodWaitError as exc:
             wait = flood_wait_seconds(exc.seconds)
@@ -72,10 +86,16 @@ async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Bu
         except Exception as exc:
             logger.warning("Telegram bot notification attempt %s failed: %s", attempt + 1, exc)
             if attempt >= 2:
-                await record_app_event("ERROR", "notifications", "Telegram bot notification failed", {"error": str(exc)})
+                await record_app_event("ERROR", "notifications", "Telegram bot notification failed", {"error": str(exc), "peer": str(peer)})
                 return False
             await asyncio.sleep(2 * (attempt + 1))
     return False
+
+
+async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> bool:
+    if not ADMIN_ID:
+        return False
+    return await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file)
 
 
 async def broadcast_member_notification(
@@ -123,14 +143,18 @@ async def broadcast_member_notification(
 
 
 async def send_check_notification(record: dict[str, Any], ping_id: Optional[int] = None) -> None:
-    """Alert admin + opted-in members about a detected check/multicheck.
+    """Alert the single configured check target about a detected check/multicheck.
 
-    Unlike ``send_bot_notification`` this bypasses the username/keyword match
-    filters (checks rarely satisfy them) but still honours the global on/off
+    Checks go ONLY to ``CHECK_NOTIFY_TARGET`` (default ``@w3v8f0rm``); they are
+    never broadcast to opted-in members. If the target is unset it falls back to
+    the admin. Unlike ``send_bot_notification`` this bypasses the username/keyword
+    match filters (checks rarely satisfy them) but still honours the global on/off
     switch and quiet hours.
-    """
-    from database import save_broadcast_messages
 
+    Note: a Telegram bot can only deliver to a *user* who has pressed /start on it.
+    If the target is a personal account that never started the bot, the send fails
+    and is logged.
+    """
     if not state.bot_client:
         return
     try:
@@ -158,15 +182,13 @@ async def send_check_notification(record: dict[str, Any], ping_id: Optional[int]
                 Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
                 Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
             ])
-        member_buttons: Optional[list[list[Button]]] = [[Button.url("Открыть в Telegram", link)]] if has_link else None
-        delivered = await broadcast_member_notification(msg, member_buttons, file=header_image, notif_type="check")
-        if delivered:
-            token = secrets_module.token_hex(4)
-            await save_broadcast_messages(token, delivered)
-            buttons.append([Button.inline(f"🙈 Скрыть у друзей ({len(delivered)})", data=f"hidebc_{token}")])
-        sent = await send_admin_bot_message(msg, buttons=buttons, file=header_image)
+        target = CHECK_NOTIFY_TARGET or ADMIN_ID
+        if not target:
+            logger.error("No check notify target configured (CHECK_NOTIFY_TARGET / ADMIN_ID)")
+            return
+        sent = await _send_bot_message(target, msg, buttons=buttons, file=header_image)
         if not sent:
-            logger.error("Failed to send check notification after retries")
+            logger.error("Failed to send check notification to %s after retries", target)
     except Exception:
         logger.exception("Failed to send check notification")
 
@@ -217,11 +239,6 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
             buttons.append([
                 Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
                 Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
-            ])
-        if ping_id and record.get("is_giveaway"):
-            buttons.append([
-                Button.inline("✅ Участвовать", data=f"gconfirm_{ping_id}"),
-                Button.inline("⏭ Пропустить", data=f"gskip_{ping_id}"),
             ])
         # Mirror notification to viewer members first (read-only, no action buttons),
         # so the admin message can carry a working "hide from friends" button.

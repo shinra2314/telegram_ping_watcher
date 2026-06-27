@@ -7,7 +7,6 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import HTTPException
 from telethon import Button, events
 from telethon.errors import MessageNotModifiedError
 
@@ -34,7 +33,6 @@ from ..bot_prefs import (
     toggle_member_pref,
 )
 from ..common import record_app_event
-from ..giveaway_actions import confirm_safe_giveaway_join
 from ..live import publish_live_event
 from ..scan_engine import full_history_scan
 from ..security import generate_access_key
@@ -77,7 +75,6 @@ async def init_bot() -> None:
         list_bot_members,
         mark_ping_read as mark_ping_read_db,
         record_access_audit,
-        record_giveaway_action,
         revoke_bot_key,
         set_access_window_active,
         set_bot_member_blocked,
@@ -86,8 +83,6 @@ async def init_bot() -> None:
         set_setting,
         toggle_favorite,
         touch_bot_member,
-        update_giveaway_candidate_status,
-        update_ping_meta,
         upsert_bot_member,
     )
 
@@ -228,19 +223,6 @@ async def init_bot() -> None:
                 return int(data.split("_", 1)[1])
             except (ValueError, IndexError):
                 return None
-
-        async def finalize_buttons(event, done_label: str) -> None:
-            """Replace the message keyboard with kept URL buttons + a done marker."""
-            try:
-                msg = await event.get_message()
-                kept = [Button.url(b.text, b.url) for row in (msg.buttons or []) for b in row if b.url]
-                rows: list[list[Button]] = []
-                if kept:
-                    rows.append(kept)
-                rows.append([Button.inline(done_label, b"noop")])
-                await safe_edit(event, buttons=rows)
-            except Exception:
-                logger.debug("Could not finalize buttons", exc_info=True)
 
         # ---- shared renderers (reused by slash commands and menu callbacks) -
         async def render_stats() -> str:
@@ -1599,7 +1581,7 @@ async def init_bot() -> None:
 
             # ---- legacy data-mutating actions (owner only, gated above) ----
             ping_id = _cb_id(data)
-            if data.startswith(("fav_", "read_", "gconfirm_", "gskip_")) and ping_id is None:
+            if data.startswith(("fav_", "read_")) and ping_id is None:
                 await event.answer("Некорректная команда", alert=True)
                 return
             if data.startswith("fav_"):
@@ -1609,19 +1591,8 @@ async def init_bot() -> None:
                 await mark_ping_read_db(ping_id)
                 await event.answer("Отмечено как прочитанное")
                 await event.delete()
-            elif data.startswith("gconfirm_"):
-                try:
-                    result = await confirm_safe_giveaway_join(ping_id, actor="telegram_bot")
-                    await event.answer(result.get("message") or "Joined")
-                    await finalize_buttons(event, "✅ Участвую")
-                except HTTPException as exc:
-                    await event.answer(str(exc.detail), alert=True)
-            elif data.startswith("gskip_"):
-                await update_giveaway_candidate_status(ping_id, "skipped")
-                await update_ping_meta(ping_id, giveaway_status="missed_unsubscribe", action_status="missed")
-                await record_giveaway_action(ping_id, "skip", "skipped", "telegram_bot")
-                await event.answer("Skipped")
-                await event.delete()
+            elif data.startswith(("gconfirm_", "gskip_")):
+                await event.answer("Действие розыгрышей больше недоступно.", alert=True)
 
         # ---- register Telegram command menus (best-effort) ------------------
         try:

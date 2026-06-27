@@ -183,6 +183,5 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
 - **All DB access is async** via `aiosqlite`; never use synchronous sqlite3 in new code.
 - **Routers import from `app_ctx`, never from `main`** — `src/pulse_desk/app_ctx.py` holds the settings/state/logger singletons and auth dependencies precisely so router modules avoid circular imports with `main.py`.
 - **Schema changes** require bumping `SCHEMA_VERSION` in `database/_core.py` and adding a migration branch in `database/schema.py` (`init_db`).
-- **Giveaway actions default to dry-run** (`DRY_RUN_GIVEAWAYS=true`). Any code that joins or submits must check this flag.
 - **Session files are secrets** — treat `.session` files like passwords; they are excluded from git via `.gitignore`.
 - The frontend is plain classic scripts in `/static` sharing one global scope — no npm, no bundler, no TypeScript. The `app-*.js` load order in index.html matters.

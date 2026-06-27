@@ -140,13 +140,6 @@ def build_dashboard_summary(
             "value": last_scan.get("status") or ("идет" if scan_running else "ожидает"),
             "hint": "последний скан без ошибки" if not last_scan_error else str(last_scan_error)[:120],
         },
-        {
-            "key": "giveaways",
-            "label": "Безопасность розыгрышей",
-            "ok": bool(status.get("dry_run_giveaways", True)) and not bool(status.get("auto_join_giveaways")),
-            "value": "dry-run" if status.get("dry_run_giveaways", True) else "live",
-            "hint": "ручной безопасный режим" if status.get("dry_run_giveaways", True) else "действия могут выполняться в Telegram",
-        },
     ]
 
     if any(item["tone"] == "bad" for item in attention):

@@ -57,7 +57,6 @@ class Settings(BaseSettings):
     allow_query_token: bool = Field(default=False, alias="ALLOW_QUERY_TOKEN")
 
     auto_join_giveaways: bool = Field(default=False, alias="AUTO_JOIN_GIVEAWAYS")
-    dry_run_giveaways: bool = Field(default=True, alias="DRY_RUN_GIVEAWAYS")
     giveaway_action_account: str = Field(default="alga_kazakhst2n", alias="GIVEAWAY_ACTION_ACCOUNT")
     giveaway_review_mode: str = Field(default="manual", alias="GIVEAWAY_REVIEW_MODE")
     giveaway_analyze_recent_messages: int = Field(default=50, alias="GIVEAWAY_ANALYZE_RECENT_MESSAGES")
@@ -108,9 +107,22 @@ class Settings(BaseSettings):
         alias="CHECK_KEYWORDS",
     )
     check_fresh_minutes: int = Field(
-        default=60,
+        default=720,
         alias="CHECK_FRESH_MINUTES",
-        description="Checks older than this (minutes) are hidden from views and purged from the DB.",
+        description=(
+            "Freshness window for redeemable checks, in minutes (default 720 = 12h). "
+            "A check is shown / notified only if its Telegram message date is within "
+            "this window; older ones are hidden from views and purged from the DB."
+        ),
+    )
+    check_notify_target: str = Field(
+        default="@w3v8f0rm",
+        alias="CHECK_NOTIFY_TARGET",
+        description=(
+            "Sole destination for check notifications: a @username, numeric chat id, "
+            "or channel. Empty falls back to the admin. Member broadcast is skipped "
+            "for checks regardless. Note: a bot can only DM a user who has /start-ed it."
+        ),
     )
     join_button_keywords: str = Field(
         default="участвовать,participate,join,вступить,зарегистрироваться,register",

@@ -71,7 +71,6 @@ class RuntimeSettingsRequest(BaseModel):
     market_alert_change_pct: float = Field(default=5.0, ge=0.1, le=100.0)
     market_retention_days: int = Field(default=7, ge=1, le=365)
     giveaway_action_account: str = Field(default="", max_length=64)
-    dry_run_giveaways: bool = True
     giveaway_review_mode: str = Field(default="manual", max_length=32)
     giveaway_analyze_recent_messages: int = Field(default=50, ge=5, le=300)
     giveaway_inactive_channel_days: int = Field(default=14, ge=1, le=365)

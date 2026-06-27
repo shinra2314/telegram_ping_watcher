@@ -82,7 +82,6 @@
             `mode: ${esc(giveaways.review_mode || "manual")}`,
             `strict: ${esc(giveaways.strict_rule || "")}`,
             `account: ${esc(giveaways.action_account || "")}`,
-            `dry run: ${giveaways.dry_run ? "yes" : "no"}`,
             `delay: ${Number(giveaways.min_action_delay_seconds || 0)} sec`
           ])}
         </div>

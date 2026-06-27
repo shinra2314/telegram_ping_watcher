@@ -69,9 +69,8 @@
       const scanLimit = Number(runtime.scan_history_limit || 0);
       const editSweep = Number(runtime.edit_scan_recent_messages || 0);
       const marketInterval = Number(runtime.market_poll_seconds || 0);
-      const dryRun = runtime.dry_run_giveaways !== false;
       if ($("settings-summary-line")) {
-        $("settings-summary-line").textContent = `${usernames.length || 0} usernames · источник ${source} · dry-run ${dryRun ? "включен" : "выключен"}`;
+        $("settings-summary-line").textContent = `${usernames.length || 0} usernames · источник ${source}`;
       }
       if ($("settings-summary")) {
         $("settings-summary").innerHTML = `
@@ -80,7 +79,6 @@
           <div class="summary-tile"><span>Параллель</span><strong>${scanConcurrency || "..."}</strong></div>
           <div class="summary-tile"><span>Лимит истории</span><strong>${scanLimit > 0 ? scanLimit : "без лимита"}</strong></div>
           <div class="summary-tile"><span>Правки</span><strong>${editSweep > 0 ? editSweep : "off"}</strong></div>
-          <div class="summary-tile"><span>Розыгрыши</span><strong>${dryRun ? "dry-run" : "live"}</strong></div>
         `;
       }
       if ($("tracking-source")) $("tracking-source").textContent = `Источник: ${source}`;
@@ -100,7 +98,6 @@
       $("runtime-analyze-recent").value = values.giveaway_analyze_recent_messages ?? 50;
       $("runtime-inactive-days").value = values.giveaway_inactive_channel_days ?? 14;
       $("runtime-action-delay").value = values.giveaway_min_action_delay_seconds ?? 45;
-      $("runtime-dry-run").checked = values.dry_run_giveaways !== false;
     }
 
     function readRuntimeInputs() {
@@ -115,7 +112,6 @@
         market_alert_change_pct: numberValue("runtime-market-alert", 5),
         market_retention_days: numberValue("runtime-market-retention", 7),
         giveaway_action_account: $("runtime-action-account").value.trim().replace(/^@/, ""),
-        dry_run_giveaways: $("runtime-dry-run").checked,
         giveaway_review_mode: $("runtime-review-mode").value,
         giveaway_analyze_recent_messages: numberValue("runtime-analyze-recent", 50),
         giveaway_inactive_channel_days: numberValue("runtime-inactive-days", 14),

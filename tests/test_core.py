@@ -77,7 +77,6 @@ class CoreParsingTests(unittest.TestCase):
                 "accounts_online": 1,
                 "accounts_total": 2,
                 "tracked_usernames": ["Alpha", "Beta"],
-                "dry_run_giveaways": True,
                 "auto_join_giveaways": False,
                 "scan": {
                     "running": True,
@@ -114,7 +113,6 @@ class CoreParsingTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["total_channels"], 9)
         self.assertTrue(any(item["kind"] == "accounts" for item in summary["attention"]))
         self.assertTrue(any(item["key"] == "channels" and item["ok"] for item in summary["readiness"]))
-        self.assertTrue(any(item["key"] == "giveaways" and item["ok"] for item in summary["readiness"]))
 
     def test_dashboard_summary_reports_calm_state(self):
         summary = build_dashboard_summary(
@@ -122,7 +120,6 @@ class CoreParsingTests(unittest.TestCase):
                 "accounts_online": 1,
                 "accounts_total": 1,
                 "tracked_usernames": ["Alpha"],
-                "dry_run_giveaways": True,
                 "auto_join_giveaways": False,
                 "scan": {"running": False},
                 "last_scan": {"status": "finished"},

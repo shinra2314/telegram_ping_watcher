@@ -29,7 +29,6 @@ async def get_usernames():
         "win_keywords": state.win_keywords,
         "giveaway_keywords": state.giveaway_keywords,
         "auto_join_giveaways": AUTO_JOIN_GIVEAWAYS,
-        "dry_run_giveaways": ws.DRY_RUN_GIVEAWAYS,
     }
 
 

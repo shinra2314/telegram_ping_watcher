@@ -31,7 +31,6 @@ MARKET_POLL_SECONDS = app_ctx.MARKET_POLL_SECONDS
 MARKET_ALERT_CHANGE_PCT = app_ctx.MARKET_ALERT_CHANGE_PCT
 MARKET_RETENTION_DAYS = app_ctx.MARKET_RETENTION_DAYS
 GIVEAWAY_ACTION_ACCOUNT = app_ctx.GIVEAWAY_ACTION_ACCOUNT
-DRY_RUN_GIVEAWAYS = app_ctx.DRY_RUN_GIVEAWAYS
 GIVEAWAY_REVIEW_MODE = app_ctx.GIVEAWAY_REVIEW_MODE
 GIVEAWAY_ANALYZE_RECENT_MESSAGES = app_ctx.GIVEAWAY_ANALYZE_RECENT_MESSAGES
 GIVEAWAY_INACTIVE_CHANNEL_DAYS = app_ctx.GIVEAWAY_INACTIVE_CHANNEL_DAYS
@@ -267,7 +266,6 @@ def runtime_settings_payload() -> dict[str, Any]:
         "market_alert_change_pct": MARKET_ALERT_CHANGE_PCT,
         "market_retention_days": MARKET_RETENTION_DAYS,
         "giveaway_action_account": GIVEAWAY_ACTION_ACCOUNT,
-        "dry_run_giveaways": DRY_RUN_GIVEAWAYS,
         "giveaway_review_mode": GIVEAWAY_REVIEW_MODE,
         "giveaway_analyze_recent_messages": GIVEAWAY_ANALYZE_RECENT_MESSAGES,
         "giveaway_inactive_channel_days": GIVEAWAY_INACTIVE_CHANNEL_DAYS,
@@ -293,7 +291,6 @@ def sanitize_runtime_settings(values: Optional[dict[str, Any]] = None) -> dict[s
         "market_alert_change_pct": _as_float(raw.get("market_alert_change_pct"), 5.0, 0.1, 100.0),
         "market_retention_days": _as_int(raw.get("market_retention_days"), 7, 1, 365),
         "giveaway_action_account": action_account,
-        "dry_run_giveaways": _as_bool(raw.get("dry_run_giveaways"), True),
         "giveaway_review_mode": review_mode,
         "giveaway_analyze_recent_messages": _as_int(raw.get("giveaway_analyze_recent_messages"), 50, 5, 300),
         "giveaway_inactive_channel_days": _as_int(raw.get("giveaway_inactive_channel_days"), 14, 1, 365),
@@ -309,7 +306,7 @@ async def load_runtime_settings() -> dict[str, Any]:
 
 
 def apply_runtime_settings(values: dict[str, Any]) -> dict[str, Any]:
-    global DRY_RUN_GIVEAWAYS, GIVEAWAY_ACTION_ACCOUNT, GIVEAWAY_REVIEW_MODE
+    global GIVEAWAY_ACTION_ACCOUNT, GIVEAWAY_REVIEW_MODE
     global GIVEAWAY_ANALYZE_RECENT_MESSAGES, GIVEAWAY_INACTIVE_CHANNEL_DAYS, GIVEAWAY_MIN_ACTION_DELAY_SECONDS
     global SCAN_INTERVAL_SECONDS, SCAN_ACCOUNT_CONCURRENCY, SCAN_HISTORY_LIMIT, EDIT_SCAN_RECENT_MESSAGES, STARTUP_SCAN_DELAY_SECONDS
     global MARKET_POLL_SECONDS, MARKET_ALERT_CHANGE_PCT, MARKET_RETENTION_DAYS
@@ -324,7 +321,6 @@ def apply_runtime_settings(values: dict[str, Any]) -> dict[str, Any]:
     MARKET_ALERT_CHANGE_PCT = cleaned["market_alert_change_pct"]
     MARKET_RETENTION_DAYS = cleaned["market_retention_days"]
     GIVEAWAY_ACTION_ACCOUNT = cleaned["giveaway_action_account"]
-    DRY_RUN_GIVEAWAYS = cleaned["dry_run_giveaways"]
     GIVEAWAY_REVIEW_MODE = cleaned["giveaway_review_mode"]
     GIVEAWAY_ANALYZE_RECENT_MESSAGES = cleaned["giveaway_analyze_recent_messages"]
     GIVEAWAY_INACTIVE_CHANNEL_DAYS = cleaned["giveaway_inactive_channel_days"]

@@ -156,7 +156,6 @@ async def status(role: str = Depends(get_current_role)):
         "db_size_bytes": db_size_bytes,
         "db_size_mb": round(db_size_bytes / 1024 / 1024, 2),
         "auto_join_giveaways": AUTO_JOIN_GIVEAWAYS,
-        "dry_run_giveaways": ws.DRY_RUN_GIVEAWAYS,
         "giveaway_action_account": f"@{ws.GIVEAWAY_ACTION_ACCOUNT}",
         "giveaway_review_mode": ws.GIVEAWAY_REVIEW_MODE,
         "giveaway_min_action_delay_seconds": ws.GIVEAWAY_MIN_ACTION_DELAY_SECONDS,
@@ -222,7 +221,6 @@ async def diagnostics():
         },
         "giveaways": {
             "auto_join": AUTO_JOIN_GIVEAWAYS,
-            "dry_run": ws.DRY_RUN_GIVEAWAYS,
             "review_mode": ws.GIVEAWAY_REVIEW_MODE,
             "action_account": f"@{ws.GIVEAWAY_ACTION_ACCOUNT}",
             "min_action_delay_seconds": ws.GIVEAWAY_MIN_ACTION_DELAY_SECONDS,

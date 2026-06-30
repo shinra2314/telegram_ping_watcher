@@ -314,6 +314,8 @@ def main() -> None:
     _notify("notify_mention.png", CYAN, "УПОМИНАНИЕ", "PD·01 // SIGNAL LOCK · MENTION")
     _notify("notify_giveaway.png", CITRON, "РОЗЫГРЫШ", "PD·01 // SIGNAL LOCK · GIVEAWAY")
     _notify("notify_win.png", AMBER, "ПОБЕДА", "PD·01 // SIGNAL LOCK · WIN")
+    _notify("notify_check.png", CITRON, "ЧЕК", "PD·01 // SIGNAL LOCK · CHECK")
+    _notify("notify_deadline.png", AMBER, "ДЕДЛАЙН", "PD·01 // SIGNAL LOCK · DEADLINE")
     print("Done.")
 
 

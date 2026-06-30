@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     admin_id: Optional[int] = Field(default=None, alias="ADMIN_ID")
     bot_admin_chats: str = Field(default="", alias="BOT_ADMIN_CHATS")
     bot_stickers_enabled: bool = Field(default=True, alias="BOT_STICKERS_ENABLED")
+    bot_custom_emoji_set: str = Field(default="", alias="BOT_CUSTOM_EMOJI_SET")
 
     telegram_sessions: str = Field(default="", alias="TELEGRAM_SESSIONS")
     telegram_session_dir: Optional[Path] = Field(default=None, alias="PULSE_SESSION_DIR")

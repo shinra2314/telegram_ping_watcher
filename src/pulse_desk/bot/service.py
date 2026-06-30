@@ -48,6 +48,7 @@ from .cards import (
     member_card, members_header, home_card, ping_card, summary_card,
 )
 from .stickers import send_sticker
+from .emoji import enrich, resolve_custom_emoji_map
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -99,6 +100,12 @@ async def init_bot() -> None:
         state.bot_username = bot_me.username
         bot_username = bot_me.username
         logger.info("Bot started: @%s", bot_me.username)
+
+        # Resolve the Aperture custom-emoji pack (best-effort; empty → plain emoji).
+        if settings.bot_custom_emoji_set:
+            state.custom_emoji_map = await resolve_custom_emoji_map(bot_client, settings.bot_custom_emoji_set)
+            logger.info("Custom emoji pack '%s': %d glyphs resolved",
+                        settings.bot_custom_emoji_set, len(state.custom_emoji_map))
 
         bot_pending_inputs = state.bot_pending_inputs
 
@@ -181,11 +188,31 @@ async def init_bot() -> None:
             return False
 
         async def safe_edit(event, *args, **kwargs) -> None:
-            """Edit the callback message, ignoring 'not modified' errors."""
+            """Edit the callback message, ignoring 'not modified' errors.
+
+            Injects Aperture custom emoji into the text when a pack is resolved;
+            with no pack the text is sent unchanged (normal Markdown).
+            """
+            if (args and isinstance(args[0], str) and state.custom_emoji_map
+                    and "formatting_entities" not in kwargs):
+                clean, ents = enrich(args[0], state.custom_emoji_map)
+                if ents is not None:
+                    args = (clean,) + tuple(args[1:])
+                    kwargs["formatting_entities"] = ents
+                    kwargs["parse_mode"] = None
             try:
                 await event.edit(*args, **kwargs)
             except MessageNotModifiedError:
                 await event.answer()
+
+        async def respond_rich(event, text, **kwargs):
+            """``event.respond`` with Aperture custom emoji injected when available."""
+            if state.custom_emoji_map and "formatting_entities" not in kwargs:
+                clean, ents = enrich(text, state.custom_emoji_map)
+                if ents is not None:
+                    return await event.respond(clean, formatting_entities=ents,
+                                               parse_mode=None, **kwargs)
+            return await event.respond(text, **kwargs)
 
         def _is_callback(event) -> bool:
             return isinstance(event, events.CallbackQuery.Event)
@@ -744,13 +771,14 @@ async def init_bot() -> None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             welcome_banner = BOT_ASSETS_DIR / "welcome.png"
+            home = await render_home(role)
             if welcome_banner.exists():
                 try:
-                    await event.respond(await render_home(role), buttons=main_menu_buttons(role), file=str(welcome_banner))
+                    await respond_rich(event, home, buttons=main_menu_buttons(role), file=str(welcome_banner))
                     return
                 except Exception:
                     logger.warning("Failed to send welcome banner, falling back to text", exc_info=True)
-            await event.respond(await render_home(role), buttons=main_menu_buttons(role))
+            await respond_rich(event, home, buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern=r"/redeem(?:\s+(\S+))?"))
         @safe
@@ -776,11 +804,11 @@ async def init_bot() -> None:
             banner = BOT_ASSETS_DIR / "welcome.png"
             if banner.exists():
                 try:
-                    await event.respond(home, buttons=main_menu_buttons(role), file=str(banner))
+                    await respond_rich(event, home, buttons=main_menu_buttons(role), file=str(banner))
                     return
                 except Exception:
                     logger.warning("menu banner failed, text fallback", exc_info=True)
-            await event.respond(home, buttons=main_menu_buttons(role))
+            await respond_rich(event, home, buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern="/settings"))
         @viewer_only

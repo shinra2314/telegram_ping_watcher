@@ -89,6 +89,12 @@ src/pulse_desk/
                       BOT_STICKERS_ENABLED). .webp set lives in
                       assets/bot/stickers/; fired on win/giveaway/check/scan/
                       ping/welcome. Never raises into a handler (photo fallback)
+  bot/emoji.py      — Custom-emoji rendering: resolve a @Stickers pack
+                      (BOT_CUSTOM_EMOJI_SET) to {emoji: document_id}, inject
+                      MessageEntityCustomEmoji into card text (UTF-16 offsets).
+                      No pack → no-op, plain Markdown. Glyph set in
+                      assets/bot/emoji/ (100px webp). Premium-only render;
+                      non-Premium see the same standard emoji as fallback
   access_control.py — Pure schedule resolution (Window/Decision, window_contains,
                       resolve_access, next_boundary). Zoneinfo/DST-aware, no I/O,
                       fully unit-tested. Source of truth for bot_role gating
@@ -146,7 +152,9 @@ sessions/                  — Telethon .session credential files (never commit 
 scripts/                   — One-off tools: generate_bot_assets.py (bot branding
                              PNGs, needs Pillow), generate_bot_stickers.py
                              (Aperture .webp sticker set, needs Pillow + Windows
-                             colour-emoji font), set_bot_profile.py (upload avatar)
+                             colour-emoji font), generate_bot_emoji.py (Aperture
+                             custom-emoji set, 100px webp, prints @Stickers emoji
+                             assignment), set_bot_profile.py (upload avatar)
 ```
 
 ### Background jobs (always running)

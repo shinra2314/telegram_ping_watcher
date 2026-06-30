@@ -20,6 +20,9 @@ class AppState:
     bot_username: Optional[str] = None
     # Pending free-text inputs for the bot settings menus: sender_id -> {kind, scope, armed_at}.
     bot_pending_inputs: dict[int, dict] = field(default_factory=dict)
+    # Resolved custom-emoji pack: standard-emoji char -> document_id. Empty when
+    # BOT_CUSTOM_EMOJI_SET is unset or the pack can't be resolved (plain fallback).
+    custom_emoji_map: dict[str, int] = field(default_factory=dict)
     # Scheduled-access cache: tg_id -> (allowed, valid_until_utc, reason). Computed
     # in bot_role, refreshed by access_scheduler_loop, invalidated on rule edits.
     access_cache: dict[int, tuple[bool, datetime, str]] = field(default_factory=dict)

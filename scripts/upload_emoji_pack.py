@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from time import monotonic
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "src"))
@@ -37,27 +38,14 @@ except Exception:
 
 from telethon import TelegramClient  # noqa: E402
 from telethon.sessions import SQLiteSession  # noqa: E402
+from telethon.tl.functions.messages import GetStickerSetRequest  # noqa: E402
+from telethon.tl.types import InputStickerSetShortName  # noqa: E402
 
 from generate_bot_emoji import EMOJI_MAP, OUT  # noqa: E402
 from pulse_desk.config import Settings  # noqa: E402
 
 STICKERS_BOT = "Stickers"
 SESSIONS_DIR = BASE / "sessions"
-
-
-async def _drain(conv, *, first: float = 12.0, idle: float = 3.0) -> str:
-    """Read @Stickers' reply(ies) after an action; returns the joined text."""
-    msgs = []
-    try:
-        msgs.append(await conv.get_response(timeout=first))
-    except asyncio.TimeoutError:
-        return ""
-    while True:
-        try:
-            msgs.append(await conv.get_response(timeout=idle))
-        except asyncio.TimeoutError:
-            break
-    return "\n".join((m.message or "").strip() for m in msgs)
 
 
 def _looks_like_error(text: str) -> bool:
@@ -81,39 +69,113 @@ async def _build_with_session(session_path: Path, settings: Settings, *,
             return False
         print(f"  using Premium session @{me.username or me.id}")
 
-        async with client.conversation(STICKERS_BOT, timeout=90) as conv:
-            await conv.send_message("/cancel")     # reset any pending flow
-            await _drain(conv, first=6, idle=2)
-            await conv.send_message("/newemojipack")
-            print("  > /newemojipack:", (await _drain(conv))[:80])
-            await conv.send_message(title)
-            print("  > title:", (await _drain(conv))[:80])
+        # Manual send + poll history for replies. Telethon's Conversation API
+        # races the update dispatcher here (InvalidStateError); actively fetching
+        # messages with get_messages is reliable, and @Stickers uses inline
+        # buttons (emoji type picker) that need a real callback click.
+        peer = await client.get_input_entity(STICKERS_BOT)
+        last = {"id": 0}
+        seed = await client.get_messages(peer, limit=1)
+        if seed:
+            last["id"] = seed[0].id
 
-            for i, (name, (emoji, _glyph)) in enumerate(EMOJI_MAP.items(), 1):
-                f = OUT / f"{name}.webp"
-                await conv.send_file(str(f), force_document=True)
-                r = await _drain(conv)
-                if _looks_like_error(r):
-                    print(f"  ! upload {name} rejected: {r[:120]}")
-                    return False
-                await conv.send_message(emoji)
-                r = await _drain(conv)
-                print(f"  [{i:>2}/{len(EMOJI_MAP)}] {name} {emoji}: {r[:50]}")
-                if _looks_like_error(r):
-                    print(f"  ! emoji assign for {name} failed: {r[:120]}")
-                    return False
+        def _short(s: str) -> str:
+            return (s or "")[:80].replace("\n", " ")
 
-            await conv.send_message("/publish")
-            print("  > /publish:", (await _drain(conv))[:80])
-            await conv.send_message("/skip")        # skip the pack icon
-            print("  > /skip icon:", (await _drain(conv))[:80])
-            await conv.send_message(short)
-            final = await _drain(conv)
-            print("  > short name:", final[:160])
-            if _looks_like_error(final):
-                print("  ! short name rejected (taken/invalid). Pick another --short.")
+        async def _latest():
+            m = await client.get_messages(peer, limit=1)
+            return m[0] if m else None
+
+        async def _wait_reply(prev_text=None, timeout: float = 30.0):
+            """Return (text, msg) of the next @Stickers message or edit."""
+            end = monotonic() + timeout
+            while monotonic() < end:
+                await asyncio.sleep(1.5)
+                recent = await client.get_messages(peer, limit=6)
+                incoming = [m for m in recent if not m.out]
+                if not incoming:
+                    continue
+                newest = max(incoming, key=lambda m: m.id)
+                txt = newest.message or ""
+                if newest.id > last["id"] or (prev_text is not None and txt != prev_text):
+                    last["id"] = max(last["id"], newest.id)
+                    return txt, newest
+            return "", await _latest()
+
+        async def send(*, text=None, file=None, timeout: float = 30.0):
+            if file is not None:
+                await client.send_file(peer, file, force_document=True)
+            elif text is not None:
+                await client.send_message(peer, text)
+            return await _wait_reply(timeout=timeout)
+
+        async def click(matches, prev_text: str, timeout: float = 30.0):
+            msg = await _latest()
+            target = None
+            for row in (getattr(msg, "buttons", None) or []):
+                for btn in row:
+                    label = (btn.text or "").lower()
+                    if any(m in label for m in matches):
+                        target = btn
+                        break
+                if target:
+                    break
+            if target is None:
+                return "__nobtn__", msg
+            await target.click()
+            return await _wait_reply(prev_text=prev_text, timeout=timeout)
+
+        await send(text="/cancel", timeout=10)
+        txt, _ = await send(text="/newemojipack")
+        print("  > /newemojipack:", _short(txt))
+        if not txt.strip():
+            print("  ! @Stickers gave no reply — cannot proceed.")
+            return False
+        # Pick the STATIC emoji type via its inline button (EN/RU labels).
+        txt, _ = await click(("static", "стат"), prev_text=txt)
+        print("  > type=static:", _short(txt))
+        if txt == "__nobtn__":
+            print("  ! no 'static' button found on the type picker.")
+            return False
+        txt, _ = await send(text=title)
+        print("  > title:", _short(txt))
+
+        for i, (name, (emoji, _glyph)) in enumerate(EMOJI_MAP.items(), 1):
+            r, _ = await send(file=str(OUT / f"{name}.webp"))
+            if _looks_like_error(r):
+                print(f"  ! upload {name} rejected: {r[:120]}")
                 return False
-        print(f"\nDONE. Pack: https://t.me/addemoji/{short}")
+            r, _ = await send(text=emoji)
+            print(f"  [{i:>2}/{len(EMOJI_MAP)}] {name} {emoji}: {_short(r)[:48]}")
+            if _looks_like_error(r):
+                print(f"  ! emoji assign for {name} failed: {r[:120]}")
+                return False
+
+        txt, _ = await send(text="/publish")
+        print("  > /publish:", _short(txt))
+        # @Stickers may ask for a pack icon next; skip if offered.
+        if "icon" in txt.lower() or "skip" in txt.lower():
+            txt, _ = await send(text="/skip")
+            print("  > skip icon:", _short(txt))
+        final, _ = await send(text=short)
+        print("  > short name:", _short(final))
+        if _looks_like_error(final):
+            print("  ! short name rejected (taken/invalid). Pick another --short.")
+            return False
+
+        # Verify: the only trustworthy success signal is that Telegram now
+        # resolves the published set (the conversation replies can race).
+        try:
+            res = await client(GetStickerSetRequest(
+                stickerset=InputStickerSetShortName(short_name=short), hash=0))
+            n = len(res.documents)
+        except Exception as exc:
+            print(f"  ! verification failed — pack not resolvable: {type(exc).__name__}")
+            return False
+        if n < len(EMOJI_MAP):
+            print(f"  ! pack resolved but only {n}/{len(EMOJI_MAP)} emoji — incomplete.")
+            return False
+        print(f"\nDONE. Pack verified ({n} emoji): https://t.me/addemoji/{short}")
         return True
     finally:
         await client.disconnect()

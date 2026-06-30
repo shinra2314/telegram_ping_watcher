@@ -9,7 +9,7 @@ if str(SRC_DIR) not in sys.path:
 
 import unittest
 
-from pulse_desk.bot.chrome import dot, empty, header, kv
+from pulse_desk.bot.chrome import bar, chip, dot, empty, header, kv
 
 
 class HeaderTests(unittest.TestCase):
@@ -53,6 +53,28 @@ class DotTests(unittest.TestCase):
 class EmptyTests(unittest.TestCase):
     def test_empty_wraps_in_box_and_italics(self):
         self.assertEqual(empty("Чеков пока нет."), "📭 __Чеков пока нет.__")
+
+
+class BarTests(unittest.TestCase):
+    def test_full(self):
+        self.assertEqual(bar(5, 5), "▰▰▰▰▰")
+
+    def test_partial_rounds(self):
+        self.assertEqual(bar(3, 5), "▰▰▰▱▱")
+
+    def test_zero_total_all_empty(self):
+        self.assertEqual(bar(0, 0), "▱▱▱▱▱")
+
+    def test_clamps_over(self):
+        self.assertEqual(bar(9, 5), "▰▰▰▰▰")
+
+    def test_custom_width(self):
+        self.assertEqual(len(bar(1, 4, width=8)), 8)
+
+
+class ChipTests(unittest.TestCase):
+    def test_wraps(self):
+        self.assertEqual(chip("розыгрыш"), "「розыгрыш」")
 
 
 if __name__ == "__main__":

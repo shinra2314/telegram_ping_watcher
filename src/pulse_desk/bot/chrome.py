@@ -38,3 +38,17 @@ def dot(status: Union[bool, str]) -> str:
 def empty(text: str) -> str:
     """Uniform empty-state line."""
     return f"📭 __{text}__"
+
+
+def bar(value: float, total: float, width: int = 5) -> str:
+    """Unicode progress bar `▰▱`. Clamps to [0, total]; total<=0 → all empty."""
+    if total <= 0:
+        return "▱" * width
+    filled = round(width * max(0.0, min(float(value), float(total))) / float(total))
+    filled = max(0, min(width, filled))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def chip(label: str) -> str:
+    """Uniform tag pill that renders on every Telegram client."""
+    return f"「{label}」"

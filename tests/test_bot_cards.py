@@ -40,6 +40,15 @@ class HomeCardTests(unittest.TestCase):
     def test_has_section_prompt(self):
         self.assertIn("Выберите раздел", self._card())
 
+    def test_accounts_signal_bar_and_urgent_flag(self):
+        out = self._card(urgent=2, accounts_online=3, accounts_total=5)
+        self.assertIn("▰", out)          # signal bar present
+        self.assertIn("Аккаунты: `3/5`", out)
+        self.assertIn("🔥", out)         # urgent>0 flagged
+
+    def test_no_fire_when_no_urgent(self):
+        self.assertNotIn("🔥", self._card(urgent=0))
+
 
 class SummaryCardTests(unittest.TestCase):
     ANALYTICS = {"total_pings": 1240, "new_pings": 12, "favorites": 8}
@@ -105,6 +114,9 @@ class PingCardTests(unittest.TestCase):
 
     def test_shows_giveaway_tag(self):
         self.assertIn("🎁", ping_card(self.PING))
+
+    def test_tags_rendered_as_chips(self):
+        self.assertIn("「🎁 розыгрыш」", ping_card(self.PING))
 
     def test_missing_text_falls_back(self):
         out = ping_card(dict(self.PING, text=None, link=None))

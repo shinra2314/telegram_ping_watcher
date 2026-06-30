@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .chrome import empty, header, kv
+from .chrome import bar, chip, empty, header, kv
 from .views import DIV, fmt_dt
 
 
@@ -24,10 +24,12 @@ def home_card(
     """Live dashboard shown on the home screen."""
     badge = "👑 владелец" if role == "admin" else "👁 просмотр"
     accounts = f"{accounts_online}/{accounts_total}"
+    urgent_cell = f"{kv('🎁', 'Срочных', urgent)}{' 🔥' if urgent else ''}"
     return "\n".join([
         header("🛰", "Pulse Desk", badge),
-        f"{kv('🆕', 'Новых пингов', new_pings)}   {kv('🎁', 'Срочных', urgent)}",
-        f"{kv('🛰', 'Аккаунты', accounts)}   {kv('💸', 'Чеки', fresh_checks)}",
+        f"{kv('🆕', 'Новых пингов', new_pings)}   {urgent_cell}",
+        f"{kv('🛰', 'Аккаунты', accounts)} {bar(accounts_online, accounts_total)}"
+        f"   {kv('💸', 'Чеки', fresh_checks)}",
         kv("🔄", "Скан", last_scan),
         DIV,
         "Выберите раздел 👇",
@@ -78,18 +80,18 @@ def feed_header(active_label: str, count: int) -> str:
 def ping_card(ping: dict) -> str:
     badge = feed_badge(ping.get("priority_label"))
     crumb = f"Домой › Мониторинг › #{ping.get('id')}"
-    tags = [f"🏷 {ping.get('priority_label') or 'normal'}"]
+    tags = [chip(f"🏷 {ping.get('priority_label') or 'normal'}")]
     if ping.get("is_giveaway"):
-        tags.append("🎁 розыгрыш")
+        tags.append(chip("🎁 розыгрыш"))
     if ping.get("is_win"):
-        tags.append("🏆 победа")
+        tags.append(chip("🏆 победа"))
     if ping.get("is_check"):
-        tags.append("💸 чек")
+        tags.append(chip("💸 чек"))
     text = (ping.get("text") or "—")[:_PING_TEXT_CAP]
     lines = [
         header(badge, f"Пинг #{ping.get('id')}", crumb),
         f"📅 `{fmt_dt(ping.get('detected_at'))}`  ·  {ping.get('chat') or '?'}",
-        "  ·  ".join(tags),
+        " ".join(tags),
         DIV,
         text,
     ]

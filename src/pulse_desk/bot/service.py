@@ -47,6 +47,7 @@ from .cards import (
     feed_badge, feed_header, giveaway_card, giveaways_header, management_card,
     member_card, members_header, home_card, ping_card, summary_card,
 )
+from .stickers import send_sticker
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
@@ -709,6 +710,7 @@ async def init_bot() -> None:
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
             role = key.get("role") or "viewer"
             await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
+            await send_sticker(bot_client, event.chat_id, "welcome")
             greeting = f"Привет, {name}!" if name else "Привет!"
             await event.respond(
                 "✅ **Доступ открыт!**\n"
@@ -770,7 +772,15 @@ async def init_bot() -> None:
             if role is None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
-            await event.respond(await render_home(role), buttons=main_menu_buttons(role))
+            home = await render_home(role)
+            banner = BOT_ASSETS_DIR / "welcome.png"
+            if banner.exists():
+                try:
+                    await event.respond(home, buttons=main_menu_buttons(role), file=str(banner))
+                    return
+                except Exception:
+                    logger.warning("menu banner failed, text fallback", exc_info=True)
+            await event.respond(home, buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern="/settings"))
         @viewer_only
@@ -853,6 +863,7 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/ping"))
         @viewer_only
         async def ping_handler(event, role):
+            await send_sticker(bot_client, event.chat_id, "pong")
             await event.respond("🏓 **Понг!** Бот на связи.")
 
         @bot_client.on(events.NewMessage(pattern="/logs"))
@@ -882,6 +893,7 @@ async def init_bot() -> None:
                 await event.respond("⏳ Сканирование уже идёт.")
                 return
             asyncio.create_task(full_history_scan())
+            await send_sticker(bot_client, event.chat_id, "scan")
             await event.respond("🔄 **Сканирование истории запущено.**")
 
         @bot_client.on(events.NewMessage(pattern="/restart"))
@@ -1477,6 +1489,7 @@ async def init_bot() -> None:
                     await event.answer("Скан уже идёт")
                 else:
                     asyncio.create_task(full_history_scan())
+                    await send_sticker(bot_client, event.chat_id, "scan")
                     await event.answer("Скан запущен")
                 return
             if data == "menu_restart":

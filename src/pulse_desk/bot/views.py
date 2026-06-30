@@ -28,7 +28,8 @@ def main_menu_buttons(role: str) -> list[list[Button]]:
         [Button.inline("🕐 Последние", b"mon:feed:all"), Button.inline("📊 Сводка", b"menu_summary")],
     ]
     if role == "admin":
-        rows.append([Button.inline("⚙️ Управление", b"adm:home")])
+        rows.append([Button.inline("⚙️ Управление", b"adm:home"),
+                     Button.inline("🔄 Скан", b"menu_scan")])
     else:
         rows.append([Button.inline("🔔 Мои уведомления", b"pf")])
     rows.append([Button.inline("❓ Помощь", b"menu_help")])

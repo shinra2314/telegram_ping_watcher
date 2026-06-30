@@ -65,6 +65,14 @@ class MainMenuButtonsTests(unittest.TestCase):
         data = {b.text: b.data for row in main_menu_buttons("admin") for b in row}
         self.assertEqual(data["⚙️ Управление"], b"adm:home")
 
+    def test_admin_has_scan_quick_button(self):
+        flat = [b for row in main_menu_buttons("admin") for b in row]
+        self.assertTrue(any(getattr(b, "data", b"") == b"menu_scan" for b in flat))
+
+    def test_viewer_has_no_scan_button(self):
+        flat = [b for row in main_menu_buttons("viewer") for b in row]
+        self.assertFalse(any(getattr(b, "data", b"") == b"menu_scan" for b in flat))
+
 
 class HelpTextTests(unittest.TestCase):
     def test_admin_help_lists_owner_commands(self):

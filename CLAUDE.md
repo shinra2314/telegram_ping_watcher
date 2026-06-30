@@ -85,6 +85,10 @@ src/pulse_desk/
   bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
   bot_service.py    — init_bot: inline menus, slash commands, access keys,
                       /access scheduled-access management
+  bot/stickers.py   — Aperture sticker registry + best-effort sender (gated by
+                      BOT_STICKERS_ENABLED). .webp set lives in
+                      assets/bot/stickers/; fired on win/giveaway/check/scan/
+                      ping/welcome. Never raises into a handler (photo fallback)
   access_control.py — Pure schedule resolution (Window/Decision, window_contains,
                       resolve_access, next_boundary). Zoneinfo/DST-aware, no I/O,
                       fully unit-tested. Source of truth for bot_role gating
@@ -140,7 +144,9 @@ static/                    — Vanilla JS frontend (no build step). PWA with ser
   bump CACHE_NAME in static/sw.js when shell assets change.
 sessions/                  — Telethon .session credential files (never commit these)
 scripts/                   — One-off tools: generate_bot_assets.py (bot branding
-                             PNGs, needs Pillow), set_bot_profile.py (upload avatar)
+                             PNGs, needs Pillow), generate_bot_stickers.py
+                             (Aperture .webp sticker set, needs Pillow + Windows
+                             colour-emoji font), set_bot_profile.py (upload avatar)
 ```
 
 ### Background jobs (always running)

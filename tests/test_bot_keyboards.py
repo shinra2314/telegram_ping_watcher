@@ -37,7 +37,7 @@ class BackHomeTests(unittest.TestCase):
         self.assertEqual(rows[0][0].text, "⬅️ Домой")
 
 
-from pulse_desk.bot.keyboards import MON_FILTERS, feed_keyboard, ping_card_keyboard
+from pulse_desk.bot.keyboards import feed_keyboard, ping_card_keyboard
 
 
 class FeedKeyboardTests(unittest.TestCase):
@@ -74,6 +74,27 @@ class FeedKeyboardTests(unittest.TestCase):
     def test_empty_feed_still_has_filter_and_footer(self):
         rows = feed_keyboard([], "all")
         self.assertEqual(len(rows), 2)  # filter row + footer
+
+    def test_no_pager_on_single_page(self):
+        datas = [b.data for row in feed_keyboard(self.ITEMS, "all") for b in row]
+        self.assertNotIn(b"mon:feed:all:2", datas)
+
+    def test_pager_next_when_more(self):
+        rows = feed_keyboard(self.ITEMS, "all", page=1, has_more=True)
+        datas = [b.data for row in rows for b in row]
+        self.assertIn(b"mon:feed:all:2", datas)
+        self.assertNotIn(b"mon:feed:all:0", datas)  # no prev on page 1
+
+    def test_pager_prev_returns_to_plain_callback_on_page_2(self):
+        rows = feed_keyboard(self.ITEMS, "check", page=2, has_more=True)
+        datas = [b.data for row in rows for b in row]
+        self.assertIn(b"mon:feed:check", datas)      # prev → page 1 plain form
+        self.assertIn(b"mon:feed:check:3", datas)    # next → page 3
+
+    def test_refresh_keeps_page(self):
+        rows = feed_keyboard(self.ITEMS, "all", page=3)
+        footer = rows[-1]
+        self.assertEqual(footer[1].data, b"mon:feed:all:3")
 
 
 class PingCardKeyboardTests(unittest.TestCase):
@@ -162,6 +183,43 @@ class ManagementKeyboardTests(unittest.TestCase):
         datas = [b.data for row in keys_keyboard() for b in row]
         self.assertIn(b"adm:newkey", datas)
         self.assertIn(b"adm:home", datas)
+
+    def test_keys_keyboard_revoke_row_per_key(self):
+        rows = keys_keyboard([(3, "#3 друзья"), (5, "#5 без метки")])
+        datas = [b.data for row in rows for b in row]
+        self.assertIn(b"key:rm:3", datas)
+        self.assertIn(b"key:rm:5", datas)
+        self.assertIn(b"adm:newkey", datas)
+
+
+from pulse_desk.bot.keyboards import logs_keyboard, restart_confirm_keyboard, scan_panel_keyboard
+
+
+class ScanPanelKeyboardTests(unittest.TestCase):
+    def test_idle_has_start_button(self):
+        datas = [b.data for row in scan_panel_keyboard(running=False) for b in row]
+        self.assertIn(b"scan:start", datas)
+        self.assertIn(b"menu_scan", datas)   # refresh
+        self.assertIn(b"adm:home", datas)    # back to hub
+
+    def test_running_hides_start(self):
+        datas = [b.data for row in scan_panel_keyboard(running=True) for b in row]
+        self.assertNotIn(b"scan:start", datas)
+        self.assertIn(b"menu_scan", datas)
+
+
+class RestartConfirmKeyboardTests(unittest.TestCase):
+    def test_confirm_and_cancel(self):
+        datas = [b.data for row in restart_confirm_keyboard() for b in row]
+        self.assertIn(b"adm:restart:go", datas)
+        self.assertIn(b"adm:home", datas)
+
+
+class LogsKeyboardTests(unittest.TestCase):
+    def test_back_and_refresh(self):
+        datas = [b.data for row in logs_keyboard() for b in row]
+        self.assertIn(b"adm:home", datas)
+        self.assertIn(b"menu_logs", datas)
 
 
 if __name__ == "__main__":

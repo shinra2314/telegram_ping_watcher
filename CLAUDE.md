@@ -87,8 +87,9 @@ src/pulse_desk/
                       /access scheduled-access management
   bot/stickers.py   — Aperture sticker registry + best-effort sender (gated by
                       BOT_STICKERS_ENABLED). .webp set lives in
-                      assets/bot/stickers/; fired on win/giveaway/check/scan/
-                      ping/welcome. Never raises into a handler (photo fallback)
+                      assets/bot/stickers/. NOT auto-fired anywhere (sticker
+                      spam removed 2026-07) — module kept for manual/opt-in use.
+                      Never raises into a handler (photo fallback)
   bot/emoji.py      — Custom-emoji rendering: resolve a @Stickers pack
                       (BOT_CUSTOM_EMOJI_SET) to {emoji: document_id}, inject
                       MessageEntityCustomEmoji into card text (UTF-16 offsets).

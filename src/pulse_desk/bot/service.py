@@ -40,14 +40,15 @@ from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, fmt_dt, help_text, main_menu_buttons
 from .keyboards import (
     MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
-    giveaway_feed_keyboard, keys_keyboard, management_grid, member_access_keyboard,
-    member_card_keyboard, members_list_keyboard, ping_card_keyboard, section_nav,
+    giveaway_feed_keyboard, keys_keyboard, logs_keyboard, management_grid,
+    member_access_keyboard, member_card_keyboard, members_list_keyboard,
+    ping_card_keyboard, restart_confirm_keyboard, scan_panel_keyboard, section_nav,
 )
 from .cards import (
-    feed_badge, feed_header, giveaway_card, giveaways_header, management_card,
-    member_card, members_header, home_card, ping_card, summary_card,
+    feed_badge, feed_header, giveaway_card, giveaways_header, keys_card,
+    management_card, member_card, members_header, home_card, ping_card,
+    restart_confirm_card, scan_card, summary_card,
 )
-from .stickers import send_sticker
 from .emoji import enrich, resolve_custom_emoji_map
 
 
@@ -310,6 +311,21 @@ async def init_bot() -> None:
         async def render_management():
             return management_card(), management_grid()
 
+        def render_scan_panel():
+            last_scan = fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
+            if state.last_scan_status:
+                last_scan = f"{last_scan} · {state.last_scan_status}"
+            running = state.scan_lock.locked()
+            status = dict(state.scan_status)
+            status["running"] = running
+            return scan_card(status, last_scan), scan_panel_keyboard(running)
+
+        def start_scan_if_idle() -> bool:
+            if state.scan_lock.locked():
+                return False
+            asyncio.create_task(full_history_scan())
+            return True
+
         async def render_members():
             members = await list_bot_members()
             items = []
@@ -395,17 +411,26 @@ async def init_bot() -> None:
             return summary_card(analytics=analytics, market=market, system=system)
 
         FEED_LABELS = dict(MON_FILTERS)
+        FEED_PAGE_SIZE = 8
 
-        async def render_feed(active: str = "all"):
+        async def render_feed(active: str = "all", page: int = 1):
             if active not in FEED_LABELS:
                 active = "all"
-            rows = await get_pings(limit=8, chat_type=active)
+            page = max(1, page)
+            # Fetch one extra row to know whether an older page exists.
+            rows = await get_pings(
+                limit=FEED_PAGE_SIZE + 1,
+                offset=(page - 1) * FEED_PAGE_SIZE,
+                chat_type=active,
+            )
+            has_more = len(rows) > FEED_PAGE_SIZE
+            rows = rows[:FEED_PAGE_SIZE]
             items = []
             for r in rows:
                 hhmm = fmt_dt(r.get("detected_at"))[-5:]
                 label = f"{feed_badge(r.get('priority_label'))} {hhmm} {r.get('chat') or '?'}"
                 items.append((int(r["id"]), label[:48]))
-            return feed_header(FEED_LABELS[active], len(rows)), feed_keyboard(items, active)
+            return feed_header(FEED_LABELS[active], len(rows)), feed_keyboard(items, active, page, has_more)
 
         async def open_ping_view(ping_id: int, is_admin: bool):
             ping = await get_ping_by_id(ping_id)
@@ -413,15 +438,13 @@ async def init_bot() -> None:
                 return None
             return ping_card(ping), ping_card_keyboard(ping_id, is_admin)
 
-        async def render_keys_text() -> str:
+        async def render_keys():
             keys = await list_bot_keys()
-            if not keys:
-                return "🔑 **Ключи доступа**\n" + DIV + "\n📭 __Ключей нет.__\nСоздайте: `/newkey метка`"
-            lines = ["🔑 **Ключи доступа**", DIV]
-            for k in keys:
-                exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
-                lines.append(f"`#{k['id']}` · {k.get('label') or '—'}\n   👥 {k.get('member_count', 0)} · ⏳ {exp}")
-            return "\n".join(lines)
+            items = [
+                (int(k["id"]), f"#{k['id']} {k.get('label') or 'без метки'}"[:40])
+                for k in keys
+            ]
+            return keys_card(keys), keys_keyboard(items)
 
         # ---- settings menus (admin) + personal prefs (members) -------------
         PENDING_TTL_SECONDS = 300
@@ -737,7 +760,6 @@ async def init_bot() -> None:
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
             role = key.get("role") or "viewer"
             await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
-            await send_sticker(bot_client, event.chat_id, "welcome")
             greeting = f"Привет, {name}!" if name else "Привет!"
             await event.respond(
                 "✅ **Доступ открыт!**\n"
@@ -891,7 +913,6 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/ping"))
         @viewer_only
         async def ping_handler(event, role):
-            await send_sticker(bot_client, event.chat_id, "pong")
             await event.respond("🏓 **Понг!** Бот на связи.")
 
         @bot_client.on(events.NewMessage(pattern="/logs"))
@@ -903,7 +924,10 @@ async def init_bot() -> None:
                 await event.respond("Логов пока нет.")
                 return
             lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
-            await event.respond("📜 **Последние логи**\n" + DIV + "\n```\n" + "\n".join(lines)[-3500:] + "\n```")
+            await event.respond(
+                "📜 **Последние логи**\n" + DIV + "\n```\n" + "\n".join(lines)[-3500:] + "\n```",
+                buttons=logs_keyboard(),
+            )
 
         @bot_client.on(events.NewMessage(pattern="/export"))
         @safe
@@ -917,12 +941,10 @@ async def init_bot() -> None:
         async def scan_handler(event):
             if await deny_non_admin(event):
                 return
-            if state.scan_lock.locked():
-                await event.respond("⏳ Сканирование уже идёт.")
-                return
-            asyncio.create_task(full_history_scan())
-            await send_sticker(bot_client, event.chat_id, "scan")
-            await event.respond("🔄 **Сканирование истории запущено.**")
+            started = start_scan_if_idle()
+            note = "🔄 **Сканирование запущено.**" if started else "⏳ Сканирование уже идёт."
+            text, kb = render_scan_panel()
+            await event.respond(f"{note}\n\n{text}", buttons=kb)
 
         @bot_client.on(events.NewMessage(pattern="/restart"))
         @safe
@@ -959,17 +981,8 @@ async def init_bot() -> None:
         async def keys_handler(event):
             if await deny_non_admin(event):
                 return
-            keys = await list_bot_keys()
-            if not keys:
-                await event.respond("🔑 **Ключи доступа**\n" + DIV + "\n📭 __Ключей нет.__\nСоздайте: `/newkey метка`")
-                return
-            await event.respond(f"🔑 **Ключи доступа** · `{len(keys)}`")
-            for k in keys:
-                exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
-                await event.respond(
-                    f"`#{k['id']}` · **{k.get('label') or '—'}**\n👥 {k.get('member_count', 0)}  ·  ⏳ {exp}",
-                    buttons=[[Button.inline("🗑 Отозвать", f"revokekey_{k['id']}".encode())]],
-                )
+            text, kb = await render_keys()
+            await event.respond(text, buttons=kb)
 
         @bot_client.on(events.NewMessage(pattern=r"/members(?:\s+(.+))?"))
         @safe
@@ -985,33 +998,17 @@ async def init_bot() -> None:
                     or query in (m.get("name") or "").lower()
                     or query == str(m.get("tg_id"))
                 ]
-            if not members:
-                note = f"🔎 По запросу «{query}» никого." if query else "📭 __Пока никого.__"
-                await event.respond("👥 **Пользователи**\n" + DIV + "\n" + note, buttons=main_menu_buttons("admin"))
-                return
-            header = f"👥 **Пользователи** · `{len(members)}`"
-            if query:
-                header += f"  ·  🔎 «{query}»"
-            await event.respond(header + f"\n{DIV}\n_Подсказка: поиск — `/members <имя|@ник|id>`_")
+            items = []
             for m in members:
-                uname = f"@{m['tg_username']}" if m.get("tg_username") else "—"
-                badge = "🚫 заблокирован" if m.get("blocked") else "🟢 активен"
-                seen = fmt_dt(m.get("last_seen_at"))
-                if m.get("blocked"):
-                    btn = Button.inline("✅ Разблокировать", f"unblockmember_{m['tg_id']}".encode())
-                else:
-                    btn = Button.inline("🚫 Заблокировать", f"blockmember_{m['tg_id']}".encode())
-                await event.respond(
-                    f"👤 **{m.get('name') or '—'}** ({uname})\n🔑 {m.get('key_label') or '—'}  ·  {badge}\n🕐 {seen}",
-                    buttons=[
-                        [btn],
-                        [
-                            Button.inline("⏰ Доступ", f"accshow_{m['tg_id']}".encode()),
-                            Button.inline("🔴 Выкл", f"accoff_{m['tg_id']}".encode()),
-                            Button.inline("🟢 Вкл", f"accon_{m['tg_id']}".encode()),
-                        ],
-                    ],
-                )
+                tg = int(m["tg_id"])
+                uname = f"@{m['tg_username']}" if m.get("tg_username") else ""
+                dot_ = "🚫" if m.get("blocked") else "🟢"
+                label = f"{dot_} {m.get('name') or tg} {uname}".strip()
+                items.append((tg, label[:48]))
+            text = members_header(len(members))
+            if query:
+                text += f"\n🔎 Фильтр: «{query}»"
+            await event.respond(text, buttons=members_list_keyboard(items))
 
         # ---- scheduled access management (owner only) ----------------------
         async def _resolve_member_arg(query: str) -> Optional[dict]:
@@ -1278,7 +1275,11 @@ async def init_bot() -> None:
             if ":" in data:
                 seg = data.split(":")
                 if seg[0] == "mon" and len(seg) >= 2 and seg[1] == "feed":
-                    text, kb = await render_feed(seg[2] if len(seg) > 2 else "all")
+                    try:
+                        page = int(seg[3]) if len(seg) > 3 else 1
+                    except ValueError:
+                        page = 1
+                    text, kb = await render_feed(seg[2] if len(seg) > 2 else "all", page)
                     await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
                 if seg[0] == "mon" and len(seg) >= 3 and seg[1] == "open":
@@ -1327,9 +1328,38 @@ async def init_bot() -> None:
                     text, kb = res
                     await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
+                if seg[0] in ("scan", "key"):
+                    if role != "admin":
+                        await event.answer("Только владелец", alert=True)
+                        return
+                    if seg[0] == "scan" and seg[1] == "start":
+                        started = start_scan_if_idle()
+                        await event.answer("🔄 Скан запущен" if started else "Скан уже идёт")
+                        text, kb = render_scan_panel()
+                        await safe_edit(event, text, buttons=kb)
+                        return
+                    if seg[0] == "key" and seg[1] == "rm" and len(seg) >= 3:
+                        try:
+                            key_id = int(seg[2])
+                        except ValueError:
+                            await event.answer("Некорректная команда", alert=True)
+                            return
+                        await revoke_bot_key(key_id)
+                        await event.answer("Ключ отозван")
+                        text, kb = await render_keys()
+                        await safe_edit(event, text, buttons=kb)
+                        return
+                    await event.answer("Неизвестная команда", alert=True)
+                    return
                 if seg[0] in ("adm", "mem", "acc"):
                     if role != "admin":
                         await event.answer("Только владелец", alert=True)
+                        return
+                    if seg[0] == "adm" and seg[1] == "restart":
+                        result = await restart_monitoring()
+                        await event.answer(f"♻️ Перезапущено аккаунтов: {result.get('restarted', 0)}", alert=True)
+                        text, kb = await render_management()
+                        await safe_edit(event, text, buttons=kb)
                         return
                     if seg[0] == "adm" and seg[1] == "home":
                         text, kb = await render_management()
@@ -1510,26 +1540,26 @@ async def init_bot() -> None:
                     return
 
             if data == "menu_keys":
-                await safe_edit(event, await render_keys_text(), buttons=keys_keyboard())
+                text, kb = await render_keys()
+                await safe_edit(event, text, buttons=kb)
                 return
             if data == "menu_scan":
-                if state.scan_lock.locked():
-                    await event.answer("Скан уже идёт")
-                else:
-                    asyncio.create_task(full_history_scan())
-                    await send_sticker(bot_client, event.chat_id, "scan")
-                    await event.answer("Скан запущен")
+                text, kb = render_scan_panel()
+                await safe_edit(event, text, buttons=kb)
                 return
             if data == "menu_restart":
-                result = await restart_monitoring()
-                await event.answer(f"♻️ Перезапуск: {result.get('restarted', 0)} аккаунт(ов)", alert=True)
+                await safe_edit(event, restart_confirm_card(), buttons=restart_confirm_keyboard())
                 return
             if data == "menu_logs":
                 if not LOG_FILE.exists():
                     await event.answer("Логов нет")
                     return
                 lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
-                await safe_edit(event, "**Последние логи:**\n\n`" + "\n".join(lines)[-3500:] + "`", buttons=main_menu_buttons(role))
+                await safe_edit(
+                    event,
+                    "📜 **Последние логи**\n" + DIV + "\n```\n" + "\n".join(lines)[-3500:] + "\n```",
+                    buttons=logs_keyboard(),
+                )
                 return
             if data.startswith("revokekey_"):
                 key_id = _cb_id(data)
@@ -1538,7 +1568,8 @@ async def init_bot() -> None:
                     return
                 await revoke_bot_key(key_id)
                 await event.answer("Ключ отозван")
-                await safe_edit(event, await render_keys_text(), buttons=main_menu_buttons(role))
+                text, kb = await render_keys()
+                await safe_edit(event, text, buttons=kb)
                 return
             if data.startswith("blockmember_"):
                 member_id = _cb_id(data)

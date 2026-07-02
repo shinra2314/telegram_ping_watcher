@@ -193,5 +193,58 @@ class MemberCardTests(unittest.TestCase):
         self.assertIn("закрыт", out)
 
 
+from pulse_desk.bot.cards import keys_card, restart_confirm_card, scan_card
+
+
+class ScanCardTests(unittest.TestCase):
+    def test_idle_shows_last_scan(self):
+        out = scan_card({"running": False, "last_error": None}, "06-26 14:02 · ok")
+        self.assertIn("**СКАН**", out)
+        self.assertIn("не запущен", out)
+        self.assertIn("06-26 14:02 · ok", out)
+
+    def test_idle_shows_error_if_any(self):
+        out = scan_card({"running": False, "last_error": "FloodWait"}, "—")
+        self.assertIn("FloodWait", out)
+
+    def test_running_shows_progress_and_current(self):
+        status = {
+            "running": True, "processed_accounts": 1, "total_accounts": 2,
+            "current_channel": "@chan", "found": 7,
+        }
+        out = scan_card(status, "—")
+        self.assertIn("Идёт сканирование", out)
+        self.assertIn("`1/2`", out)
+        self.assertIn("@chan", out)
+        self.assertIn("Найдено: `7`", out)
+        self.assertIn("▰", out)
+
+
+class RestartConfirmCardTests(unittest.TestCase):
+    def test_asks_for_confirmation(self):
+        out = restart_confirm_card()
+        self.assertIn("**ПЕРЕЗАПУСК**", out)
+        self.assertIn("?", out)
+
+
+class KeysCardTests(unittest.TestCase):
+    def test_empty_state(self):
+        out = keys_card([])
+        self.assertIn("**КЛЮЧИ ДОСТУПА**", out)
+        self.assertIn("📭", out)
+
+    def test_lists_keys_with_member_count_and_expiry(self):
+        keys = [
+            {"id": 3, "label": "друзья", "member_count": 2, "expires_at": None},
+            {"id": 5, "label": "", "member_count": 0, "expires_at": "2026-07-10T00:00:00"},
+        ]
+        out = keys_card(keys)
+        self.assertIn("#3", out)
+        self.assertIn("друзья", out)
+        self.assertIn("👥 2", out)
+        self.assertIn("бессрочно", out)
+        self.assertIn("07-10 00:00", out)
+
+
 if __name__ == "__main__":
     unittest.main()

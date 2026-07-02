@@ -129,6 +129,46 @@ def management_card() -> str:
     return header("⚙️", "Управление", "Домой › Управление") + "\nВыберите раздел 👇"
 
 
+def scan_card(status: dict, last_scan: str) -> str:
+    """Scan control panel: live progress while running, last result when idle."""
+    running = bool(status.get("running"))
+    out = [header("🔄", "Скан", "Домой › Управление › Скан")]
+    if running:
+        done = int(status.get("processed_accounts") or 0)
+        total = int(status.get("total_accounts") or 0)
+        out.append(f"🟡 **Идёт сканирование** {bar(done, total)} `{done}/{total}`")
+        current = status.get("current_channel") or status.get("current_account")
+        if current:
+            out.append(kv("📡", "Сейчас", current))
+        out.append(kv("🆕", "Найдено", status.get("found") or 0))
+    else:
+        out.append("⚪️ Скан не запущен.")
+        out.append(kv("🕐", "Последний", last_scan))
+        if status.get("last_error"):
+            out.append(kv("⚠️", "Ошибка", status["last_error"]))
+    return "\n".join(out)
+
+
+def restart_confirm_card() -> str:
+    return "\n".join([
+        header("♻️", "Перезапуск", "Домой › Управление › Рестарт"),
+        "Переподключить все аккаунты мониторинга?",
+        "__Активный скан будет прерван.__",
+    ])
+
+
+def keys_card(keys: list[dict]) -> str:
+    """Keys panel text; the revoke buttons live in `keys_keyboard`."""
+    out = [header("🔑", "Ключи доступа", "Домой › Управление › Ключи")]
+    if not keys:
+        out.append(empty("Ключей нет — создайте кнопкой ниже."))
+        return "\n".join(out)
+    for k in keys:
+        exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
+        out.append(f"`#{k['id']}` **{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}")
+    return "\n".join(out)
+
+
 def members_header(count: int) -> str:
     out = header("👥", "Люди", "Домой › Управление › Люди")
     if count == 0:

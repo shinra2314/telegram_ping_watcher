@@ -21,8 +21,18 @@ def back_home() -> list[list[Button]]:
 MON_FILTERS = [("all", "Все"), ("important", "Важные"), ("check", "Чеки"), ("win", "Победы")]
 
 
-def feed_keyboard(items: list[tuple[int, str]], active: str) -> list[list[Button]]:
-    """Monitoring feed: one row per ping, a filter row, then home/refresh."""
+def _feed_cb(active: str, page: int) -> bytes:
+    """`mon:feed:<filter>` for page 1, `mon:feed:<filter>:<page>` deeper."""
+    return (f"mon:feed:{active}" if page <= 1 else f"mon:feed:{active}:{page}").encode()
+
+
+def feed_keyboard(
+    items: list[tuple[int, str]],
+    active: str,
+    page: int = 1,
+    has_more: bool = False,
+) -> list[list[Button]]:
+    """Monitoring feed: one row per ping, filters, optional pager, home/refresh."""
     rows: list[list[Button]] = [
         [Button.inline(label, f"mon:open:{pid}".encode())] for pid, label in items
     ]
@@ -31,9 +41,17 @@ def feed_keyboard(items: list[tuple[int, str]], active: str) -> list[list[Button
         for code, lbl in MON_FILTERS
     ]
     rows.append(filt)
+    if page > 1 or has_more:
+        pager: list[Button] = []
+        if page > 1:
+            pager.append(Button.inline("◀️ Новее", _feed_cb(active, page - 1)))
+        pager.append(Button.inline(f"· {page} ·", b"noop"))
+        if has_more:
+            pager.append(Button.inline("Старее ▶️", _feed_cb(active, page + 1)))
+        rows.append(pager)
     rows.append([
         Button.inline("⬅️ Домой", b"menu_main"),
-        Button.inline("🔄 Обновить", f"mon:feed:{active}".encode()),
+        Button.inline("🔄 Обновить", _feed_cb(active, page)),
     ])
     return rows
 
@@ -118,8 +136,32 @@ def member_access_keyboard(tg: int) -> list[list[Button]]:
     ]
 
 
-def keys_keyboard() -> list[list[Button]]:
-    return [
-        [Button.inline("➕ Создать ключ", b"adm:newkey")],
-        [Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")],
+def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
+    """Keys panel: one revoke row per key, then create + nav."""
+    rows: list[list[Button]] = [
+        [Button.inline(f"🗑 {label}", f"key:rm:{kid}".encode())] for kid, label in items
     ]
+    rows.append([Button.inline("➕ Создать ключ", b"adm:newkey")])
+    rows.append([Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")])
+    return rows
+
+
+def scan_panel_keyboard(running: bool) -> list[list[Button]]:
+    """Scan panel: start when idle, live refresh while running."""
+    rows: list[list[Button]] = []
+    if not running:
+        rows.append([Button.inline("▶️ Запустить скан", b"scan:start")])
+    rows.append([Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_scan")])
+    return rows
+
+
+def restart_confirm_keyboard() -> list[list[Button]]:
+    """Two-step restart: explicit confirm or bail back to the hub."""
+    return [
+        [Button.inline("✅ Да, перезапустить", b"adm:restart:go")],
+        [Button.inline("✖️ Отмена", b"adm:home")],
+    ]
+
+
+def logs_keyboard() -> list[list[Button]]:
+    return [[Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_logs")]]

@@ -8,7 +8,6 @@ from typing import Any, Optional
 from telethon import Button
 
 from .app_ctx import ADMIN_ID, BASE_DIR, CHECK_NOTIFY_TARGET, logger, state
-from .bot.stickers import send_sticker
 from .bot_prefs import filter_broadcast_members, notification_type_of
 from .common import flood_wait_seconds, record_app_event
 from .watch_settings import is_quiet_time, load_notification_settings, notification_matches, should_throttle_notification
@@ -187,7 +186,6 @@ async def send_check_notification(record: dict[str, Any], ping_id: Optional[int]
         if not target:
             logger.error("No check notify target configured (CHECK_NOTIFY_TARGET / ADMIN_ID)")
             return
-        await send_sticker(state.bot_client, _resolve_peer(target), "check")
         sent = await _send_bot_message(target, msg, buttons=buttons, file=header_image)
         if not sent:
             logger.error("Failed to send check notification to %s after retries", target)
@@ -252,13 +250,6 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
             token = secrets_module.token_hex(4)
             await save_broadcast_messages(token, delivered)
             buttons.append([Button.inline(f"🙈 Скрыть у друзей ({len(delivered)})", data=f"hidebc_{token}")])
-        # Lead big moments with an on-brand sticker — admin only, so friends are
-        # not spammed (the member broadcast above stays sticker-free).
-        if ADMIN_ID:
-            if record.get("is_win"):
-                await send_sticker(state.bot_client, _resolve_peer(ADMIN_ID), "win")
-            elif record.get("is_giveaway") and record.get("priority_label") in ("critical", "high"):
-                await send_sticker(state.bot_client, _resolve_peer(ADMIN_ID), "giveaway")
         sent = await send_admin_bot_message(msg, buttons=buttons, file=header_image)
         if not sent:
             logger.error("Failed to send bot notification after retries")

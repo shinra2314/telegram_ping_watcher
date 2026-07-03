@@ -38,6 +38,20 @@ def check_is_check(text: str) -> bool:
     )
 
 
+def classify_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Set is_win / is_giveaway; both require a tracked-username mention.
+
+    Mention-less records exist only via the check-capture path
+    (require_mentions=False), so a channel check announcing someone else's
+    win ("Победители: @stranger") must not land on the giveaway board.
+    """
+    mentions_me = bool(record.get("mentions"))
+    text = record.get("text") or ""
+    record["is_win"] = mentions_me and check_is_win(text)
+    record["is_giveaway"] = mentions_me and check_is_giveaway(text, record.get("chat_type") or "")
+    return record
+
+
 def check_is_fresh(record: dict[str, Any]) -> bool:
     """True if the check's Telegram message date is within the freshness window.
 
@@ -368,8 +382,7 @@ async def process_ping_message(
     record["chat_type"] = chat_type
     record["detected_at"] = now_iso()
     record["is_check"] = is_check
-    record["is_win"] = check_is_win(record["text"])
-    record["is_giveaway"] = check_is_giveaway(record["text"], record["chat_type"])
+    classify_record(record)
     apply_giveaway_state(record)
     await apply_deadline_metadata(client, record, getattr(message, "chat_id", None))
     record["auto_joined"] = False

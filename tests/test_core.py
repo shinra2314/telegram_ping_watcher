@@ -920,6 +920,152 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale["deadline_at"], None)
         self.assertEqual(private["is_giveaway"], 0)
 
+    async def test_reconcile_win_flags_requires_mentions(self):
+        no_mention = await database.save_ping({
+            "date": "2026-07-04T16:37:00",
+            "chat": "Foreign Wins Channel",
+            "chat_id": 401,
+            "sender": "Channel",
+            "sender_id": 401,
+            "message_id": 401,
+            "mentions": [],
+            "link": "https://t.me/test/401",
+            "text": "Чек на сумму 3 USDT, заберите приз",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T16:37:32",
+            "is_giveaway": False,
+            "is_win": False,
+            "is_check": True,
+        })
+        mentioned = await database.save_ping({
+            "date": "2026-07-04T16:38:00",
+            "chat": "My Win Channel",
+            "chat_id": 402,
+            "sender": "Channel",
+            "sender_id": 402,
+            "message_id": 402,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/test/402",
+            "text": "@Alpha, заберите приз",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T16:38:32",
+            "is_giveaway": False,
+            "is_win": False,
+        })
+        stale_win = await database.save_ping({
+            "date": "2026-07-04T16:39:00",
+            "chat": "Foreign Wins Channel",
+            "chat_id": 401,
+            "sender": "Channel",
+            "sender_id": 401,
+            "message_id": 403,
+            "mentions": [],
+            "link": "https://t.me/test/403",
+            "text": "Заберите приз, победители!",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T22:34:49",
+            "is_giveaway": False,
+            "is_win": True,
+            "priority_score": 90,
+            "action_status": "claim_prize",
+        })
+        result = await database.reconcile_win_flags(["приз"])
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["disabled"], 1)
+        self.assertEqual((await database.get_ping_by_id(no_mention))["is_win"], 0)
+        flagged = await database.get_ping_by_id(mentioned)
+        self.assertEqual(flagged["is_win"], 1)
+        self.assertEqual(flagged["action_status"], "claim_prize")
+        healed = await database.get_ping_by_id(stale_win)
+        self.assertEqual(healed["is_win"], 0)
+        self.assertEqual(healed["priority_score"], 55)
+
+    async def test_reconcile_giveaway_flags_requires_mentions(self):
+        no_mention = await database.save_ping({
+            "date": "2026-07-04T16:37:00",
+            "chat": "Foreign Giveaway Channel",
+            "chat_id": 405,
+            "sender": "Channel",
+            "sender_id": 405,
+            "message_id": 405,
+            "mentions": [],
+            "link": "https://t.me/test/405",
+            "text": "Розыгрыш для подписчиков, итоги завтра",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T16:37:32",
+            "is_giveaway": False,
+            "is_win": False,
+        })
+        stale_giveaway = await database.save_ping({
+            "date": "2026-07-04T16:38:00",
+            "chat": "Foreign Giveaway Channel",
+            "chat_id": 405,
+            "sender": "Channel",
+            "sender_id": 405,
+            "message_id": 406,
+            "mentions": [],
+            "link": "https://t.me/test/406",
+            "text": "Розыгрыш для подписчиков, итоги завтра",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T22:34:49",
+            "is_giveaway": True,
+            "is_win": False,
+            "giveaway_status": "pending",
+            "action_status": "waiting_result",
+            "deadline_at": "2026-07-06T18:00:00",
+            "deadline_source": "channel_post_text",
+            "deadline_text": "итоги завтра",
+        })
+        mentioned = await database.save_ping({
+            "date": "2026-07-04T16:39:00",
+            "chat": "My Giveaway Channel",
+            "chat_id": 407,
+            "sender": "Channel",
+            "sender_id": 407,
+            "message_id": 407,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/test/407",
+            "text": "Розыгрыш для подписчиков, итоги завтра",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T16:39:32",
+            "is_giveaway": False,
+            "is_win": False,
+        })
+        result = await database.reconcile_giveaway_flags(["розыгрыш"])
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["disabled"], 1)
+        self.assertEqual((await database.get_ping_by_id(no_mention))["is_giveaway"], 0)
+        healed = await database.get_ping_by_id(stale_giveaway)
+        self.assertEqual(healed["is_giveaway"], 0)
+        self.assertEqual(healed["giveaway_status"], "")
+        self.assertEqual(healed["deadline_at"], None)
+        flagged = await database.get_ping_by_id(mentioned)
+        self.assertEqual(flagged["is_giveaway"], 1)
+        self.assertEqual(flagged["giveaway_status"], "pending")
+
+    async def test_reconcile_outcomes_require_mentions(self):
+        foreign = await database.save_ping({
+            "date": "2026-07-04T16:37:00",
+            "chat": "Foreign Results Channel",
+            "chat_id": 408,
+            "sender": "Channel",
+            "sender_id": 408,
+            "message_id": 408,
+            "mentions": [],
+            "link": "https://t.me/test/408",
+            "text": "🎉 Результаты розыгрыша:\nПобедители, у вас есть сутки, чтобы получить приз",
+            "chat_type": "channel",
+            "detected_at": "2026-07-04T16:37:32",
+            "is_giveaway": True,
+            "is_win": False,
+            "action_status": "waiting_result",
+        })
+        result = await database.reconcile_giveaway_outcomes()
+        self.assertEqual(result["marked"], 0)
+        row = await database.get_ping_by_id(foreign)
+        self.assertEqual(row["is_win"], 0)
+        self.assertEqual(row["action_status"], "waiting_result")
+
     async def test_update_channel_deadlines_does_not_overwrite_existing_deadline(self):
         existing_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",

@@ -24,11 +24,17 @@ def _matches_strict_giveaway_rule(text: str, chat_type: str, keywords: Sequence[
 
 
 async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
+    """Promote giveaway result posts to prize claims.
+
+    Wins require a tracked-username mention (same invariant as
+    ping_pipeline.classify_record): a channel announcing someone else's
+    win must not become a claim_prize task.
+    """
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, is_win, action_status, giveaway_status, priority_score, deadline_source
+            SELECT id, text, is_win, action_status, giveaway_status, priority_score, deadline_source, mentions
             FROM pings
             WHERE is_giveaway = 1
             ORDER BY id DESC
@@ -39,6 +45,8 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
 
     marked = 0
     for row in rows:
+        if not _parse_mentions(row["mentions"]):
+            continue
         if not is_giveaway_outcome_text(row["text"] or ""):
             continue
         resolution = giveaway_outcome_resolution(row["text"] or "")
@@ -84,6 +92,12 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
 
 
 async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -> dict[str, int]:
+    """Align stored win flags with the win-keyword rule.
+
+    Wins require a tracked-username mention (same invariant as
+    ping_pipeline.classify_record); mention-less rows flagged by older
+    builds are disabled here.
+    """
     enabled = 0
     disabled = 0
     final_statuses = {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"}
@@ -93,7 +107,7 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, chat_type, is_win, is_giveaway, action_status, giveaway_status, priority_score
+            SELECT id, text, chat_type, is_win, is_giveaway, action_status, giveaway_status, priority_score, mentions
             FROM pings
             ORDER BY id DESC
             LIMIT ?
@@ -102,7 +116,7 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
         )).fetchall()
 
         for row in rows:
-            should_be_win = is_win_text(row["text"] or "", win_keywords)
+            should_be_win = bool(_parse_mentions(row["mentions"])) and is_win_text(row["text"] or "", win_keywords)
             current = bool(row["is_win"])
             if should_be_win == current:
                 continue
@@ -158,7 +172,12 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
 
 
 async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) -> dict[str, int]:
-    """Align stored rows with the channel+keyword giveaway rule used for new scans."""
+    """Align stored rows with the channel+keyword giveaway rule used for new scans.
+
+    Giveaways require a tracked-username mention (same invariant as
+    ping_pipeline.classify_record); mention-less rows flagged by older
+    builds are disabled here.
+    """
     enabled = 0
     disabled = 0
     enable_updates: list[tuple[Any, ...]] = []
@@ -169,7 +188,7 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, chat_type, is_giveaway, is_win, priority_score, action_status, deadline_source
+            SELECT id, text, chat_type, is_giveaway, is_win, priority_score, action_status, deadline_source, mentions
             FROM pings
             ORDER BY id DESC
             LIMIT ?
@@ -178,7 +197,7 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
         )).fetchall()
 
         for row in rows:
-            should_be_giveaway = _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
+            should_be_giveaway = bool(_parse_mentions(row["mentions"])) and _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
             is_giveaway = bool(row["is_giveaway"])
             if should_be_giveaway == is_giveaway:
                 continue

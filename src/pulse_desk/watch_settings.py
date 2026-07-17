@@ -61,6 +61,7 @@ def bootstrap_state() -> None:
 
 
 def default_notification_settings() -> dict[str, Any]:
+    mode = str(settings.broadcast_moderation_mode or "auto").strip().lower()
     return {
         "enabled": True,
         "usernames": [],
@@ -70,6 +71,8 @@ def default_notification_settings() -> dict[str, Any]:
         "cooldown_seconds": 120,
         "include_giveaways": True,
         "include_wins": True,
+        "moderation_mode": mode if mode in {"auto", "moderated"} else "auto",
+        "approval_timeout_seconds": _as_int(settings.broadcast_approval_timeout_seconds, 300, 30, 3600),
     }
 
 
@@ -80,6 +83,9 @@ async def load_notification_settings() -> dict[str, Any]:
     defaults = default_notification_settings()
     if isinstance(saved, dict):
         defaults.update(saved)
+    if defaults.get("moderation_mode") not in ("auto", "moderated"):
+        defaults["moderation_mode"] = "auto"
+    defaults["approval_timeout_seconds"] = _as_int(defaults.get("approval_timeout_seconds"), 300, 30, 3600)
     return defaults
 
 

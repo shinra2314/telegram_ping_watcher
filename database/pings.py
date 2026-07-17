@@ -428,20 +428,43 @@ async def update_ping_deadline(
 
 
 async def delete_ping(chat_id: int, message_id: int) -> None:
+    """Win/giveaway pings survive channel deletion as soft-deleted rows
+    (deleted_at) so they stay visible on the giveaways board."""
     async with _connect() as db:
-        rows = await (await db.execute("SELECT id FROM pings WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))).fetchall()
+        await db.execute(
+            "UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE chat_id = ? AND message_id = ? AND (is_win = 1 OR is_giveaway = 1)",
+            (_now_iso(), chat_id, message_id),
+        )
+        rows = await (await db.execute(
+            "SELECT id FROM pings WHERE chat_id = ? AND message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            (chat_id, message_id),
+        )).fetchall()
         for row in rows:
             await db.execute("DELETE FROM pings_fts WHERE rowid = ?", (row[0],))
-        await db.execute("DELETE FROM pings WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))
+        await db.execute(
+            "DELETE FROM pings WHERE chat_id = ? AND message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            (chat_id, message_id),
+        )
         await db.commit()
 
 
 async def delete_ping_by_message_id(message_id: int) -> None:
+    """See delete_ping: win/giveaway rows are soft-deleted, the rest removed."""
     async with _connect() as db:
-        rows = await (await db.execute("SELECT id FROM pings WHERE message_id = ?", (message_id,))).fetchall()
+        await db.execute(
+            "UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE message_id = ? AND (is_win = 1 OR is_giveaway = 1)",
+            (_now_iso(), message_id),
+        )
+        rows = await (await db.execute(
+            "SELECT id FROM pings WHERE message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            (message_id,),
+        )).fetchall()
         for row in rows:
             await db.execute("DELETE FROM pings_fts WHERE rowid = ?", (row[0],))
-        await db.execute("DELETE FROM pings WHERE message_id = ?", (message_id,))
+        await db.execute(
+            "DELETE FROM pings WHERE message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            (message_id,),
+        )
         await db.commit()
 
 

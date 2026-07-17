@@ -25,7 +25,12 @@ from .app_ctx import (
     settings,
     state,
 )
-from .bot_notify import broadcast_member_notification, send_admin_bot_message
+from .bot_notify import (
+    broadcast_member_notification,
+    edit_pending_admin_card,
+    execute_pending_broadcast,
+    send_admin_bot_message,
+)
 from .common import now_iso, record_app_event, start_supervised
 from .digest import format_digest
 from .live import publish_live_event
@@ -124,6 +129,35 @@ async def reminder_loop() -> None:
         except Exception:
             logger.exception("Reminder loop failed")
         await asyncio.sleep(60)
+
+
+async def process_due_broadcasts() -> int:
+    """Single pass of the moderation queue: auto-send pending rows past expires_at."""
+    from database import claim_pending_broadcast, get_due_pending_broadcasts
+
+    if not state.bot_client:
+        # Bot is down: leave rows pending, retry next tick.
+        return 0
+    handled = 0
+    for row in await get_due_pending_broadcasts(limit=10):
+        claimed = await claim_pending_broadcast(int(row["id"]), "auto_sent")
+        if not claimed:
+            continue
+        count, token = await execute_pending_broadcast(claimed)
+        await edit_pending_admin_card(claimed, f"📤 Отправлено автоматически ({count})", token=token, delivered_count=count)
+        await record_app_event("INFO", "broadcast", "Pending broadcast auto-sent", {"id": row["id"], "delivered": count})
+        handled += 1
+    return handled
+
+
+async def broadcast_approval_loop() -> None:
+    while True:
+        try:
+            await process_due_broadcasts()
+            state.heartbeat("broadcast-approval")
+        except Exception:
+            logger.exception("Broadcast approval loop failed")
+        await asyncio.sleep(20)
 
 
 async def digest_loop() -> None:
@@ -375,6 +409,7 @@ async def startup_maintenance() -> None:
         backfill_deadlines_from_text,
         cleanup_outbox,
         prune_broadcast_messages,
+        prune_pending_broadcasts,
         rebuild_search_indexes,
         reconcile_giveaway_flags,
         reconcile_giveaway_outcomes,
@@ -397,6 +432,9 @@ async def startup_maintenance() -> None:
         pruned_broadcasts = await prune_broadcast_messages(days=7)
         if pruned_broadcasts:
             await record_app_event("INFO", "maintenance", "Pruned stale bot broadcast records", {"count": pruned_broadcasts})
+        pruned_pending = await prune_pending_broadcasts(days=7)
+        if pruned_pending:
+            await record_app_event("INFO", "maintenance", "Pruned decided pending broadcasts", {"count": pruned_pending})
         backfilled_deadlines = await backfill_deadlines_from_text()
         if backfilled_deadlines:
             await record_app_event("INFO", "deadline", "Backfilled deadlines from giveaway text", {"count": backfilled_deadlines})

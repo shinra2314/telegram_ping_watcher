@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets as secrets_module
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from telethon import Button
@@ -58,18 +59,20 @@ def _resolve_peer(target: Any) -> Any:
     return target
 
 
-async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> bool:
-    """Send a single bot message to an arbitrary peer with flood-wait retries."""
+async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> Optional[Any]:
+    """Send a single bot message to an arbitrary peer with flood-wait retries.
+
+    Returns the sent Telethon message (callers may need ``.id``) or None."""
     if not state.bot_client or peer in (None, ""):
-        return False
+        return None
     target = _resolve_peer(peer)
     buttons = buttons or None  # Telethon rejects an empty markup list
     for attempt in range(3):
         try:
             if not await ensure_bot_connected():
-                return False
+                return None
             try:
-                await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, file=file)
+                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, file=file)
             except FloodWaitError:
                 raise
             except Exception:
@@ -77,8 +80,8 @@ async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[l
                     raise
                 # Media upload failed — fall back to plain text once.
                 file = None
-                await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False)
-            return True
+                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False)
+            return sent
         except FloodWaitError as exc:
             wait = flood_wait_seconds(exc.seconds)
             await record_app_event("WARNING", "notifications", "Telegram bot flood wait", {"seconds": exc.seconds})
@@ -87,15 +90,15 @@ async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[l
             logger.warning("Telegram bot notification attempt %s failed: %s", attempt + 1, exc)
             if attempt >= 2:
                 await record_app_event("ERROR", "notifications", "Telegram bot notification failed", {"error": str(exc), "peer": str(peer)})
-                return False
+                return None
             await asyncio.sleep(2 * (attempt + 1))
-    return False
+    return None
 
 
 async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[str] = None) -> bool:
     if not ADMIN_ID:
         return False
-    return await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file)
+    return await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file) is not None
 
 
 async def broadcast_member_notification(
@@ -103,8 +106,14 @@ async def broadcast_member_notification(
     buttons: Optional[list[list[Button]]] = None,
     file: Optional[str] = None,
     notif_type: str = "mention",
+    score: Optional[int] = None,
+    premium_only: Optional[bool] = None,
 ) -> list[tuple[int, int]]:
     """Send a notification to viewer members whose preferences allow `notif_type`.
+
+    `score` (giveaway candidate score) feeds each member's personal min_score
+    filter; `premium_only` splits the audience (True — premium members only,
+    False — everyone else, None — all).
 
     Returns (tg_id, message_id) pairs of the delivered copies so they can be
     deleted later via the admin's "hide from friends" button.
@@ -121,7 +130,7 @@ async def broadcast_member_notification(
         return delivered
     admin_ids = {int(ADMIN_ID)} if ADMIN_ID else set()
     # Owner is excluded here — already notified via send_admin_bot_message.
-    for member in filter_broadcast_members(members, notif_type, admin_ids):
+    for member in filter_broadcast_members(members, notif_type, admin_ids, score=score, premium_only=premium_only):
         tg_id = member.get("tg_id")
         try:
             if not await ensure_bot_connected():
@@ -193,8 +202,122 @@ async def send_check_notification(record: dict[str, Any], ping_id: Optional[int]
         logger.exception("Failed to send check notification")
 
 
-async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None, auto_joined: bool = False) -> None:
+def build_ping_card(
+    record: dict[str, Any],
+    auto_joined: bool = False,
+    candidate: Optional[dict[str, Any]] = None,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Build the notification card. Returns (text, link_or_none, header_image_or_none)."""
+    title = "🔔 Новое упоминание"
+    if record.get("is_win"):
+        title = "🏆 Похоже на победу в розыгрыше"
+    elif record.get("is_giveaway"):
+        title = "🎁 Найден розыгрыш"
+    candidate_line = ""
+    if candidate:
+        candidate_line = (
+            f"\n🧮 Участие: score `{candidate.get('score', 0)}` · status `{candidate.get('status', 'pending_review')}`"
+            + (f"\n✋ Manual: {candidate.get('blocked_reason')}" if candidate.get("blocked_reason") else "")
+        )
+    mentions = ", ".join(record.get("mentions", [])) or "—"
+    header_image = notification_image_path(record)
+    # Telegram caption limit is 1024 chars — keep the excerpt shorter with media.
+    excerpt_limit = 600 if header_image else 800
+    msg = (
+        f"**{title}**\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"💬 Чат: `{record.get('chat', 'unknown')}` · _{record.get('chat_type', 'unknown')}_\n"
+        f"👤 От: {record.get('sender', 'unknown')}\n"
+        f"🏷 Упоминания: {mentions}\n"
+        f"🤝 Авто-вступление: {'✅ да' if auto_joined else '❌ нет'}"
+        f"{candidate_line}\n\n"
+        f"{(record.get('text') or '')[:excerpt_limit]}"
+    )
+    link = record.get("link")
+    if not link or link.startswith("нет "):
+        link = None
+    return msg, link, header_image
+
+
+def _member_card_buttons(link: Optional[str], ping_id: Optional[int], notif_type: str) -> Optional[list[list[Button]]]:
+    """Buttons on a member's broadcast copy: link + engagement for giveaways."""
+    buttons: list[list[Button]] = []
+    if link:
+        buttons.append([Button.url("Открыть в Telegram", link)])
+    if ping_id and notif_type == "giveaway":
+        buttons.append([
+            Button.inline("✅ Участвую", data=f"bcm:in:{ping_id}"),
+            Button.inline("⏭ Пропустил", data=f"bcm:skip:{ping_id}"),
+        ])
+    return buttons or None
+
+
+def _admin_card_buttons(link: Optional[str], ping_id: Optional[int]) -> list[list[Button]]:
+    buttons: list[list[Button]] = []
+    if link:
+        buttons.append([Button.url("🔗 Открыть в Telegram", link)])
+    if ping_id:
+        buttons.append([
+            Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
+            Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
+        ])
+    return buttons
+
+
+async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[str]]:
+    """Broadcast an approved/expired pending row to non-premium members
+    (premium copies went out at enqueue time under the row's bc_token).
+
+    Returns (delivered_count, hidebc_token_or_none)."""
     from database import get_giveaway_candidate, save_broadcast_messages
+
+    link = row.get("link") or None
+    ping_id = int(row["ping_id"]) if row.get("ping_id") else None
+    notif_type = row.get("notif_type") or "mention"
+    score: Optional[int] = None
+    if ping_id and notif_type == "giveaway":
+        candidate = await get_giveaway_candidate(ping_id)
+        if candidate:
+            score = int(candidate.get("score") or 0)
+    delivered = await broadcast_member_notification(
+        row.get("message") or "",
+        _member_card_buttons(link, ping_id, notif_type),
+        file=row.get("file_path") or None,
+        notif_type=notif_type,
+        score=score,
+        premium_only=False,
+    )
+    token = row.get("bc_token") or None  # set when premium copies were sent at enqueue
+    if delivered:
+        token = token or secrets_module.token_hex(4)
+        await save_broadcast_messages(token, delivered)
+    return len(delivered), token
+
+
+async def edit_pending_admin_card(
+    row: dict[str, Any],
+    footer: str,
+    token: Optional[str] = None,
+    delivered_count: int = 0,
+) -> None:
+    """Update the admin's moderation card in place after a decision/auto-send."""
+    admin_message_id = row.get("admin_message_id")
+    if not state.bot_client or not ADMIN_ID or not admin_message_id:
+        return
+    link = row.get("link") or None
+    ping_id = row.get("ping_id")
+    buttons = _admin_card_buttons(link, int(ping_id) if ping_id else None)
+    if token:
+        buttons.append([Button.inline(f"🙈 Скрыть у друзей ({delivered_count})", data=f"hidebc_{token}")])
+    text = f"{row.get('message') or ''}\n\n{footer}"
+    try:
+        await state.bot_client.edit_message(int(ADMIN_ID), int(admin_message_id), text, buttons=buttons or None, link_preview=False)
+    except Exception as exc:
+        logger.warning("Failed to edit moderation card %s: %s", row.get("id"), exc)
+
+
+async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None, auto_joined: bool = False) -> None:
+    from database import create_pending_broadcast, get_giveaway_candidate, save_broadcast_messages, set_pending_broadcast_admin_message
 
     if not state.bot_client:
         return
@@ -205,47 +328,53 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         if should_throttle_notification(record, int(settings.get("cooldown_seconds", 120) or 0)):
             await record_app_event("INFO", "notifications", "Similar notification suppressed", {"chat": record.get("chat"), "mentions": record.get("mentions")})
             return
-        title = "🔔 Новое упоминание"
-        if record.get("is_win"):
-            title = "🏆 Похоже на победу в розыгрыше"
-        elif record.get("is_giveaway"):
-            title = "🎁 Найден розыгрыш"
         candidate = await get_giveaway_candidate(int(ping_id)) if ping_id and record.get("is_giveaway") else None
-        candidate_line = ""
-        if candidate:
-            candidate_line = (
-                f"\n🧮 Участие: score `{candidate.get('score', 0)}` · status `{candidate.get('status', 'pending_review')}`"
-                + (f"\n✋ Manual: {candidate.get('blocked_reason')}" if candidate.get("blocked_reason") else "")
+        msg, link, header_image = build_ping_card(record, auto_joined=auto_joined, candidate=candidate)
+        buttons = _admin_card_buttons(link, ping_id)
+        notif_type = notification_type_of(record)
+        score = int(candidate.get("score") or 0) if candidate else None
+        member_buttons = _member_card_buttons(link, ping_id, notif_type)
+
+        if str(settings.get("moderation_mode", "auto")) == "moderated" and ADMIN_ID:
+            # Hold the member broadcast until the owner approves (or the timeout
+            # fires). Premium members are the exception — they get it right away.
+            premium_delivered = await broadcast_member_notification(
+                msg, member_buttons, file=header_image, notif_type=notif_type, score=score, premium_only=True
             )
-        mentions = ", ".join(record.get("mentions", [])) or "—"
-        header_image = notification_image_path(record)
-        # Telegram caption limit is 1024 chars — keep the excerpt shorter with media.
-        excerpt_limit = 600 if header_image else 800
-        msg = (
-            f"**{title}**\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"💬 Чат: `{record.get('chat', 'unknown')}` · _{record.get('chat_type', 'unknown')}_\n"
-            f"👤 От: {record.get('sender', 'unknown')}\n"
-            f"🏷 Упоминания: {mentions}\n"
-            f"🤝 Авто-вступление: {'✅ да' if auto_joined else '❌ нет'}"
-            f"{candidate_line}\n\n"
-            f"{(record.get('text') or '')[:excerpt_limit]}"
-        )
-        buttons: list[list[Button]] = []
-        link = record.get("link")
-        if link and not link.startswith("нет "):
-            buttons.append([Button.url("🔗 Открыть в Telegram", link)])
-        if ping_id:
+            bc_token = ""
+            if premium_delivered:
+                bc_token = secrets_module.token_hex(4)
+                await save_broadcast_messages(bc_token, premium_delivered)
+            timeout = int(settings.get("approval_timeout_seconds", 300) or 300)
+            expires_at = (datetime.now() + timedelta(seconds=timeout)).replace(microsecond=0).isoformat()
+            pb_id = await create_pending_broadcast(
+                ping_id,
+                notif_type,
+                msg,
+                link=link or "",
+                file_path=header_image or "",
+                expires_at=expires_at,
+                bc_token=bc_token,
+            )
             buttons.append([
-                Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
-                Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
+                Button.inline("📣 Разослать", data=f"bc:ok:{pb_id}"),
+                Button.inline("🚫 Отклонить", data=f"bc:no:{pb_id}"),
             ])
-        # Mirror notification to viewer members first (read-only, no action buttons),
-        # so the admin message can carry a working "hide from friends" button.
-        member_buttons: Optional[list[list[Button]]] = None
-        if link and not link.startswith("нет "):
-            member_buttons = [[Button.url("Открыть в Telegram", link)]]
-        delivered = await broadcast_member_notification(msg, member_buttons, file=header_image, notif_type=notification_type_of(record))
+            footer = f"🛡 Рассылка друзьям на модерации · авто-отправка в {expires_at[11:16]}"
+            if premium_delivered:
+                footer += f"\n⚡ Премиум уже получили: {len(premium_delivered)}"
+            sent = await _send_bot_message(ADMIN_ID, msg + "\n\n" + footer, buttons=buttons, file=header_image)
+            if sent is not None:
+                await set_pending_broadcast_admin_message(pb_id, int(sent.id))
+            else:
+                logger.error("Failed to send moderation card for pending broadcast %s", pb_id)
+            return
+
+        # Mirror notification to viewer members first, so the admin message can
+        # carry a working "hide from friends" button.
+        delivered = await broadcast_member_notification(
+            msg, member_buttons, file=header_image, notif_type=notif_type, score=score
+        )
         if delivered:
             token = secrets_module.token_hex(4)
             await save_broadcast_messages(token, delivered)

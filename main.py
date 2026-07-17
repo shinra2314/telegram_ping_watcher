@@ -35,6 +35,7 @@ from pulse_desk.common import record_app_event, start_background_task, start_sup
 from pulse_desk.loops import (
     access_scheduler_loop,
     auto_scan_loop,
+    broadcast_approval_loop,
     digest_loop,
     fetch_market_data,
     obsidian_sync_loop,
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     await init_bot()
     start_supervised("market-fetch", fetch_market_data, backoff_base=30.0, backoff_max=1800.0)
     start_supervised("reminders", reminder_loop, backoff_base=10.0, backoff_max=600.0)
+    start_supervised("broadcast-approval", broadcast_approval_loop, backoff_base=10.0, backoff_max=600.0)
     start_supervised("daily-digest", digest_loop, backoff_base=60.0, backoff_max=3600.0)
     start_supervised("source-scores", source_score_loop, backoff_base=30.0, backoff_max=600.0)
     start_supervised("obsidian-sync", obsidian_sync_loop, backoff_base=30.0, backoff_max=600.0)

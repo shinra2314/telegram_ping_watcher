@@ -117,6 +117,10 @@ def giveaway_card(ping: dict) -> str:
     lines = [
         header(badge, f"Розыгрыш #{ping.get('id')}", crumb),
         f"⏰ Дедлайн: `{fmt_dt(deadline) if deadline else '—'}`  ·  {ping.get('chat') or '?'}",
+    ]
+    if ping.get("deleted_at"):
+        lines.append("🗑 __Пост удалён из канала__")
+    lines += [
         DIV,
         (ping.get("text") or "—")[:_PING_TEXT_CAP],
     ]
@@ -165,7 +169,8 @@ def keys_card(keys: list[dict]) -> str:
         return "\n".join(out)
     for k in keys:
         exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
-        out.append(f"`#{k['id']}` **{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}")
+        badge = "⚡ " if (k.get("role") or "viewer") == "premium" else ""
+        out.append(f"`#{k['id']}` {badge}**{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}")
     return "\n".join(out)
 
 
@@ -176,7 +181,7 @@ def members_header(count: int) -> str:
     return out + f"\nУчастников: `{count}` · нажми на запись 👇"
 
 
-def member_card(member: dict, access_open: bool) -> str:
+def member_card(member: dict, access_open: bool, engagement: dict | None = None) -> str:
     tg = member.get("tg_id")
     uname = f"@{member['tg_username']}" if member.get("tg_username") else "—"
     blocked = bool(member.get("blocked"))
@@ -185,10 +190,19 @@ def member_card(member: dict, access_open: bool) -> str:
         f"{'🚫 заблокирован' if blocked else '🟢 активен'}  ·  "
         f"⏰ {'🟢 открыт' if access_open else '🔴 закрыт'}"
     )
-    return "\n".join([
+    role_value = "⚡ премиум" if (member.get("role") or "viewer") == "premium" else "👁 просмотр"
+    lines = [
         header("👤", str(member.get("name") or tg), crumb),
         uname,
         kv("🔑", "Ключ", member.get("key_label") or "—"),
+        kv("🎫", "Тариф", role_value),
         state_line,
         kv("🕐", "Был", fmt_dt(member.get("last_seen_at"))),
-    ])
+    ]
+    if engagement:
+        joined = int(engagement.get("joined") or 0)
+        skipped = int(engagement.get("skipped") or 0)
+        total = joined + skipped
+        rate = f" · Claim Rate {round(100 * joined / total)}%" if total else ""
+        lines.append(kv("🎯", "Розыгрыши", f"участвует {joined} · пропустил {skipped}{rate}"))
+    return "\n".join(lines)

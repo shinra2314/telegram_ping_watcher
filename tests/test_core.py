@@ -472,6 +472,40 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(by_ref)
         self.assertEqual(by_ref["mentions"], ["Alpha"])
 
+    async def test_delete_ping_soft_deletes_giveaways_and_wins(self):
+        base = {
+            "date": "2026-05-07T10:00:00",
+            "chat": "Test Chat",
+            "chat_id": 1,
+            "sender": "Alice",
+            "sender_id": 2,
+            "mentions": ["@Alpha"],
+            "chat_type": "channel",
+            "detected_at": "2026-05-07T10:01:00",
+            "is_win": False,
+        }
+        await database.save_ping({**base, "message_id": 3, "link": "https://t.me/test/3", "text": "plain @Alpha", "is_giveaway": False})
+        await database.save_ping({**base, "message_id": 4, "link": "https://t.me/test/4", "text": "giveaway @Alpha", "is_giveaway": True})
+        await database.save_ping({**base, "message_id": 5, "link": "https://t.me/test/5", "text": "win @Alpha", "is_giveaway": False, "is_win": True})
+
+        await database.delete_ping(1, 3)
+        await database.delete_ping(1, 4)
+        await database.delete_ping_by_message_id(5)
+
+        self.assertIsNone(await database.get_ping_by_message_ref(1, 3))
+        giveaway = await database.get_ping_by_message_ref(1, 4)
+        self.assertIsNotNone(giveaway)
+        self.assertTrue(giveaway["deleted_at"])
+        win = await database.get_ping_by_message_ref(1, 5)
+        self.assertIsNotNone(win)
+        self.assertTrue(win["deleted_at"])
+
+        # repeated delete keeps the original timestamp
+        first_deleted_at = giveaway["deleted_at"]
+        await database.delete_ping(1, 4)
+        again = await database.get_ping_by_message_ref(1, 4)
+        self.assertEqual(again["deleted_at"], first_deleted_at)
+
     async def test_save_ping_updates_duplicate_message_text_and_mentions(self):
         base_record = {
             "date": "2026-05-07T10:00:00",

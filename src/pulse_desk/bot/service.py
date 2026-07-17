@@ -17,7 +17,7 @@ from .. import watch_settings as ws
 from ..access_control import find_undoable, parse_repeat_rule, plan_undo, resolve_access, window_from_row
 from ..analytics import build_analytics
 from ..app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, CHECK_FRESH_MINUTES, LOG_FILE, logger, settings, state
-from ..bot_notify import BOT_ASSETS_DIR
+from ..bot_notify import BOT_ASSETS_DIR, edit_pending_admin_card, execute_pending_broadcast
 from ..bot_prefs import (
     KEYWORD_SCOPES,
     next_hhmm_datetime,
@@ -58,8 +58,11 @@ _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "
 async def init_bot() -> None:
     import database
     from database import (
+        claim_pending_broadcast,
         create_access_window,
         create_bot_key,
+        member_engagement_stats,
+        set_member_engagement,
         create_disable_until_window,
         deactivate_access_window,
         delete_broadcast_messages,
@@ -298,7 +301,8 @@ async def init_bot() -> None:
             for r in need[:8]:
                 deadline = r.get("deadline_at")
                 when = fmt_dt(deadline) if deadline else fmt_dt(r.get("detected_at"))
-                label = f"{feed_badge(r.get('priority_label'))} {when} {r.get('chat') or '?'}"
+                badge = "🗑" if r.get("deleted_at") else feed_badge(r.get("priority_label"))
+                label = f"{badge} {when} {r.get('chat') or '?'}"
                 items.append((int(r["id"]), label[:48]))
             return giveaways_header(stats, len(need)), giveaway_feed_keyboard(items)
 
@@ -343,7 +347,8 @@ async def init_bot() -> None:
                 return None
             rows = await list_access_windows(tg)
             decision = resolve_access(member, [window_from_row(r) for r in rows], datetime.now(timezone.utc))
-            return member_card(member, decision.allowed), member_card_keyboard(tg, bool(member.get("blocked")))
+            engagement = await member_engagement_stats(tg)
+            return member_card(member, decision.allowed, engagement), member_card_keyboard(tg, bool(member.get("blocked")))
 
         async def render_market() -> str:
             market = await get_market_history(limit=1)
@@ -466,6 +471,7 @@ async def init_bot() -> None:
             "quiet": "Пришлите интервал тихих часов в формате `23:00-08:00`.",
             "cooldown": "Пришлите кулдаун в секундах (0–3600).",
             "digest_time": "Пришлите время дайджеста в формате `09:00`.",
+            "min_score": "Пришлите минимальный score розыгрышей (0–100, 0 — показывать все).",
         }
 
         def _pending_expired(pending: dict) -> bool:
@@ -553,6 +559,10 @@ async def init_bot() -> None:
                  Button.inline(f"{mark(quiet.get('enabled'))} Тихие часы", b"st_n_q")],
                 [Button.inline(f"{mark(notif.get('include_giveaways', True))} Розыгрыши", b"st_n_gw"),
                  Button.inline(f"{mark(notif.get('include_wins', True))} Победы", b"st_n_wn")],
+                [Button.inline(
+                    "🛡 Модерация рассылок: вкл" if notif.get("moderation_mode") == "moderated" else "📤 Модерация рассылок: авто",
+                    b"st_n_md",
+                )],
                 [Button.inline("🕘 Часы тишины…", b"st_n_qt"), Button.inline("⏱ Кулдаун…", b"st_n_cd")],
                 [Button.inline(f"{mark(digest_cfg.get('enabled'))} Дайджест", b"st_d_en"),
                  Button.inline("🕘 Время дайджеста…", b"st_d_tm")],
@@ -569,6 +579,7 @@ async def init_bot() -> None:
                 [toggle_btn("Упоминания", "mentions", b"pf_me"), toggle_btn("Розыгрыши", "giveaways", b"pf_gw")],
                 [toggle_btn("Победы", "wins", b"pf_wn"), toggle_btn("Чеки", "checks", b"pf_ch")],
                 [toggle_btn("Дедлайны", "deadlines", b"pf_dl"), toggle_btn("Дайджест", "digest", b"pf_dg")],
+                [Button.inline("🎯 Мин. score розыгрышей…", b"pf_sc")],
                 [Button.inline("⬅️ Меню", b"menu_main")],
             ]
             return render_member_prefs_text(prefs), buttons
@@ -610,7 +621,7 @@ async def init_bot() -> None:
                 text, buttons = await keyword_list_menu(code)
                 await safe_edit(event, text, buttons=buttons)
                 return
-            if data in ("st_n_en", "st_n_gw", "st_n_wn", "st_n_q"):
+            if data in ("st_n_en", "st_n_gw", "st_n_wn", "st_n_md", "st_n_q"):
                 notif = await ws.load_notification_settings()
                 if data == "st_n_en":
                     notif["enabled"] = not notif.get("enabled", True)
@@ -618,6 +629,8 @@ async def init_bot() -> None:
                     notif["include_giveaways"] = not notif.get("include_giveaways", True)
                 elif data == "st_n_wn":
                     notif["include_wins"] = not notif.get("include_wins", True)
+                elif data == "st_n_md":
+                    notif["moderation_mode"] = "moderated" if notif.get("moderation_mode") != "moderated" else "auto"
                 else:
                     quiet = dict(notif.get("quiet_hours") or {})
                     quiet.setdefault("from", "23:00")
@@ -653,10 +666,27 @@ async def init_bot() -> None:
             await event.answer()
 
         async def handle_pending_input(event, role: str, pending: dict) -> None:
-            if role != "admin":
-                return
             kind = pending.get("kind")
             raw = (event.message.text or "").strip()
+            if kind == "min_score":
+                # Personal member setting — the only pending input open to non-admins.
+                member = await get_bot_member(event.sender_id)
+                if not member:
+                    await event.respond("Личные настройки недоступны.")
+                    return
+                try:
+                    value = max(0, min(100, int(raw)))
+                except ValueError:
+                    await event.respond("❌ Нужно число 0–100 (0 — показывать все розыгрыши).")
+                    return
+                prefs = parse_member_prefs(member.get("notification_prefs"))
+                prefs["min_score"] = value
+                await set_bot_member_prefs(event.sender_id, prefs)
+                text, buttons = member_prefs_menu(prefs)
+                await event.respond(f"✅ Мин. score: {value if value else 'любой'}\n\n{text}", buttons=buttons)
+                return
+            if role != "admin":
+                return
             if kind == "track_add":
                 additions = normalize_usernames(re.split(r"[\s,;]+", raw))
                 if not additions:
@@ -755,20 +785,38 @@ async def init_bot() -> None:
             if existing and existing.get("blocked"):
                 await event.respond("🚫 **Доступ отключён владельцем.**")
                 return
+            is_new_member = existing is None
             sender = await event.get_sender()
             uname = getattr(sender, "username", "") or ""
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
             role = key.get("role") or "viewer"
             await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
             greeting = f"Привет, {name}!" if name else "Привет!"
+            if role == "admin":
+                access_line = "👑 Доступ: __полный__"
+            elif role == "premium":
+                access_line = "⚡ Доступ: __премиум — уведомления мгновенно, без задержки модерации__"
+            else:
+                access_line = "👁 Доступ: __только просмотр__"
             await event.respond(
                 "✅ **Доступ открыт!**\n"
                 f"{greeting} Добро пожаловать в **Pulse Desk**.\n"
                 + f"{DIV}\n"
-                + ("👑 Доступ: __полный__" if role == "admin" else "👁 Доступ: __только просмотр__")
+                + access_line
                 + "\n\nВыберите раздел 👇",
                 buttons=main_menu_buttons(role),
             )
+            if is_new_member and role != "admin":
+                # First-time onboarding: let the member tune notifications right away.
+                prefs = parse_member_prefs(None)
+                text, buttons = member_prefs_menu(prefs)
+                await event.respond(
+                    "⚙️ **Настройте уведомления под себя**\n"
+                    f"{DIV}\n"
+                    "Отметьте, что присылать, — можно поменять в любой момент через /settings.\n\n"
+                    + text,
+                    buttons=buttons,
+                )
 
         locked_text = (
             "🔒 **Доступ закрыт**\n"
@@ -1315,6 +1363,62 @@ async def init_bot() -> None:
                         text, kb = res
                         await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
+                if seg[0] == "bc" and len(seg) >= 3 and seg[1] in ("ok", "no"):
+                    if role != "admin":
+                        await event.answer("Только владелец", alert=True)
+                        return
+                    try:
+                        pb_id = int(seg[2])
+                    except ValueError:
+                        await event.answer("Некорректная команда", alert=True)
+                        return
+                    status = "approved" if seg[1] == "ok" else "rejected"
+                    row = await claim_pending_broadcast(pb_id, status, event.sender_id)
+                    if row is None:
+                        await event.answer("Уже обработано")
+                        return
+                    if seg[1] == "ok":
+                        count, token = await execute_pending_broadcast(row)
+                        await edit_pending_admin_card(row, f"✅ Разослано друзьям ({count})", token=token, delivered_count=count)
+                        await event.answer(f"📣 Разослано: {count}")
+                        await record_app_event("INFO", "broadcast", "Pending broadcast approved", {"id": pb_id, "delivered": count})
+                    else:
+                        footer = "🚫 Рассылка отклонена"
+                        bc_token = row.get("bc_token") or None
+                        premium_count = 0
+                        if bc_token:
+                            premium_count = len(await get_broadcast_messages(bc_token))
+                            if premium_count:
+                                footer += f" · ⚡ премиум уже получили: {premium_count}"
+                        await edit_pending_admin_card(row, footer, token=bc_token if premium_count else None, delivered_count=premium_count)
+                        await event.answer("Отклонено")
+                        await record_app_event("INFO", "broadcast", "Pending broadcast rejected", {"id": pb_id})
+                    return
+                if seg[0] == "bcm" and len(seg) >= 3 and seg[1] in ("in", "skip"):
+                    try:
+                        pid = int(seg[2])
+                    except ValueError:
+                        await event.answer("Некорректная команда", alert=True)
+                        return
+                    action = "joined" if seg[1] == "in" else "skipped"
+                    await set_member_engagement(event.sender_id, pid, action)
+                    await record_app_event("INFO", "engagement", "Member engagement recorded", {"tg_id": event.sender_id, "ping_id": pid, "action": action})
+                    chosen = "✅ Участвую" if action == "joined" else "⏭ Пропустил"
+                    with suppress(Exception):
+                        # Keep the link button, freeze the choice row on the member's copy.
+                        ping = await get_ping_by_id(pid)
+                        new_buttons: list[list[Button]] = []
+                        link = (ping or {}).get("link")
+                        if link and not str(link).startswith("нет "):
+                            new_buttons.append([Button.url("Открыть в Telegram", link)])
+                        other = "bcm:skip" if action == "joined" else "bcm:in"
+                        new_buttons.append([
+                            Button.inline(f"● {chosen}", data=b"noop"),
+                            Button.inline("изменить", data=f"{other}:{pid}"),
+                        ])
+                        await event.edit(buttons=new_buttons)
+                    await event.answer("Записал: участвуете 🎯" if action == "joined" else "Ок, пропускаем")
+                    return
                 if seg[0] == "gw" and len(seg) >= 3 and seg[1] == "open":
                     try:
                         pid = int(seg[2])
@@ -1375,11 +1479,15 @@ async def init_bot() -> None:
                             buttons=[[Button.inline("⬅️ Управление", b"adm:home")]],
                         )
                         return
-                    if seg[0] == "adm" and seg[1] == "newkey":
+                    if seg[0] == "adm" and seg[1] in ("newkey", "newkeyp"):
+                        premium = seg[1] == "newkeyp"
                         secret = generate_access_key()
-                        await create_bot_key("", secret, "viewer", None)
+                        await create_bot_key("премиум" if premium else "", secret, "premium" if premium else "viewer", None)
                         link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
-                        body = "🔑 **Новый ключ**\n" + DIV + f"\n🔐 `{secret}`"
+                        title = "⚡ **Новый премиум-ключ**" if premium else "🔑 **Новый ключ**"
+                        body = title + "\n" + DIV + f"\n🔐 `{secret}`"
+                        if premium:
+                            body += "\n⚡ Держатель получает рассылки мгновенно, без модерации."
                         if link:
                             body += f"\n🔗 {link}"
                         await event.respond(body, link_preview=False)
@@ -1514,6 +1622,9 @@ async def init_bot() -> None:
                     await event.answer("Вы получаете уведомления как владелец — личные настройки не нужны", alert=True)
                     return
                 prefs = parse_member_prefs(member.get("notification_prefs"))
+                if data == "pf_sc":
+                    await prompt_pending(event, "min_score")
+                    return
                 toggled = PF_TOGGLES.get(data)
                 if toggled:
                     prefs = toggle_member_pref(prefs, toggled)
@@ -1524,9 +1635,13 @@ async def init_bot() -> None:
                     await event.answer("Сохранено")
                 return
 
-            # ---- settings menus (owner only) ----
+            # ---- settings menus (owner only; st_x cancel works for members too) ----
             if data == "st" or data.startswith("st_"):
                 if role != "admin":
+                    if data == "st_x":
+                        bot_pending_inputs.pop(event.sender_id, None)
+                        await event.answer("Отменено")
+                        return
                     await event.answer("Только владелец", alert=True)
                     return
                 await handle_settings_callback(event, data)

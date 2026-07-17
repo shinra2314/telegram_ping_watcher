@@ -141,7 +141,8 @@ def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
     rows: list[list[Button]] = [
         [Button.inline(f"🗑 {label}", f"key:rm:{kid}".encode())] for kid, label in items
     ]
-    rows.append([Button.inline("➕ Создать ключ", b"adm:newkey")])
+    rows.append([Button.inline("➕ Создать ключ", b"adm:newkey"),
+                 Button.inline("⚡ Премиум-ключ", b"adm:newkeyp")])
     rows.append([Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")])
     return rows
 

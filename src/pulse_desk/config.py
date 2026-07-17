@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     giveaway_inactive_channel_days: int = Field(default=14, alias="GIVEAWAY_INACTIVE_CHANNEL_DAYS")
     giveaway_min_action_delay_seconds: int = Field(default=45, alias="GIVEAWAY_MIN_ACTION_DELAY_SECONDS")
 
+    broadcast_moderation_mode: str = Field(default="auto", alias="BROADCAST_MODERATION_MODE")
+    broadcast_approval_timeout_seconds: int = Field(default=300, alias="BROADCAST_APPROVAL_TIMEOUT_SECONDS")
+
     scan_interval_seconds: int = Field(default=900, alias="SCAN_INTERVAL_SECONDS")
     scan_account_concurrency: int = Field(default=3, alias="SCAN_ACCOUNT_CONCURRENCY")
     scan_history_limit: int = Field(default=0, alias="SCAN_HISTORY_LIMIT")

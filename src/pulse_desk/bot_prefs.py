@@ -18,6 +18,8 @@ DEFAULT_MEMBER_PREFS = {
     "checks": True,
     "deadlines": False,
     "digest": False,
+    # Minimum giveaway candidate score a member wants to see (0 = everything).
+    "min_score": 0,
 }
 
 # callback scope code -> (settings key, display label)
@@ -50,7 +52,14 @@ def parse_member_prefs(raw: Optional[str]) -> dict:
         return prefs
     if isinstance(data, dict):
         for key in prefs:
-            if key in data:
+            if key not in data:
+                continue
+            if key == "min_score":
+                try:
+                    prefs[key] = max(0, min(100, int(data[key])))
+                except (TypeError, ValueError):
+                    pass
+            else:
                 prefs[key] = bool(data[key])
     return prefs
 
@@ -59,7 +68,7 @@ def toggle_member_pref(prefs: dict, key: str) -> dict:
     """Return a new prefs dict with `key` flipped; unknown key — unchanged copy."""
     updated = dict(DEFAULT_MEMBER_PREFS)
     updated.update(prefs)
-    if key in DEFAULT_MEMBER_PREFS:
+    if key in DEFAULT_MEMBER_PREFS and key != "min_score":
         updated[key] = not bool(updated.get(key))
     return updated
 
@@ -72,17 +81,37 @@ def notification_type_of(record: dict) -> str:
     return "mention"
 
 
-def member_allows(prefs: dict, notif_type: str) -> bool:
+def member_allows(prefs: dict, notif_type: str, score: Optional[int] = None) -> bool:
     if prefs.get("muted"):
         return False
     pref_key = _TYPE_TO_PREF.get(notif_type)
     if pref_key is None:
         return True
-    return bool(prefs.get(pref_key, DEFAULT_MEMBER_PREFS.get(pref_key, True)))
+    if not prefs.get(pref_key, DEFAULT_MEMBER_PREFS.get(pref_key, True)):
+        return False
+    # Personal quality bar: giveaways below the member's min_score are skipped.
+    # Unknown score (None) always passes — never hide what we can't rate.
+    if notif_type == "giveaway" and score is not None:
+        try:
+            min_score = int(prefs.get("min_score") or 0)
+        except (TypeError, ValueError):
+            min_score = 0
+        if min_score > 0 and int(score) < min_score:
+            return False
+    return True
 
 
-def filter_broadcast_members(members: list[dict], notif_type: str, admin_ids: set[int]) -> list[dict]:
-    """Members eligible for a broadcast of `notif_type`: not blocked, not admin, prefs allow."""
+def filter_broadcast_members(
+    members: list[dict],
+    notif_type: str,
+    admin_ids: set[int],
+    score: Optional[int] = None,
+    premium_only: Optional[bool] = None,
+) -> list[dict]:
+    """Members eligible for a broadcast of `notif_type`: not blocked, not admin, prefs allow.
+
+    `premium_only`: True — only premium members, False — only non-premium, None — everyone.
+    """
     result = []
     for member in members:
         if member.get("blocked"):
@@ -93,8 +122,13 @@ def filter_broadcast_members(members: list[dict], notif_type: str, admin_ids: se
             continue
         if tg_id in admin_ids:
             continue
+        is_premium = (member.get("role") or "viewer") == "premium"
+        if premium_only is True and not is_premium:
+            continue
+        if premium_only is False and is_premium:
+            continue
         prefs = parse_member_prefs(member.get("notification_prefs"))
-        if member_allows(prefs, notif_type):
+        if member_allows(prefs, notif_type, score=score):
             result.append(member)
     return result
 
@@ -207,6 +241,13 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
     quiet = settings.get("quiet_hours") or {}
     quiet_state = _onoff(quiet.get("enabled"))
     quiet_range = f" ({quiet.get('from', '—')}–{quiet.get('to', '—')})" if quiet.get("enabled") else ""
+    moderated = settings.get("moderation_mode") == "moderated"
+    timeout_min = max(1, int(settings.get("approval_timeout_seconds") or 300) // 60)
+    moderation_line = (
+        f"Модерация рассылок: 🛡 вкл (авто-отправка через {timeout_min} мин)"
+        if moderated
+        else "Модерация рассылок: 📤 авто (сразу всем)"
+    )
     return "\n".join(
         [
             "🔔 **Настройки уведомлений**",
@@ -214,6 +255,7 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
             f"Уведомления: {_onoff(settings.get('enabled', True))}",
             f"Розыгрыши: {_onoff(settings.get('include_giveaways', True))}",
             f"Победы: {_onoff(settings.get('include_wins', True))}",
+            moderation_line,
             f"Тихие часы: {quiet_state}{quiet_range}",
             f"Кулдаун: {int(settings.get('cooldown_seconds') or 0)} сек",
             "",
@@ -226,6 +268,8 @@ def render_member_prefs_text(prefs: dict) -> str:
     def mark(key: str) -> str:
         return "✅" if prefs.get(key) else "🔕"
 
+    min_score = int(prefs.get("min_score") or 0)
+    score_line = f"🎯 Мин. score розыгрышей: {min_score}" if min_score else "🎯 Мин. score розыгрышей: любой"
     return "\n".join(
         [
             "🔔 **Мои уведомления**",
@@ -238,5 +282,6 @@ def render_member_prefs_text(prefs: dict) -> str:
             f"{mark('checks')} Чеки",
             f"{mark('deadlines')} Дедлайны",
             f"{mark('digest')} Ежедневный дайджест",
+            score_line,
         ]
     )

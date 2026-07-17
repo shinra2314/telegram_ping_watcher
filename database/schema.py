@@ -63,6 +63,7 @@ async def init_db() -> None:
             "reminder_sent_at": "ALTER TABLE pings ADD COLUMN reminder_sent_at TEXT",
             "action_status": "ALTER TABLE pings ADD COLUMN action_status TEXT DEFAULT 'new'",
             "tags": "ALTER TABLE pings ADD COLUMN tags TEXT DEFAULT '[]'",
+            "deleted_at": "ALTER TABLE pings ADD COLUMN deleted_at TEXT",
         }
         for column, sql in migrations.items():
             if column not in pings_columns:
@@ -391,6 +392,42 @@ async def init_db() -> None:
             """
         )
 
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_broadcasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ping_id INTEGER,
+                notif_type TEXT NOT NULL DEFAULT 'mention',
+                message TEXT NOT NULL,
+                link TEXT DEFAULT '',
+                file_path TEXT DEFAULT '',
+                admin_message_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                decided_by INTEGER,
+                decided_at TEXT,
+                FOREIGN KEY (ping_id) REFERENCES pings(id) ON DELETE SET NULL
+            )
+            """
+        )
+        pending_columns = await _columns(db, "pending_broadcasts")
+        if "bc_token" not in pending_columns:
+            await db.execute("ALTER TABLE pending_broadcasts ADD COLUMN bc_token TEXT DEFAULT ''")
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS member_engagement (
+                tg_id INTEGER NOT NULL,
+                ping_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tg_id, ping_id),
+                FOREIGN KEY (ping_id) REFERENCES pings(id) ON DELETE CASCADE
+            )
+            """
+        )
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_chat_type ON pings(chat_type)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_detected_at ON pings(detected_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_status ON pings(status)")
@@ -419,6 +456,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_window ON access_schedule(start_at, end_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_priority ON access_schedule(tg_id, priority DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_audit_user ON access_audit(tg_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_broadcasts_status ON pending_broadcasts(status, expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_member_engagement_tg ON member_engagement(tg_id)")
         await db.commit()
 
 

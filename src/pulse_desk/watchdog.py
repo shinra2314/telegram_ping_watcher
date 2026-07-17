@@ -83,6 +83,7 @@ def default_thresholds(
     return {
         "auto-scan": max(600, scan_interval_seconds + flood_wait_max_seconds + 300),
         "reminders": 600,
+        "broadcast-approval": 300,
         "source-scores": 1200,
         "access-scheduler": 360,
         "market-fetch": max(600, market_poll_seconds * 3 + 120),

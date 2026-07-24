@@ -73,6 +73,34 @@ async def revoke_bot_key(key_id: int) -> None:
         await db.commit()
 
 
+async def delete_bot_key(key_id: int) -> Optional[dict]:
+    """Erase a key row for good. Returns the deleted key, or None if it was gone.
+
+    Members who already joined with it keep their access and their grants — the
+    grants are snapshotted onto the member row at redeem time. Their `key_id` is
+    cleared so nothing points at a row that no longer exists; cut a person off
+    by blocking them, not by deleting the key they came in through.
+    """
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                """
+                SELECT k.*, (SELECT COUNT(*) FROM bot_members m WHERE m.key_id = k.id) AS member_count
+                FROM bot_access_keys k
+                WHERE k.id = ?
+                """,
+                (key_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        await db.execute("UPDATE bot_members SET key_id = NULL WHERE key_id = ?", (key_id,))
+        await db.execute("DELETE FROM bot_access_keys WHERE id = ?", (key_id,))
+        await db.commit()
+    return dict(row)
+
+
 async def upsert_bot_member(
     tg_id: int,
     tg_username: str,

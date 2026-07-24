@@ -74,6 +74,7 @@ async def init_bot() -> None:
         set_member_engagement,
         create_disable_until_window,
         deactivate_access_window,
+        delete_bot_key,
         delete_broadcast_messages,
         get_bot_key_by_secret,
         get_bot_member,
@@ -1524,14 +1525,31 @@ async def init_bot() -> None:
                         text, kb = render_scan_panel()
                         await safe_edit(event, text, buttons=kb)
                         return
-                    if seg[0] == "key" and seg[1] == "rm" and len(seg) >= 3:
+                    if seg[0] == "key" and seg[1] in ("rm", "del") and len(seg) >= 3:
                         try:
                             key_id = int(seg[2])
                         except ValueError:
                             await event.answer("Некорректная команда", alert=True)
                             return
-                        await revoke_bot_key(key_id)
-                        await event.answer("Ключ отозван")
+                        if seg[1] == "rm":
+                            await revoke_bot_key(key_id)
+                            await event.answer("Ключ отозван — ссылка больше не откроет доступ")
+                        else:
+                            deleted = await delete_bot_key(key_id)
+                            if deleted is None:
+                                await event.answer("Ключ уже удалён", alert=True)
+                            else:
+                                # Deleting drops the invite only; people who already
+                                # joined keep their access and their grants.
+                                joined = int(deleted.get("member_count") or 0)
+                                note = "🗑 Ключ удалён"
+                                if joined:
+                                    note += f"\nВошедшие ({joined}) сохраняют доступ — отключить можно в «Люди»."
+                                await event.answer(note, alert=bool(joined))
+                                await record_app_event(
+                                    "INFO", "bot", "Bot access key deleted",
+                                    {"id": key_id, "label": deleted.get("label"), "via": "bot"},
+                                )
                         text, kb = await render_keys()
                         await safe_edit(event, text, buttons=kb)
                         return

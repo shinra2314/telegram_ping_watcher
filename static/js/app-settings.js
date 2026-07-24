@@ -222,7 +222,8 @@
           <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
             <code style="font-size:.75rem;word-break:break-all">${esc(k.secret)}</code>
             <button class="btn" data-copy-link="${esc(k.share_link || "")}"><i data-lucide="link"></i>Ссылка</button>
-            <button class="btn bad" data-revoke-key="${k.id}"><i data-lucide="trash-2"></i>Отозвать</button>
+            <button class="btn bad" data-revoke-key="${k.id}"><i data-lucide="ban"></i>Отозвать</button>
+            <button class="btn bad" data-delete-key="${k.id}" data-key-members="${k.member_count || 0}"><i data-lucide="trash-2"></i>Удалить</button>
           </div>
         </div>`).join("")}</div>` : "<div class='muted'>Ключей пока нет.</div>";
       const members = data.members || [];

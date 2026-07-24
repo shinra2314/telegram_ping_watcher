@@ -3,10 +3,17 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from database import create_bot_key, list_bot_keys, list_bot_members, revoke_bot_key, set_bot_member_blocked
+from database import (
+    create_bot_key,
+    delete_bot_key,
+    list_bot_keys,
+    list_bot_members,
+    revoke_bot_key,
+    set_bot_member_blocked,
+)
 from pulse_desk.app_ctx import require_admin, state
 from pulse_desk.bot_permissions import catalogs, dump_permissions, normalize_permissions, parse_permissions
 from pulse_desk.common import record_app_event
@@ -83,6 +90,16 @@ async def revoke_bot_access_key(key_id: int):
     await revoke_bot_key(key_id)
     await record_app_event("INFO", "bot", "Bot access key revoked", {"id": key_id})
     return {"status": "ok"}
+
+
+@router.delete("/api/bot/access/keys/{key_id}", dependencies=[Depends(require_admin)])
+async def delete_bot_access_key(key_id: int):
+    """Erase a key. Members who joined with it keep their access — block them instead."""
+    key = await delete_bot_key(key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    await record_app_event("INFO", "bot", "Bot access key deleted", {"id": key_id, "label": key.get("label")})
+    return {"status": "ok", "deleted": key_id}
 
 
 @router.post("/api/bot/access/members/{tg_id}/block", dependencies=[Depends(require_admin)])

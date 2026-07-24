@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..bot_permissions import ALL_FEATURES, ALL_NOTIFY, parse_permissions
 from .chrome import bar, chip, empty, header, kv
 from .views import DIV, fmt_dt
 
@@ -162,7 +163,7 @@ def restart_confirm_card() -> str:
 
 
 def keys_card(keys: list[dict]) -> str:
-    """Keys panel text; the revoke buttons live in `keys_keyboard`."""
+    """Keys panel text; the revoke/delete buttons live in `keys_keyboard`."""
     out = [header("🔑", "Ключи доступа", "Домой › Управление › Ключи")]
     if not keys:
         out.append(empty("Ключей нет — создайте кнопкой ниже."))
@@ -170,7 +171,14 @@ def keys_card(keys: list[dict]) -> str:
     for k in keys:
         exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
         badge = "⚡ " if (k.get("role") or "viewer") == "premium" else ""
-        out.append(f"`#{k['id']}` {badge}**{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}")
+        perms = parse_permissions(k.get("permissions"))
+        accounts = perms.get("accounts") or []
+        scope = "все аккаунты" if not accounts else ", ".join(f"@{a}" for a in accounts)
+        out.append(
+            f"`#{k['id']}` {badge}**{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}\n"
+            f"   📂 {len(perms['features'])}/{len(ALL_FEATURES)} · 🔔 {len(perms['notify'])}/{len(ALL_NOTIFY)} · 👤 {scope}"
+        )
+    out.append("\n🚫 — отозвать ссылку · 🗑 — удалить ключ\n__Вошедшие сохраняют доступ — отключить их можно в «Люди».__")
     return "\n".join(out)
 
 

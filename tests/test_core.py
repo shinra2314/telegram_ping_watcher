@@ -1355,6 +1355,26 @@ class BotAccessTests(unittest.IsolatedAsyncioTestCase):
         keys = await database.list_bot_keys()
         self.assertEqual(keys[0]["member_count"], 1)
 
+    async def test_delete_key_removes_it_but_keeps_the_member(self):
+        key = await database.create_bot_key("gone", "del-secret-1234567", "viewer", None, '{"features": ["stats"]}')
+        await database.upsert_bot_member(901, "u", "U", key["id"], "viewer", '{"features": ["stats"]}')
+
+        deleted = await database.delete_bot_key(key["id"])
+        self.assertEqual(deleted["label"], "gone")
+        self.assertEqual(deleted["member_count"], 1)
+
+        self.assertIsNone(await database.get_bot_key_by_secret("del-secret-1234567"))
+        self.assertEqual(await database.list_bot_keys(include_revoked=True), [])
+        # The member survives with their grants; only the key link is cleared.
+        member = await database.get_bot_member(901)
+        self.assertIsNotNone(member)
+        self.assertFalse(member["blocked"])
+        self.assertIsNone(member["key_id"])
+        self.assertIn("stats", member["permissions"])
+
+    async def test_delete_missing_key_is_a_no_op(self):
+        self.assertIsNone(await database.delete_bot_key(4242))
+
     async def test_block_member(self):
         key = await database.create_bot_key("", "blk-secret-1234567", "viewer", None)
         await database.upsert_bot_member(777, "x", "X", key["id"], "viewer")

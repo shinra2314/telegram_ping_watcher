@@ -50,6 +50,7 @@ from .backups import backup_db_if_present, create_db_backup, list_db_backups
 from .boards import get_debt_board, get_giveaway_board, get_task_overview
 from .bot_access import (
     create_bot_key,
+    delete_bot_key,
     delete_broadcast_messages,
     get_bot_key_by_secret,
     get_bot_member,

@@ -137,9 +137,17 @@ def member_access_keyboard(tg: int) -> list[list[Button]]:
 
 
 def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
-    """Keys panel: one revoke row per key, then create + nav."""
+    """Keys panel: revoke + delete per key, then create + nav.
+
+    Revoke keeps the row (the link stops working); delete erases it. Neither
+    touches people who already joined — block those in the members panel.
+    """
     rows: list[list[Button]] = [
-        [Button.inline(f"🗑 {label}", f"key:rm:{kid}".encode())] for kid, label in items
+        [
+            Button.inline(f"🚫 {label}", f"key:rm:{kid}".encode()),
+            Button.inline("🗑", f"key:del:{kid}".encode()),
+        ]
+        for kid, label in items
     ]
     rows.append([Button.inline("➕ Создать ключ", b"adm:newkey"),
                  Button.inline("⚡ Премиум-ключ", b"adm:newkeyp")])

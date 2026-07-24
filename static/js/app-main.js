@@ -606,8 +606,21 @@
       }
       const revokeBtn = e.target.closest("[data-revoke-key]");
       if (revokeBtn) {
-        if (!confirm("Отозвать ключ? Доступ по нему перестанет работать.")) return;
+        if (!confirm("Отозвать ключ? Ссылка перестанет открывать доступ новым людям.")) return;
         await api(`/api/bot/access/keys/${revokeBtn.dataset.revokeKey}/revoke`, { method: "POST", button: revokeBtn });
+        await loadBotAccess();
+        return;
+      }
+      const deleteKeyBtn = e.target.closest("[data-delete-key]");
+      if (deleteKeyBtn) {
+        const joined = Number(deleteKeyBtn.dataset.keyMembers || 0);
+        // Deleting only removes the invite; people who already joined keep access.
+        const note = joined
+          ? `\n\nПо нему уже вошли: ${joined}. Они сохранят доступ и свои права — чтобы отключить человека, заблокируйте его в списке ниже.`
+          : "";
+        if (!confirm(`Удалить ключ навсегда? Ссылка перестанет работать.${note}`)) return;
+        await api(`/api/bot/access/keys/${deleteKeyBtn.dataset.deleteKey}`, { method: "DELETE", button: deleteKeyBtn });
+        showToast("Ключ удалён", "success");
         await loadBotAccess();
         return;
       }

@@ -10,6 +10,14 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from .bot_permissions import (
+    ALL_NOTIFY,
+    NOTIFY_TYPE_ALIASES,
+    NOTIFY_TYPES,
+    parse_permissions,
+    permission_allows_notification,
+)
+
 DEFAULT_MEMBER_PREFS = {
     "muted": False,
     "mentions": True,
@@ -31,14 +39,7 @@ KEYWORD_SCOPES = {
     "i": ("ignore_keywords", "🚫 Игнор"),
 }
 
-_TYPE_TO_PREF = {
-    "mention": "mentions",
-    "giveaway": "giveaways",
-    "win": "wins",
-    "check": "checks",
-    "deadline": "deadlines",
-    "digest": "digest",
-}
+_TYPE_TO_PREF = NOTIFY_TYPE_ALIASES
 
 
 def parse_member_prefs(raw: Optional[str]) -> dict:
@@ -107,10 +108,18 @@ def filter_broadcast_members(
     admin_ids: set[int],
     score: Optional[int] = None,
     premium_only: Optional[bool] = None,
+    mentions: Any = None,
 ) -> list[dict]:
-    """Members eligible for a broadcast of `notif_type`: not blocked, not admin, prefs allow.
+    """Members eligible for a broadcast of `notif_type`.
+
+    Gates, all of which must pass: the member is active (not blocked, not the
+    owner), they match the `premium_only` audience, the key they joined with
+    grants this notification type for the mentioned account, and their own
+    prefs did not mute it or score it out.
 
     `premium_only`: True — only premium members, False — only non-premium, None — everyone.
+    `mentions`: tracked usernames the event is about, matched against the
+    account whitelist on the member's key.
     """
     result = []
     for member in members:
@@ -126,6 +135,9 @@ def filter_broadcast_members(
         if premium_only is True and not is_premium:
             continue
         if premium_only is False and is_premium:
+            continue
+        perms = parse_permissions(member.get("permissions"))
+        if not permission_allows_notification(perms, notif_type, mentions):
             continue
         prefs = parse_member_prefs(member.get("notification_prefs"))
         if member_allows(prefs, notif_type, score=score):
@@ -264,24 +276,39 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
     )
 
 
-def render_member_prefs_text(prefs: dict) -> str:
+MEMBER_PREF_LABELS = {
+    "mentions": "Упоминания",
+    "giveaways": "Розыгрыши",
+    "wins": "Победы",
+    "checks": "Чеки",
+    "deadlines": "Дедлайны",
+    "digest": "Ежедневный дайджест",
+}
+
+
+def render_member_prefs_text(prefs: dict, allowed: Optional[list[str]] = None, accounts: Optional[list[str]] = None) -> str:
+    """Personal toggles. `allowed` limits the rows to what the key granted."""
+    codes = [code for code in ALL_NOTIFY if code in (allowed if allowed is not None else ALL_NOTIFY)]
+
     def mark(key: str) -> str:
         return "✅" if prefs.get(key) else "🔕"
 
     min_score = int(prefs.get("min_score") or 0)
     score_line = f"🎯 Мин. score розыгрышей: {min_score}" if min_score else "🎯 Мин. score розыгрышей: любой"
-    return "\n".join(
-        [
-            "🔔 **Мои уведомления**",
-            "",
-            f"{'🔕 Всё отключено' if prefs.get('muted') else '🔔 Уведомления включены'}",
-            "",
-            f"{mark('mentions')} Упоминания",
-            f"{mark('giveaways')} Розыгрыши",
-            f"{mark('wins')} Победы",
-            f"{mark('checks')} Чеки",
-            f"{mark('deadlines')} Дедлайны",
-            f"{mark('digest')} Ежедневный дайджест",
-            score_line,
-        ]
-    )
+    lines = [
+        "🔔 **Мои уведомления**",
+        "",
+        f"{'🔕 Всё отключено' if prefs.get('muted') else '🔔 Уведомления включены'}",
+        "",
+    ]
+    if codes:
+        lines.extend(f"{mark(code)} {MEMBER_PREF_LABELS[code]}" for code in codes)
+    else:
+        lines.append("__Владелец не открыл ни одного типа уведомлений.__")
+    lines.append(score_line)
+    if accounts:
+        lines += ["", "👤 Только по аккаунтам: " + ", ".join(f"@{name.lstrip('@')}" for name in accounts)]
+    hidden = [code for code in ALL_NOTIFY if code not in codes]
+    if hidden:
+        lines += ["", "__Скрыто владельцем: " + ", ".join(NOTIFY_TYPES[code][0] for code in hidden) + "__"]
+    return "\n".join(lines)

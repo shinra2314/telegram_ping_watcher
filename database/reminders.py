@@ -96,7 +96,7 @@ async def get_due_reminders(now_iso: Optional[str] = None, limit: int = 50) -> l
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT r.*, p.chat, p.text, p.link, p.deadline_at, p.deadline_source, p.action_status, p.giveaway_status
+            SELECT r.*, p.chat, p.text, p.link, p.mentions, p.deadline_at, p.deadline_source, p.action_status, p.giveaway_status
             FROM reminders r
             JOIN pings p ON p.id = r.ping_id
             WHERE r.sent_at IS NULL

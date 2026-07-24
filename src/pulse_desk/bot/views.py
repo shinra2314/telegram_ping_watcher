@@ -10,6 +10,7 @@ from typing import Optional
 from telethon import Button
 
 from .. import APP_VERSION  # noqa: F401  (re-exported for later phases)
+from ..bot_permissions import full_permissions, has_feature, render_permissions_summary
 
 DIV = "━━━━━━━━━━━━━━━"
 
@@ -22,11 +23,29 @@ def fmt_dt(value: Optional[str]) -> str:
     return text[5:16] if len(text) >= 16 else text
 
 
-def main_menu_buttons(role: str) -> list[list[Button]]:
-    rows = [
-        [Button.inline("🎁 Розыгрыши", b"menu_giveaways"), Button.inline("💸 Чеки", b"mon:feed:check")],
-        [Button.inline("🕐 Последние", b"mon:feed:all"), Button.inline("📊 Сводка", b"menu_summary")],
+# home-screen button -> feature code its key must grant
+SECTION_FEATURES = {
+    "menu_giveaways": "giveaways",
+    "mon:feed:check": "checks",
+    "mon:feed:all": "recent",
+    "menu_summary": "stats",
+}
+
+
+def main_menu_buttons(role: str, perms: Optional[dict] = None) -> list[list[Button]]:
+    """Home screen. A guest only sees the sections their access key granted."""
+    perms = perms or full_permissions()
+    granted = [
+        Button.inline(label, cb.encode())
+        for label, cb in (
+            ("🎁 Розыгрыши", "menu_giveaways"),
+            ("💸 Чеки", "mon:feed:check"),
+            ("🕐 Последние", "mon:feed:all"),
+            ("📊 Сводка", "menu_summary"),
+        )
+        if role == "admin" or has_feature(perms, SECTION_FEATURES[cb])
     ]
+    rows = [granted[i:i + 2] for i in range(0, len(granted), 2)]
     if role == "admin":
         rows.append([Button.inline("⚙️ Управление", b"adm:home"),
                      Button.inline("🔄 Скан", b"menu_scan")])
@@ -36,20 +55,29 @@ def main_menu_buttons(role: str) -> list[list[Button]]:
     return rows
 
 
-def help_text(role: str) -> str:
+# slash-command help line -> feature code it needs
+COMMAND_FEATURES = [
+    ("• /stats — статистика", "stats"),
+    ("• /status — состояние аккаунтов", "status"),
+    ("• /giveaways — розыгрыши", "giveaways"),
+    ("• /recent `[N]` — последние упоминания", "recent"),
+    ("• /checks — найденные чеки", "checks"),
+    ("• /search `<текст>` — поиск", "search"),
+    ("• /market — курсы", "market"),
+]
+
+
+def help_text(role: str, perms: Optional[dict] = None) -> str:
+    perms = perms or full_permissions()
     lines = [
         "🛰 **PULSE DESK**",
         "__Мониторинг каналов и розыгрышей__",
         DIV,
         "📋 **Команды**",
         "• /menu — главное меню",
-        "• /stats — статистика",
-        "• /status — состояние аккаунтов",
-        "• /giveaways — розыгрыши",
-        "• /recent `[N]` — последние упоминания",
-        "• /checks — найденные чеки",
-        "• /search `<текст>` — поиск",
-        "• /market — курсы",
+    ]
+    lines += [line for line, code in COMMAND_FEATURES if role == "admin" or has_feature(perms, code)]
+    lines += [
         "• /settings — настройки и уведомления",
         "• /ping — проверка связи",
     ]
@@ -68,7 +96,7 @@ def help_text(role: str) -> str:
             "• /settings — настройки мониторинга",
         ]
     else:
-        lines += ["", "👁 __Режим: только просмотр__"]
+        lines += ["", "👁 __Режим: только просмотр__", "", render_permissions_summary(perms)]
     return "\n".join(lines)
 
 

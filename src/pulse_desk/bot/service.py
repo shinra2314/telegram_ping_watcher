@@ -18,6 +18,15 @@ from ..access_control import find_undoable, parse_repeat_rule, plan_undo, resolv
 from ..analytics import build_analytics
 from ..app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, CHECK_FRESH_MINUTES, LOG_FILE, logger, settings, state
 from ..bot_notify import BOT_ASSETS_DIR, edit_pending_admin_card, execute_pending_broadcast
+from ..bot_permissions import (
+    accounts_allowed,
+    allowed_pref_keys,
+    dump_permissions,
+    full_permissions,
+    has_feature,
+    parse_permissions,
+    render_permissions_summary,
+)
 from ..bot_prefs import (
     KEYWORD_SCOPES,
     next_hhmm_datetime,
@@ -37,7 +46,7 @@ from ..live import publish_live_event
 from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
-from .views import DIV, fmt_dt, help_text, main_menu_buttons
+from .views import DIV, SECTION_FEATURES, fmt_dt, help_text, main_menu_buttons
 from .keyboards import (
     MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
     giveaway_feed_keyboard, keys_keyboard, logs_keyboard, management_grid,
@@ -150,21 +159,28 @@ async def init_bot() -> None:
                 return ""
             return f" до {until.astimezone().strftime('%d.%m %H:%M')}"
 
-        async def bot_role(sender_id: int) -> Optional[str]:
-            """Resolve a Telegram user to 'admin', 'viewer', or None (no access).
+        async def resolve_member_access(sender_id: int) -> tuple[Optional[str], dict]:
+            """Resolve a Telegram user to (role, grants).
 
-            Admins bypass the schedule; members are additionally gated by their
-            access windows (see access_control.resolve_access)."""
+            role is 'admin', 'viewer'/'premium', or None (no access). Admins bypass
+            both the schedule and the grants; members are gated by their access
+            windows (see access_control.resolve_access) and carry the grants copied
+            from the key they joined with.
+            """
             if sender_id in _bot_admin_chat_ids():
-                return "admin"
+                return "admin", full_permissions()
             member = await get_bot_member(sender_id)
             if not member or member.get("blocked"):
-                return None
+                return None, full_permissions()
             await touch_bot_member(sender_id)
             allowed, _reason, _until = await _access_decision(sender_id, member)
             if not allowed:
-                return None
-            return member.get("role") or "viewer"
+                return None, full_permissions()
+            return member.get("role") or "viewer", parse_permissions(member.get("permissions"))
+
+        async def bot_role(sender_id: int) -> Optional[str]:
+            role, _perms = await resolve_member_access(sender_id)
+            return role
 
         async def access_block_notice(sender_id: int) -> Optional[str]:
             """User-facing message if a known member is currently closed by schedule."""
@@ -236,18 +252,28 @@ async def init_bot() -> None:
             inner.__name__ = getattr(handler, "__name__", "inner")
             return inner
 
-        def viewer_only(handler):
-            """Gate a handler to any authenticated role and pass the resolved role in."""
-            async def inner(event):
-                role = await bot_role(event.sender_id)
-                if role is None:
-                    notice = await access_block_notice(event.sender_id)
-                    if notice:
-                        await event.respond(notice)
-                    return
-                await handler(event, role)
-            inner.__name__ = getattr(handler, "__name__", "inner")
-            return safe(inner)
+        FEATURE_DENIED = "🔒 **Раздел закрыт.**\nВладелец не открыл его для вашего ключа."
+
+        def viewer_only(feature: Optional[str] = None):
+            """Gate a handler to any authenticated role, optionally to one feature.
+
+            The wrapped handler is called as `handler(event, role, perms)`.
+            """
+            def decorator(handler):
+                async def inner(event):
+                    role, perms = await resolve_member_access(event.sender_id)
+                    if role is None:
+                        notice = await access_block_notice(event.sender_id)
+                        if notice:
+                            await event.respond(notice)
+                        return
+                    if feature and role != "admin" and not has_feature(perms, feature):
+                        await event.respond(FEATURE_DENIED, buttons=main_menu_buttons(role, perms))
+                        return
+                    await handler(event, role, perms)
+                inner.__name__ = getattr(handler, "__name__", "inner")
+                return safe(inner)
+            return decorator
 
         def _cb_id(data: str) -> Optional[int]:
             """Parse the trailing int from a callback like `fav_42`; None if malformed."""
@@ -293,10 +319,16 @@ async def init_bot() -> None:
                 "👤 **Аккаунты**\n" + ("\n".join(account_lines) if account_lines else "  __нет аккаунтов__")
             )
 
-        async def render_giveaways():
+        def visible_pings(rows: list[dict], perms: dict, limit: int) -> list[dict]:
+            """Drop rows about accounts this key was not granted, then trim."""
+            return [r for r in rows if accounts_allowed(perms, r.get("mentions"))][:limit]
+
+        async def render_giveaways(perms: Optional[dict] = None):
+            perms = perms or full_permissions()
             board = await get_giveaway_board(limit=10)
             stats = board.get("stats") or {}
             need = (board.get("buckets") or {}).get("need_action") or []
+            need = [r for r in need if accounts_allowed(perms, r.get("mentions"))]
             items = []
             for r in need[:8]:
                 deadline = r.get("deadline_at")
@@ -306,9 +338,11 @@ async def init_bot() -> None:
                 items.append((int(r["id"]), label[:48]))
             return giveaways_header(stats, len(need)), giveaway_feed_keyboard(items)
 
-        async def open_giveaway_view(ping_id: int):
+        async def open_giveaway_view(ping_id: int, perms: Optional[dict] = None):
             ping = await get_ping_by_id(ping_id)
             if not ping:
+                return None
+            if perms is not None and not accounts_allowed(perms, ping.get("mentions")):
                 return None
             return giveaway_card(ping), giveaway_card_keyboard(ping_id)
 
@@ -415,19 +449,36 @@ async def init_bot() -> None:
             }
             return summary_card(analytics=analytics, market=market, system=system)
 
+        # plain `menu_*` callback -> feature code its key must grant
+        MENU_CALLBACK_FEATURES = {
+            "menu_stats": "stats",
+            "menu_summary": "stats",
+            "menu_status": "status",
+            "menu_giveaways": "giveaways",
+            "menu_recent": "recent",
+            "menu_checks": "checks",
+            "menu_market": "market",
+        }
+
         FEED_LABELS = dict(MON_FILTERS)
         FEED_PAGE_SIZE = 8
 
-        async def render_feed(active: str = "all", page: int = 1):
+        async def render_feed(active: str = "all", page: int = 1, perms: Optional[dict] = None):
+            perms = perms or full_permissions()
             if active not in FEED_LABELS:
                 active = "all"
             page = max(1, page)
-            # Fetch one extra row to know whether an older page exists.
+            # Fetch one extra row to know whether an older page exists. An
+            # account-scoped key needs a wider window, since most rows drop out.
+            scoped = bool(perms.get("accounts"))
+            fetch = (FEED_PAGE_SIZE + 1) * (8 if scoped else 1)
             rows = await get_pings(
-                limit=FEED_PAGE_SIZE + 1,
-                offset=(page - 1) * FEED_PAGE_SIZE,
+                limit=fetch,
+                offset=(page - 1) * FEED_PAGE_SIZE * (8 if scoped else 1),
                 chat_type=active,
             )
+            if scoped:
+                rows = [r for r in rows if accounts_allowed(perms, r.get("mentions"))]
             has_more = len(rows) > FEED_PAGE_SIZE
             rows = rows[:FEED_PAGE_SIZE]
             items = []
@@ -437,9 +488,11 @@ async def init_bot() -> None:
                 items.append((int(r["id"]), label[:48]))
             return feed_header(FEED_LABELS[active], len(rows)), feed_keyboard(items, active, page, has_more)
 
-        async def open_ping_view(ping_id: int, is_admin: bool):
+        async def open_ping_view(ping_id: int, is_admin: bool, perms: Optional[dict] = None):
             ping = await get_ping_by_id(ping_id)
             if not ping:
+                return None
+            if perms is not None and not accounts_allowed(perms, ping.get("mentions")):
                 return None
             return ping_card(ping), ping_card_keyboard(ping_id, is_admin)
 
@@ -570,19 +623,29 @@ async def init_bot() -> None:
             ]
             return render_notification_settings_text(notif, digest_cfg), buttons
 
-        def member_prefs_menu(prefs: dict) -> tuple[str, list[list[Button]]]:
-            def toggle_btn(label: str, key: str, cb: bytes) -> Button:
-                return Button.inline(f"{'✅' if prefs.get(key) else '🔕'} {label}", cb)
+        PF_LABELS = {
+            "mentions": ("Упоминания", b"pf_me"),
+            "giveaways": ("Розыгрыши", b"pf_gw"),
+            "wins": ("Победы", b"pf_wn"),
+            "checks": ("Чеки", b"pf_ch"),
+            "deadlines": ("Дедлайны", b"pf_dl"),
+            "digest": ("Дайджест", b"pf_dg"),
+        }
 
-            buttons = [
-                [Button.inline("🔔 Включить всё" if prefs.get("muted") else "🔕 Отключить всё", b"pf_mu")],
-                [toggle_btn("Упоминания", "mentions", b"pf_me"), toggle_btn("Розыгрыши", "giveaways", b"pf_gw")],
-                [toggle_btn("Победы", "wins", b"pf_wn"), toggle_btn("Чеки", "checks", b"pf_ch")],
-                [toggle_btn("Дедлайны", "deadlines", b"pf_dl"), toggle_btn("Дайджест", "digest", b"pf_dg")],
-                [Button.inline("🎯 Мин. score розыгрышей…", b"pf_sc")],
-                [Button.inline("⬅️ Меню", b"menu_main")],
+        def member_prefs_menu(prefs: dict, perms: Optional[dict] = None) -> tuple[str, list[list[Button]]]:
+            """Personal toggles, limited to the notification types the key granted."""
+            perms = perms or full_permissions()
+            allowed = allowed_pref_keys(perms)
+            toggles = [
+                Button.inline(f"{'✅' if prefs.get(code) else '🔕'} {PF_LABELS[code][0]}", PF_LABELS[code][1])
+                for code in allowed
             ]
-            return render_member_prefs_text(prefs), buttons
+            buttons = [[Button.inline("🔔 Включить всё" if prefs.get("muted") else "🔕 Отключить всё", b"pf_mu")]]
+            buttons += [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
+            if "giveaways" in allowed:
+                buttons.append([Button.inline("🎯 Мин. score розыгрышей…", b"pf_sc")])
+            buttons.append([Button.inline("⬅️ Меню", b"menu_main")])
+            return render_member_prefs_text(prefs, allowed, perms.get("accounts")), buttons
 
         async def handle_settings_callback(event, data: str) -> None:
             if data in ("st", "st_x"):
@@ -790,7 +853,10 @@ async def init_bot() -> None:
             uname = getattr(sender, "username", "") or ""
             name = " ".join(filter(None, [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""])).strip()
             role = key.get("role") or "viewer"
-            await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role)
+            perms = parse_permissions(key.get("permissions"))
+            # Grants are snapshotted onto the member so editing or revoking the
+            # key later never leaves an onboarded guest with a broken menu.
+            await upsert_bot_member(event.sender_id, uname, name, key.get("id"), role, dump_permissions(perms))
             greeting = f"Привет, {name}!" if name else "Привет!"
             if role == "admin":
                 access_line = "👑 Доступ: __полный__"
@@ -881,8 +947,8 @@ async def init_bot() -> None:
             await respond_rich(event, home, buttons=main_menu_buttons(role))
 
         @bot_client.on(events.NewMessage(pattern="/settings"))
-        @viewer_only
-        async def settings_handler(event, role):
+        @viewer_only()
+        async def settings_handler(event, role, perms):
             if role == "admin":
                 text, buttons = settings_root_menu()
                 await event.respond(text, buttons=buttons)
@@ -891,50 +957,52 @@ async def init_bot() -> None:
             if not member:
                 await event.respond("Личные настройки недоступны.")
                 return
-            text, buttons = member_prefs_menu(parse_member_prefs(member.get("notification_prefs")))
+            text, buttons = member_prefs_menu(parse_member_prefs(member.get("notification_prefs")), perms)
             await event.respond(text, buttons=buttons)
 
         @bot_client.on(events.NewMessage(pattern="/help"))
-        @viewer_only
-        async def help_handler(event, role):
-            await event.respond(help_text(role), buttons=section_nav(b"menu_help"))
+        @viewer_only()
+        async def help_handler(event, role, perms):
+            await event.respond(help_text(role, perms), buttons=section_nav(b"menu_help"))
 
         @bot_client.on(events.NewMessage(pattern="/stats"))
-        @viewer_only
-        async def stats_handler(event, role):
+        @viewer_only("stats")
+        async def stats_handler(event, role, perms):
             await event.respond(await render_stats(), buttons=section_nav(b"menu_stats"))
 
         @bot_client.on(events.NewMessage(pattern="/status"))
-        @viewer_only
-        async def status_handler(event, role):
+        @viewer_only("status")
+        async def status_handler(event, role, perms):
             await event.respond(await render_status(), buttons=section_nav(b"menu_status"))
 
         @bot_client.on(events.NewMessage(pattern="/giveaways"))
-        @viewer_only
-        async def giveaways_handler(event, role):
-            text, kb = await render_giveaways()
+        @viewer_only("giveaways")
+        async def giveaways_handler(event, role, perms):
+            text, kb = await render_giveaways(perms)
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/recent"))
-        @viewer_only
-        async def recent_handler(event, role):
-            text, kb = await render_feed("all")
+        @viewer_only("recent")
+        async def recent_handler(event, role, perms):
+            text, kb = await render_feed("all", perms=perms)
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/latest"))
-        @viewer_only
-        async def latest_handler(event, role):
-            text, kb = await render_feed("all")
+        @viewer_only("recent")
+        async def latest_handler(event, role, perms):
+            text, kb = await render_feed("all", perms=perms)
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/search"))
-        @viewer_only
-        async def search_handler(event, role):
+        @viewer_only("search")
+        async def search_handler(event, role, perms):
             parts = event.message.text.split(" ", 1)
             if len(parts) < 2:
                 await event.respond("Укажите текст: `/search TON`")
                 return
-            rows = await get_pings(limit=5, search=parts[1])
+            # Over-fetch when the key is account-scoped so the page still fills.
+            found = await get_pings(limit=5 if not perms.get("accounts") else 40, search=parts[1])
+            rows = visible_pings(found, perms, 5)
             if not rows:
                 await event.respond("🔎 __Ничего не найдено.__", buttons=back_home())
                 return
@@ -948,19 +1016,19 @@ async def init_bot() -> None:
             await event.respond("\n\n".join(result), buttons=back_home(), link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/checks"))
-        @viewer_only
-        async def checks_handler(event, role):
-            text, kb = await render_feed("check")
+        @viewer_only("checks")
+        async def checks_handler(event, role, perms):
+            text, kb = await render_feed("check", perms=perms)
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/market"))
-        @viewer_only
-        async def market_handler(event, role):
+        @viewer_only("market")
+        async def market_handler(event, role, perms):
             await event.respond(await render_market(), buttons=section_nav(b"menu_market"))
 
         @bot_client.on(events.NewMessage(pattern="/ping"))
-        @viewer_only
-        async def ping_handler(event, role):
+        @viewer_only()
+        async def ping_handler(event, role, perms):
             await event.respond("🏓 **Понг!** Бот на связи.")
 
         @bot_client.on(events.NewMessage(pattern="/logs"))
@@ -1314,29 +1382,40 @@ async def init_bot() -> None:
         @safe
         async def callback_handler(event):
             data = event.data.decode("utf-8")
-            role = await bot_role(event.sender_id)
+            role, perms = await resolve_member_access(event.sender_id)
             if role is None:
                 await event.answer("Доступ запрещён", alert=True)
                 return
+
+            def feature_ok(code: str) -> bool:
+                return role == "admin" or has_feature(perms, code)
 
             # ---- structured `domain:action:arg` callbacks ----
             if ":" in data:
                 seg = data.split(":")
                 if seg[0] == "mon" and len(seg) >= 2 and seg[1] == "feed":
+                    active = seg[2] if len(seg) > 2 else "all"
+                    # The чеки filter is its own grant; other filters share the feed grant.
+                    if not feature_ok("checks" if active == "check" else "recent"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
                     try:
                         page = int(seg[3]) if len(seg) > 3 else 1
                     except ValueError:
                         page = 1
-                    text, kb = await render_feed(seg[2] if len(seg) > 2 else "all", page)
+                    text, kb = await render_feed(active, page, perms=perms)
                     await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
                 if seg[0] == "mon" and len(seg) >= 3 and seg[1] == "open":
+                    if not (feature_ok("recent") or feature_ok("checks")):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
                     try:
                         pid = int(seg[2])
                     except ValueError:
                         await event.answer("Некорректная команда", alert=True)
                         return
-                    res = await open_ping_view(pid, role == "admin")
+                    res = await open_ping_view(pid, role == "admin", perms)
                     if res is None:
                         await event.answer("Запись не найдена", alert=True)
                         return
@@ -1420,12 +1499,15 @@ async def init_bot() -> None:
                     await event.answer("Записал: участвуете 🎯" if action == "joined" else "Ок, пропускаем")
                     return
                 if seg[0] == "gw" and len(seg) >= 3 and seg[1] == "open":
+                    if not feature_ok("giveaways"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
                     try:
                         pid = int(seg[2])
                     except ValueError:
                         await event.answer("Некорректная команда", alert=True)
                         return
-                    res = await open_giveaway_view(pid)
+                    res = await open_giveaway_view(pid, perms)
                     if res is None:
                         await event.answer("Розыгрыш не найден", alert=True)
                         return
@@ -1578,9 +1660,14 @@ async def init_bot() -> None:
                     await event.answer("Неизвестная команда", alert=True)
                     return
 
-            # ---- menu navigation (any authenticated role) ----
+            # ---- menu navigation (any authenticated role, within granted sections) ----
+            needed = MENU_CALLBACK_FEATURES.get(data)
+            if needed and not feature_ok(needed):
+                await event.answer("Раздел закрыт владельцем", alert=True)
+                return
+
             if data == "menu_help":
-                await safe_edit(event, help_text(role), buttons=section_nav(b"menu_help"))
+                await safe_edit(event, help_text(role, perms), buttons=section_nav(b"menu_help"))
                 return
             if data == "menu_stats":
                 await safe_edit(event, await render_stats(), buttons=section_nav(b"menu_stats"))
@@ -1589,15 +1676,15 @@ async def init_bot() -> None:
                 await safe_edit(event, await render_status(), buttons=section_nav(b"menu_status"))
                 return
             if data == "menu_giveaways":
-                text, kb = await render_giveaways()
+                text, kb = await render_giveaways(perms)
                 await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_recent":
-                text, kb = await render_feed("all")
+                text, kb = await render_feed("all", perms=perms)
                 await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_checks":
-                text, kb = await render_feed("check")
+                text, kb = await render_feed("check", perms=perms)
                 await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_market":
@@ -1608,7 +1695,7 @@ async def init_bot() -> None:
                 return
 
             if data == "menu_main":
-                await safe_edit(event, await render_home(role), buttons=main_menu_buttons(role))
+                await safe_edit(event, await render_home(role), buttons=main_menu_buttons(role, perms))
                 return
 
             if data == "noop":
@@ -1627,9 +1714,12 @@ async def init_bot() -> None:
                     return
                 toggled = PF_TOGGLES.get(data)
                 if toggled:
+                    if toggled != "muted" and toggled not in allowed_pref_keys(perms):
+                        await event.answer("Этот тип уведомлений закрыт владельцем", alert=True)
+                        return
                     prefs = toggle_member_pref(prefs, toggled)
                     await set_bot_member_prefs(event.sender_id, prefs)
-                text, buttons = member_prefs_menu(prefs)
+                text, buttons = member_prefs_menu(prefs, perms)
                 await safe_edit(event, text, buttons=buttons)
                 if toggled:
                     await event.answer("Сохранено")

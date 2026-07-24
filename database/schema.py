@@ -276,10 +276,14 @@ async def init_db() -> None:
                 role TEXT NOT NULL DEFAULT 'viewer',
                 created_at TEXT NOT NULL,
                 expires_at TEXT,
-                revoked INTEGER NOT NULL DEFAULT 0
+                revoked INTEGER NOT NULL DEFAULT 0,
+                permissions TEXT DEFAULT ''
             )
             """
         )
+        bot_keys_columns = await _columns(db, "bot_access_keys")
+        if "permissions" not in bot_keys_columns:
+            await db.execute("ALTER TABLE bot_access_keys ADD COLUMN permissions TEXT DEFAULT ''")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS bot_members (
@@ -291,7 +295,8 @@ async def init_db() -> None:
                 joined_at TEXT NOT NULL,
                 last_seen_at TEXT,
                 blocked INTEGER NOT NULL DEFAULT 0,
-                notification_prefs TEXT DEFAULT ''
+                notification_prefs TEXT DEFAULT '',
+                permissions TEXT DEFAULT ''
             )
             """
         )
@@ -302,6 +307,8 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE bot_members ADD COLUMN access_default_policy TEXT NOT NULL DEFAULT 'allow'")
         if "timezone" not in bot_members_columns:
             await db.execute("ALTER TABLE bot_members ADD COLUMN timezone TEXT DEFAULT ''")
+        if "permissions" not in bot_members_columns:
+            await db.execute("ALTER TABLE bot_members ADD COLUMN permissions TEXT DEFAULT ''")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS bot_broadcast_messages (

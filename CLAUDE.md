@@ -83,6 +83,10 @@ src/pulse_desk/
   scan_engine.py    — full_history_scan, scan_single_account, mention backfill
   giveaway_actions.py — Safe giveaway join: analysis, button detection, confirm
   bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
+  bot_permissions.py — Per-key grants (pure, unit tested): which bot sections a
+                      guest may open, which notification types reach them, and
+                      an optional whitelist of tracked accounts. Empty
+                      `permissions` column = full viewer access (legacy keys)
   bot_service.py    — init_bot: inline menus, slash commands, access keys,
                       /access scheduled-access management
   bot/stickers.py   — Aperture sticker registry + best-effort sender (gated by
@@ -129,7 +133,7 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 16)
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 20)
   schema.py   — init_db + migrations   backups.py  — file backups
   pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
   giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards

@@ -169,7 +169,7 @@ class ExecutePendingPremiumTests(unittest.TestCase):
             row = await database.get_pending_broadcast(pb_id)
             calls: list[dict] = []
 
-            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None):
+            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None):
                 calls.append({"premium_only": premium_only})
                 return [(9, 90)]
 
@@ -191,7 +191,7 @@ class ExecutePendingPremiumTests(unittest.TestCase):
             )
             row = await database.get_pending_broadcast(pb_id)
 
-            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None):
+            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None):
                 return []
 
             bot_notify.broadcast_member_notification = fake_broadcast

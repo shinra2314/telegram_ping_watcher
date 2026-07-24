@@ -121,7 +121,9 @@ async def reminder_loop() -> None:
                     if reminder.get("link"):
                         buttons.append([Button.url("Открыть в Telegram", reminder["link"])])
                     await send_admin_bot_message(message, buttons=buttons or None)
-                    await broadcast_member_notification(message, buttons or None, notif_type="deadline")
+                    await broadcast_member_notification(
+                        message, buttons or None, notif_type="deadline", mentions=reminder.get("mentions")
+                    )
                 await mark_reminder_sent(int(reminder["id"]))
                 await record_app_event("WARNING", "reminder", "Deadline reminder sent", {"ping_id": ping_id, "deadline_at": deadline_at})
                 await publish_live_event("reminder", {"ping_id": ping_id, "chat": chat, "deadline_at": deadline_at})

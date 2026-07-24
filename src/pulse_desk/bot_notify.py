@@ -108,8 +108,12 @@ async def broadcast_member_notification(
     notif_type: str = "mention",
     score: Optional[int] = None,
     premium_only: Optional[bool] = None,
+    mentions: Any = None,
 ) -> list[tuple[int, int]]:
-    """Send a notification to viewer members whose preferences allow `notif_type`.
+    """Send a notification to viewer members allowed to receive it.
+
+    `mentions` are the tracked usernames the event is about — members whose
+    access key is limited to specific accounts only get matching events.
 
     `score` (giveaway candidate score) feeds each member's personal min_score
     filter; `premium_only` splits the audience (True — premium members only,
@@ -130,7 +134,7 @@ async def broadcast_member_notification(
         return delivered
     admin_ids = {int(ADMIN_ID)} if ADMIN_ID else set()
     # Owner is excluded here — already notified via send_admin_bot_message.
-    for member in filter_broadcast_members(members, notif_type, admin_ids, score=score, premium_only=premium_only):
+    for member in filter_broadcast_members(members, notif_type, admin_ids, score=score, premium_only=premium_only, mentions=mentions):
         tg_id = member.get("tg_id")
         try:
             if not await ensure_bot_connected():
@@ -269,7 +273,7 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
     (premium copies went out at enqueue time under the row's bc_token).
 
     Returns (delivered_count, hidebc_token_or_none)."""
-    from database import get_giveaway_candidate, save_broadcast_messages
+    from database import get_giveaway_candidate, get_ping_by_id, save_broadcast_messages
 
     link = row.get("link") or None
     ping_id = int(row["ping_id"]) if row.get("ping_id") else None
@@ -279,6 +283,11 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
         candidate = await get_giveaway_candidate(ping_id)
         if candidate:
             score = int(candidate.get("score") or 0)
+    # The pending row does not carry mentions — account-scoped keys need them.
+    mentions = None
+    if ping_id:
+        ping = await get_ping_by_id(ping_id)
+        mentions = (ping or {}).get("mentions")
     delivered = await broadcast_member_notification(
         row.get("message") or "",
         _member_card_buttons(link, ping_id, notif_type),
@@ -286,6 +295,7 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
         notif_type=notif_type,
         score=score,
         premium_only=False,
+        mentions=mentions,
     )
     token = row.get("bc_token") or None  # set when premium copies were sent at enqueue
     if delivered:
@@ -339,7 +349,13 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
             # Hold the member broadcast until the owner approves (or the timeout
             # fires). Premium members are the exception — they get it right away.
             premium_delivered = await broadcast_member_notification(
-                msg, member_buttons, file=header_image, notif_type=notif_type, score=score, premium_only=True
+                msg,
+                member_buttons,
+                file=header_image,
+                notif_type=notif_type,
+                score=score,
+                premium_only=True,
+                mentions=record.get("mentions"),
             )
             bc_token = ""
             if premium_delivered:
@@ -373,7 +389,7 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         # Mirror notification to viewer members first, so the admin message can
         # carry a working "hide from friends" button.
         delivered = await broadcast_member_notification(
-            msg, member_buttons, file=header_image, notif_type=notif_type, score=score
+            msg, member_buttons, file=header_image, notif_type=notif_type, score=score, mentions=record.get("mentions")
         )
         if delivered:
             token = secrets_module.token_hex(4)

@@ -160,6 +160,42 @@
       lucide.createIcons();
     }
 
+    // Catalogs come from /api/bot/access so the бот and the web UI never drift apart.
+    const botGrants = { features: [], notify: [], accounts: [] };
+
+    function renderGrantOptions(boxId, items, { checked = true } = {}) {
+      const box = $(boxId);
+      if (!box) return;
+      box.classList.remove("muted");
+      box.innerHTML = items.length ? items.map(item => `
+        <label class="grant-option">
+          <input type="checkbox" value="${esc(item.code)}"${checked ? " checked" : ""}>
+          <span><strong>${esc(item.label)}</strong>${item.hint ? `<span>${esc(item.hint)}</span>` : ""}</span>
+        </label>`).join("") : "<div class='muted'>Список пуст.</div>";
+    }
+
+    function readGrant(boxId) {
+      return Array.from(document.querySelectorAll(`#${boxId} input[type=checkbox]:checked`)).map(el => el.value);
+    }
+
+    function grantBadges(perms, catalogs) {
+      const labelOf = (list, code) => (list.find(x => x.code === code) || {}).label || code;
+      const features = perms?.features || [];
+      const notify = perms?.notify || [];
+      const accounts = perms?.accounts || [];
+      const parts = [];
+      parts.push(features.length === (catalogs.features || []).length
+        ? "<span class='badge'>📂 все разделы</span>"
+        : (features.length ? features.map(c => `<span class="badge">${esc(labelOf(catalogs.features || [], c))}</span>`).join("") : "<span class='badge bad'>📂 нет разделов</span>"));
+      parts.push(notify.length === (catalogs.notify || []).length
+        ? "<span class='badge'>🔔 все уведомления</span>"
+        : (notify.length ? notify.map(c => `<span class="badge">${esc(labelOf(catalogs.notify || [], c))}</span>`).join("") : "<span class='badge bad'>🔔 без уведомлений</span>"));
+      parts.push(accounts.length
+        ? accounts.map(a => `<span class="badge">👤 @${esc(a)}</span>`).join("")
+        : "<span class='badge'>👤 все аккаунты</span>");
+      return `<div class="grant-badges">${parts.join("")}</div>`;
+    }
+
     async function loadBotAccess() {
       const keysBox = $("botkeys-list");
       const membersBox = $("botmembers-list");
@@ -174,10 +210,19 @@
       }
       const meta = $("botaccess-meta");
       if (meta) meta.textContent = data.bot_username ? `Бот: @${esc(data.bot_username)} · только просмотр` : "Бот не настроен — ключи всё равно сохранятся";
+      const catalogs = data.catalogs || { features: [], notify: [] };
+      botGrants.features = catalogs.features || [];
+      botGrants.notify = catalogs.notify || [];
+      botGrants.accounts = (data.tracked_usernames || []).map(name => ({ code: name, label: "@" + name, hint: "" }));
+      // Only (re)build the form when it is untouched, so a half-filled selection survives a refresh.
+      if (!document.querySelector("#botkey-features input")) renderGrantOptions("botkey-features", botGrants.features);
+      if (!document.querySelector("#botkey-notify input")) renderGrantOptions("botkey-notify", botGrants.notify);
+      if (!document.querySelector("#botkey-accounts input")) renderGrantOptions("botkey-accounts", botGrants.accounts, { checked: false });
       const keys = data.keys || [];
       keysBox.innerHTML = keys.length ? `<div class="backup-list">${keys.map(k => `
         <div class="backup-item">
           <div class="row"><strong>#${k.id} ${esc(k.label || "—")}</strong><span class="badge">👥 ${k.member_count || 0}</span><span class="badge">${k.expires_at ? "до " + fmtDate(k.expires_at) : "бессрочно"}</span></div>
+          ${grantBadges(k.permissions, catalogs)}
           <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
             <code style="font-size:.75rem;word-break:break-all">${esc(k.secret)}</code>
             <button class="btn" data-copy-link="${esc(k.share_link || "")}"><i data-lucide="link"></i>Ссылка</button>
@@ -188,6 +233,7 @@
       membersBox.innerHTML = members.length ? `<div class="backup-list">${members.map(m => `
         <div class="backup-item">
           <div class="row"><strong>${esc(m.name || "—")}</strong><span class="badge">${m.tg_username ? "@" + esc(m.tg_username) : "—"}</span><span class="badge ${m.blocked ? "bad" : "good"}">${m.blocked ? "заблокирован" : "активен"}</span></div>
+          ${grantBadges(m.permissions, catalogs)}
           <div class="deadline-row" style="gap:.4rem;flex-wrap:wrap">
             <span class="muted">ключ: ${esc(m.key_label || "—")} · ${m.last_seen_at ? fmtDate(m.last_seen_at) : "—"}</span>
             <button class="btn ${m.blocked ? "" : "bad"}" data-block-member="${m.tg_id}" data-blocked="${m.blocked ? 1 : 0}"><i data-lucide="${m.blocked ? "user-check" : "user-x"}"></i>${m.blocked ? "Разблокировать" : "Заблокировать"}</button>
@@ -199,13 +245,20 @@
     async function createBotKey(button) {
       const label = ($("botkey-label").value || "").trim();
       const rawExpires = ($("botkey-expires").value || "").trim();
-      const body = { label, expires_at: rawExpires ? new Date(rawExpires).toISOString() : null };
+      const body = {
+        label,
+        expires_at: rawExpires ? new Date(rawExpires).toISOString() : null,
+        features: readGrant("botkey-features"),
+        notify: readGrant("botkey-notify"),
+        accounts: readGrant("botkey-accounts")
+      };
       const res = await api("/api/bot/access/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), button });
       const key = res.key || {};
       const box = $("botkey-new");
       box.style.display = "block";
       box.innerHTML = `
         <div class="row"><strong>🔑 Ключ создан</strong><span class="badge">${esc(key.label || "—")}</span></div>
+        ${grantBadges(key.permissions, { features: botGrants.features, notify: botGrants.notify })}
         <div style="margin:.4rem 0"><code style="font-size:.8rem;word-break:break-all">${esc(key.secret || "")}</code></div>
         ${key.share_link ? `<div class="deadline-row" style="gap:.4rem"><a class="btn primary" href="${esc(key.share_link)}" target="_blank" rel="noopener"><i data-lucide="send"></i>Открыть ссылку</a><button class="btn" data-copy-link="${esc(key.share_link)}"><i data-lucide="copy"></i>Скопировать ссылку</button></div>` : "<div class='muted'>Бот не настроен — отправьте ключ вручную.</div>"}`;
       $("botkey-label").value = "";

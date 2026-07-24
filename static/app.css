@@ -1508,6 +1508,21 @@ header .actions { justify-content: flex-end; max-width: 640px; }
 .settings-toggle { min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
 .settings-panel .textarea { min-height: 118px; }
 
+/* ---------- Access-key grants (bot share links) ---------- */
+.grant-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.grant-block { display: grid; gap: 8px; align-content: start; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.grant-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.grant-head h3 { margin: 0; flex: 1 1 auto; font-size: 14px; }
+.grant-options { display: grid; gap: 6px; max-height: 400px; overflow-y: auto; }
+.grant-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; align-items: start; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; }
+.grant-option:hover { border-color: var(--line-strong); }
+.grant-option input { width: 17px; height: 17px; margin-top: 1px; accent-color: var(--accent); }
+.grant-option strong { display: block; font-size: 13px; color: var(--ink); }
+.grant-option span { display: block; font-size: 11.5px; line-height: 1.35; color: var(--muted); }
+.btn.ghost { padding: 4px 9px; font-size: 11px; border-color: transparent; background: transparent; color: var(--muted); }
+.btn.ghost:hover { border-color: var(--line-strong); color: var(--ink); }
+.grant-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: .35rem; }
+
 .rules-builder { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
 .rules-builder h3 { margin: 0; font-size: 15px; }
 
@@ -1725,7 +1740,9 @@ kbd {
   .debt-actions .btn { flex: 1 1 130px; }
   .settings-summary,
   .settings-form-grid,
+  .grant-grid,
   .settings-form-grid.compact { grid-template-columns: 1fr; }
+  .grant-head .btn { width: auto; }
   .settings-tabs { position: static; }
   .input,
   .select,

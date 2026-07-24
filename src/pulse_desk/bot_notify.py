@@ -81,8 +81,12 @@ async def broadcast_member_notification(
     buttons: Optional[list[list[Button]]] = None,
     file: Optional[str] = None,
     notif_type: str = "mention",
+    mentions: Any = None,
 ) -> list[tuple[int, int]]:
-    """Send a notification to viewer members whose preferences allow `notif_type`.
+    """Send a notification to viewer members allowed to receive it.
+
+    `mentions` are the tracked usernames the event is about — members whose
+    access key is limited to specific accounts only get matching events.
 
     Returns (tg_id, message_id) pairs of the delivered copies so they can be
     deleted later via the admin's "hide from friends" button.
@@ -99,7 +103,7 @@ async def broadcast_member_notification(
         return delivered
     admin_ids = {int(ADMIN_ID)} if ADMIN_ID else set()
     # Owner is excluded here — already notified via send_admin_bot_message.
-    for member in filter_broadcast_members(members, notif_type, admin_ids):
+    for member in filter_broadcast_members(members, notif_type, admin_ids, mentions):
         tg_id = member.get("tg_id")
         try:
             if not await ensure_bot_connected():
@@ -177,7 +181,13 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         member_buttons: Optional[list[list[Button]]] = None
         if link and not link.startswith("нет "):
             member_buttons = [[Button.url("Открыть в Telegram", link)]]
-        delivered = await broadcast_member_notification(msg, member_buttons, file=header_image, notif_type=notification_type_of(record))
+        delivered = await broadcast_member_notification(
+            msg,
+            member_buttons,
+            file=header_image,
+            notif_type=notification_type_of(record),
+            mentions=record.get("mentions"),
+        )
         if delivered:
             token = secrets_module.token_hex(4)
             await save_broadcast_messages(token, delivered)

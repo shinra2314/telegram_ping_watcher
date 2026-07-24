@@ -10,6 +10,14 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from .bot_permissions import (
+    ALL_NOTIFY,
+    NOTIFY_TYPE_ALIASES,
+    NOTIFY_TYPES,
+    parse_permissions,
+    permission_allows_notification,
+)
+
 DEFAULT_MEMBER_PREFS = {
     "muted": False,
     "mentions": True,
@@ -27,13 +35,7 @@ KEYWORD_SCOPES = {
     "i": ("ignore_keywords", "🚫 Игнор"),
 }
 
-_TYPE_TO_PREF = {
-    "mention": "mentions",
-    "giveaway": "giveaways",
-    "win": "wins",
-    "deadline": "deadlines",
-    "digest": "digest",
-}
+_TYPE_TO_PREF = NOTIFY_TYPE_ALIASES
 
 
 def parse_member_prefs(raw: Optional[str]) -> dict:
@@ -78,8 +80,18 @@ def member_allows(prefs: dict, notif_type: str) -> bool:
     return bool(prefs.get(pref_key, DEFAULT_MEMBER_PREFS.get(pref_key, True)))
 
 
-def filter_broadcast_members(members: list[dict], notif_type: str, admin_ids: set[int]) -> list[dict]:
-    """Members eligible for a broadcast of `notif_type`: not blocked, not admin, prefs allow."""
+def filter_broadcast_members(
+    members: list[dict],
+    notif_type: str,
+    admin_ids: set[int],
+    mentions: Any = None,
+) -> list[dict]:
+    """Members eligible for a broadcast of `notif_type`.
+
+    Three gates, all must pass: the member is active (not blocked, not the
+    owner), the key they joined with grants this notification type for the
+    mentioned account, and their own prefs did not mute it.
+    """
     result = []
     for member in members:
         if member.get("blocked"):
@@ -89,6 +101,9 @@ def filter_broadcast_members(members: list[dict], notif_type: str, admin_ids: se
         except (TypeError, ValueError):
             continue
         if tg_id in admin_ids:
+            continue
+        perms = parse_permissions(member.get("permissions"))
+        if not permission_allows_notification(perms, notif_type, mentions):
             continue
         prefs = parse_member_prefs(member.get("notification_prefs"))
         if member_allows(prefs, notif_type):
@@ -169,20 +184,35 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
     )
 
 
-def render_member_prefs_text(prefs: dict) -> str:
+MEMBER_PREF_LABELS = {
+    "mentions": "Упоминания",
+    "giveaways": "Розыгрыши",
+    "wins": "Победы",
+    "deadlines": "Дедлайны",
+    "digest": "Ежедневный дайджест",
+}
+
+
+def render_member_prefs_text(prefs: dict, allowed: Optional[list[str]] = None, accounts: Optional[list[str]] = None) -> str:
+    """Personal toggles. `allowed` limits the rows to what the key granted."""
+    codes = [code for code in ALL_NOTIFY if code in (allowed if allowed is not None else ALL_NOTIFY)]
+
     def mark(key: str) -> str:
         return "✅" if prefs.get(key) else "🔕"
 
-    return "\n".join(
-        [
-            "🔔 **Мои уведомления**",
-            "",
-            f"{'🔕 Всё отключено' if prefs.get('muted') else '🔔 Уведомления включены'}",
-            "",
-            f"{mark('mentions')} Упоминания",
-            f"{mark('giveaways')} Розыгрыши",
-            f"{mark('wins')} Победы",
-            f"{mark('deadlines')} Дедлайны",
-            f"{mark('digest')} Ежедневный дайджест",
-        ]
-    )
+    lines = [
+        "🔔 **Мои уведомления**",
+        "",
+        f"{'🔕 Всё отключено' if prefs.get('muted') else '🔔 Уведомления включены'}",
+        "",
+    ]
+    if codes:
+        lines.extend(f"{mark(code)} {MEMBER_PREF_LABELS[code]}" for code in codes)
+    else:
+        lines.append("__Владелец не открыл ни одного типа уведомлений.__")
+    if accounts:
+        lines += ["", "👤 Только по аккаунтам: " + ", ".join(f"@{name.lstrip('@')}" for name in accounts)]
+    hidden = [code for code in ALL_NOTIFY if code not in codes]
+    if hidden:
+        lines += ["", "__Скрыто владельцем: " + ", ".join(NOTIFY_TYPES[code][0] for code in hidden) + "__"]
+    return "\n".join(lines)

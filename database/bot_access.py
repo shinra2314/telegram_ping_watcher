@@ -10,15 +10,21 @@ import aiosqlite
 from ._core import _connect, _now_iso
 
 
-async def create_bot_key(label: str, secret: str, role: str = "viewer", expires_at: Optional[str] = None) -> dict:
+async def create_bot_key(
+    label: str,
+    secret: str,
+    role: str = "viewer",
+    expires_at: Optional[str] = None,
+    permissions: str = "",
+) -> dict:
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            INSERT INTO bot_access_keys (label, secret, role, created_at, expires_at, revoked)
-            VALUES (?, ?, ?, ?, ?, 0)
+            INSERT INTO bot_access_keys (label, secret, role, created_at, expires_at, revoked, permissions)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
             """,
-            (label or "", secret, role or "viewer", _now_iso(), expires_at),
+            (label or "", secret, role or "viewer", _now_iso(), expires_at, permissions or ""),
         )
         await db.commit()
         row = await (await db.execute("SELECT * FROM bot_access_keys WHERE id = ?", (cursor.lastrowid,))).fetchone()
@@ -67,21 +73,31 @@ async def revoke_bot_key(key_id: int) -> None:
         await db.commit()
 
 
-async def upsert_bot_member(tg_id: int, tg_username: str, name: str, key_id: Optional[int], role: str = "viewer") -> None:
+async def upsert_bot_member(
+    tg_id: int,
+    tg_username: str,
+    name: str,
+    key_id: Optional[int],
+    role: str = "viewer",
+    permissions: str = "",
+) -> None:
+    """Create or refresh a member. Grants are copied from the redeemed key, so a
+    later key edit or revoke never leaves an onboarded guest without a menu."""
     async with _connect() as db:
         await db.execute(
             """
-            INSERT INTO bot_members (tg_id, tg_username, name, key_id, role, joined_at, last_seen_at, blocked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO bot_members (tg_id, tg_username, name, key_id, role, joined_at, last_seen_at, blocked, permissions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
             ON CONFLICT(tg_id) DO UPDATE SET
                 tg_username = excluded.tg_username,
                 name = excluded.name,
                 key_id = excluded.key_id,
                 role = excluded.role,
                 last_seen_at = excluded.last_seen_at,
+                permissions = excluded.permissions,
                 blocked = 0
             """,
-            (tg_id, tg_username or "", name or "", key_id, role or "viewer", _now_iso(), _now_iso()),
+            (tg_id, tg_username or "", name or "", key_id, role or "viewer", _now_iso(), _now_iso(), permissions or ""),
         )
         await db.commit()
 

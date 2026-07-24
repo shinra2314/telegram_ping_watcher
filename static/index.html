@@ -616,6 +616,21 @@
               <label class="field"><span>Метка ключа</span><input class="input" id="botkey-label" placeholder="напр. Друг Вася"></label>
               <label class="field"><span>Срок до (необязательно)</span><input class="input" id="botkey-expires" type="datetime-local"></label>
             </div>
+            <div class="grant-grid">
+              <div class="grant-block">
+                <div class="grant-head"><h3>Разделы бота</h3><button class="btn ghost" type="button" data-grant-all="features">Все</button><button class="btn ghost" type="button" data-grant-none="features">Ничего</button></div>
+                <div id="botkey-features" class="grant-options muted">Загрузка...</div>
+              </div>
+              <div class="grant-block">
+                <div class="grant-head"><h3>Уведомления</h3><button class="btn ghost" type="button" data-grant-all="notify">Все</button><button class="btn ghost" type="button" data-grant-none="notify">Ничего</button></div>
+                <div id="botkey-notify" class="grant-options muted">Загрузка...</div>
+              </div>
+              <div class="grant-block">
+                <div class="grant-head"><h3>Аккаунты</h3><button class="btn ghost" type="button" data-grant-none="accounts">Все</button></div>
+                <div class="section-meta">Ничего не отмечено — уведомления по всем отслеживаемым юзернеймам. Если отметить аккаунты, ежедневный дайджест не отправляется: он общий по всем аккаунтам.</div>
+                <div id="botkey-accounts" class="grant-options muted">Загрузка...</div>
+              </div>
+            </div>
             <div class="actions settings-actions">
               <button class="btn primary" id="create-botkey-btn"><i data-lucide="plus"></i>Создать ключ</button>
               <button class="btn" id="refresh-botaccess-btn"><i data-lucide="refresh-cw"></i>Обновить</button>

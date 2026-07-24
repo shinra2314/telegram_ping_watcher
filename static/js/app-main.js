@@ -548,6 +548,13 @@
         showToast("Ссылка скопирована", "success");
         return;
       }
+      const grantBulk = e.target.closest("[data-grant-all], [data-grant-none]");
+      if (grantBulk) {
+        const scope = grantBulk.dataset.grantAll || grantBulk.dataset.grantNone;
+        const checked = Boolean(grantBulk.dataset.grantAll);
+        document.querySelectorAll(`#botkey-${scope} input[type=checkbox]`).forEach(el => { el.checked = checked; });
+        return;
+      }
       const revokeBtn = e.target.closest("[data-revoke-key]");
       if (revokeBtn) {
         if (!confirm("Отозвать ключ? Доступ по нему перестанет работать.")) return;

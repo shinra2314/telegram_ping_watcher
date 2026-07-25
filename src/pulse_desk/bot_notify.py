@@ -9,6 +9,7 @@ from typing import Any, Optional
 from telethon import Button
 
 from .app_ctx import ADMIN_ID, BASE_DIR, CHECK_NOTIFY_TARGET, logger, state
+from .bot_permissions import permission_delay_minutes
 from .bot_prefs import filter_broadcast_members, notification_type_of
 from .common import flood_wait_seconds, record_app_event
 from .watch_settings import is_quiet_time, load_notification_settings, notification_matches, should_throttle_notification
@@ -101,6 +102,39 @@ async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Bu
     return await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file) is not None
 
 
+def _first_button_url(buttons: Optional[list[list[Button]]]) -> str:
+    """Pull the first URL out of a keyboard so a delayed copy can rebuild it."""
+    for row in buttons or []:
+        for button in row:
+            url = getattr(button, "url", None)
+            if url:
+                return str(url)
+    return ""
+
+
+async def deliver_pending_send(row: dict[str, Any]) -> Optional[int]:
+    """Send one queued delayed copy. Returns its message id, None on failure.
+
+    Raises FloodWaitError so the caller can back off and keep the row pending.
+    """
+    if not await ensure_bot_connected():
+        return None
+    link = str(row.get("link") or "")
+    buttons = [[Button.url("Открыть в Telegram", link)]] if link else None
+    file = str(row.get("file_path") or "") or None
+    tg_id = int(row["tg_id"])
+    message = row.get("message") or ""
+    try:
+        sent = await state.bot_client.send_message(tg_id, message, buttons=buttons, link_preview=False, file=file)
+    except FloodWaitError:
+        raise
+    except Exception:
+        if file is None:
+            raise
+        sent = await state.bot_client.send_message(tg_id, message, buttons=buttons, link_preview=False)
+    return int(sent.id)
+
+
 async def broadcast_member_notification(
     message: str,
     buttons: Optional[list[list[Button]]] = None,
@@ -109,6 +143,7 @@ async def broadcast_member_notification(
     score: Optional[int] = None,
     premium_only: Optional[bool] = None,
     mentions: Any = None,
+    token: str = "",
 ) -> list[tuple[int, int]]:
     """Send a notification to viewer members allowed to receive it.
 
@@ -119,10 +154,14 @@ async def broadcast_member_notification(
     filter; `premium_only` splits the audience (True — premium members only,
     False — everyone else, None — all).
 
-    Returns (tg_id, message_id) pairs of the delivered copies so they can be
-    deleted later via the admin's "hide from friends" button.
+    Members whose key carries a `delay_minutes` grant are queued in
+    ``bot_pending_sends`` under `token` instead of being messaged now; the
+    caller can count them with ``count_pending_sends(token)``.
+
+    Returns (tg_id, message_id) pairs of the copies delivered immediately, so
+    they can be deleted later via the admin's "hide from friends" button.
     """
-    from database import list_bot_members
+    from database import list_bot_members, queue_pending_send
 
     delivered: list[tuple[int, int]] = []
     if not state.bot_client:
@@ -134,7 +173,30 @@ async def broadcast_member_notification(
         return delivered
     admin_ids = {int(ADMIN_ID)} if ADMIN_ID else set()
     # Owner is excluded here — already notified via send_admin_bot_message.
-    for member in filter_broadcast_members(members, notif_type, admin_ids, score=score, premium_only=premium_only, mentions=mentions):
+    eligible = filter_broadcast_members(members, notif_type, admin_ids, score=score, premium_only=premium_only, mentions=mentions)
+
+    link = _first_button_url(buttons)
+    immediate: list[dict] = []
+    for member in eligible:
+        minutes = permission_delay_minutes(member.get("permissions"))
+        if minutes <= 0:
+            immediate.append(member)
+            continue
+        try:
+            send_at = (datetime.now() + timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+            await queue_pending_send(
+                int(member.get("tg_id")),
+                send_at,
+                message,
+                token=token,
+                notif_type=notif_type,
+                link=link,
+                file_path=file or "",
+            )
+        except Exception as exc:
+            logger.warning("Failed to schedule delayed notification for %s: %s", member.get("tg_id"), exc)
+
+    for member in immediate:
         tg_id = member.get("tg_id")
         try:
             if not await ensure_bot_connected():
@@ -273,7 +335,7 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
     (premium copies went out at enqueue time under the row's bc_token).
 
     Returns (delivered_count, hidebc_token_or_none)."""
-    from database import get_giveaway_candidate, get_ping_by_id, save_broadcast_messages
+    from database import count_pending_sends, get_giveaway_candidate, get_ping_by_id, save_broadcast_messages
 
     link = row.get("link") or None
     ping_id = int(row["ping_id"]) if row.get("ping_id") else None
@@ -288,6 +350,9 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
     if ping_id:
         ping = await get_ping_by_id(ping_id)
         mentions = (ping or {}).get("mentions")
+    # Minted before the broadcast: copies held back by a per-key delay are
+    # stamped with it as they are queued, so "hide from friends" covers them too.
+    token = row.get("bc_token") or secrets_module.token_hex(4)  # bc_token set when premium copies went out
     delivered = await broadcast_member_notification(
         row.get("message") or "",
         _member_card_buttons(link, ping_id, notif_type),
@@ -296,12 +361,14 @@ async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[
         score=score,
         premium_only=False,
         mentions=mentions,
+        token=token,
     )
-    token = row.get("bc_token") or None  # set when premium copies were sent at enqueue
     if delivered:
-        token = token or secrets_module.token_hex(4)
         await save_broadcast_messages(token, delivered)
-    return len(delivered), token
+    scheduled = await count_pending_sends(token)
+    if not delivered and not scheduled and not row.get("bc_token"):
+        return 0, None
+    return len(delivered) + scheduled, token
 
 
 async def edit_pending_admin_card(
@@ -327,7 +394,13 @@ async def edit_pending_admin_card(
 
 
 async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None, auto_joined: bool = False) -> None:
-    from database import create_pending_broadcast, get_giveaway_candidate, save_broadcast_messages, set_pending_broadcast_admin_message
+    from database import (
+        count_pending_sends,
+        create_pending_broadcast,
+        get_giveaway_candidate,
+        save_broadcast_messages,
+        set_pending_broadcast_admin_message,
+    )
 
     if not state.bot_client:
         return
@@ -348,6 +421,7 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         if str(settings.get("moderation_mode", "auto")) == "moderated" and ADMIN_ID:
             # Hold the member broadcast until the owner approves (or the timeout
             # fires). Premium members are the exception — they get it right away.
+            bc_token = secrets_module.token_hex(4)
             premium_delivered = await broadcast_member_notification(
                 msg,
                 member_buttons,
@@ -356,11 +430,12 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
                 score=score,
                 premium_only=True,
                 mentions=record.get("mentions"),
+                token=bc_token,
             )
-            bc_token = ""
             if premium_delivered:
-                bc_token = secrets_module.token_hex(4)
                 await save_broadcast_messages(bc_token, premium_delivered)
+            elif not await count_pending_sends(bc_token):
+                bc_token = ""
             timeout = int(settings.get("approval_timeout_seconds", 300) or 300)
             expires_at = (datetime.now() + timedelta(seconds=timeout)).replace(microsecond=0).isoformat()
             pb_id = await create_pending_broadcast(
@@ -388,13 +463,19 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
 
         # Mirror notification to viewer members first, so the admin message can
         # carry a working "hide from friends" button.
+        token = secrets_module.token_hex(4)
         delivered = await broadcast_member_notification(
-            msg, member_buttons, file=header_image, notif_type=notif_type, score=score, mentions=record.get("mentions")
+            msg, member_buttons, file=header_image, notif_type=notif_type, score=score,
+            mentions=record.get("mentions"), token=token,
         )
         if delivered:
-            token = secrets_module.token_hex(4)
             await save_broadcast_messages(token, delivered)
-            buttons.append([Button.inline(f"🙈 Скрыть у друзей ({len(delivered)})", data=f"hidebc_{token}")])
+        scheduled = await count_pending_sends(token)
+        if delivered or scheduled:
+            label = f"🙈 Скрыть у друзей ({len(delivered) + scheduled})"
+            if scheduled and not delivered:
+                label = f"🙈 Отменить отправку ({scheduled})"
+            buttons.append([Button.inline(label, data=f"hidebc_{token}")])
         sent = await send_admin_bot_message(msg, buttons=buttons, file=header_image)
         if not sent:
             logger.error("Failed to send bot notification after retries")

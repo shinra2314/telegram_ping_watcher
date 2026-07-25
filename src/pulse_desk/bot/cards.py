@@ -7,7 +7,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..bot_permissions import ALL_FEATURES, ALL_NOTIFY, parse_permissions
+from ..bot_permissions import (
+    ALL_FEATURES,
+    ALL_NOTIFY,
+    FEATURES,
+    NOTIFY_TYPES,
+    format_delay,
+    parse_permissions,
+    permission_delay_minutes,
+    render_permissions_summary,
+)
 from .chrome import bar, chip, empty, header, kv
 from .views import DIV, fmt_dt
 
@@ -180,6 +189,68 @@ def keys_card(keys: list[dict]) -> str:
         )
     out.append("\n🚫 — отозвать ссылку · 🗑 — удалить ключ\n__Вошедшие сохраняют доступ — отключить их можно в «Люди».__")
     return "\n".join(out)
+
+
+def key_panel_card(key: dict, perms: dict, accounts: list[str]) -> str:
+    """Root of the key control panel: everything the grant decides, at a glance."""
+    exp = fmt_dt(key.get("expires_at")) if key.get("expires_at") else "бессрочно"
+    badge = "⚡ премиум" if (key.get("role") or "viewer") == "premium" else "👁 просмотр"
+    out = [
+        header("🔑", f"Ключ #{key.get('id')}", "Домой › Управление › Ключи › Настройка"),
+        f"🏷 **{key.get('label') or 'без метки'}** · {badge}",
+        f"👥 Вошли: `{key.get('member_count', 0)}` · ⏳ {exp}",
+        DIV,
+        render_permissions_summary(perms),
+    ]
+    if key.get("revoked"):
+        out.append("\n🚫 __Ссылка отозвана — новые люди войти не смогут.__")
+    out.append("\n__Правки действуют на тех, кто войдёт позже; уже вошедшие — в «Люди».__")
+    return "\n".join(out)
+
+
+def key_features_card(perms: dict) -> str:
+    granted = set(perms.get("features") or [])
+    out = [header("📂", "Разделы", "Ключи › Настройка › Разделы"), "Что держатель ключа может открыть:", ""]
+    out += [f"{'✅' if code in granted else '🔒'} {label} — __{hint}__" for code, (label, hint) in FEATURES.items()]
+    return "\n".join(out)
+
+
+def key_notify_card(perms: dict) -> str:
+    granted = set(perms.get("notify") or [])
+    scoped = bool(perms.get("accounts"))
+    out = [header("🔔", "Уведомления", "Ключи › Настройка › Уведомления"), "Что ему будет приходить:", ""]
+    out += [f"{'✅' if code in granted else '🔕'} {label} — __{hint}__" for code, (label, hint) in NOTIFY_TYPES.items()]
+    if scoped:
+        out.append("\n⚠️ __Ключ ограничен аккаунтами — дайджест не приходит: он охватывает все аккаунты сразу.__")
+    return "\n".join(out)
+
+
+def key_accounts_card(perms: dict, accounts: list[str]) -> str:
+    granted = perms.get("accounts") or []
+    out = [header("👤", "Аккаунты", "Ключи › Настройка › Аккаунты")]
+    if not accounts:
+        out.append(empty("Отслеживаемых юзернеймов нет — добавьте их в настройках."))
+        return "\n".join(out)
+    if granted:
+        out.append(f"Уведомления только про **{len(granted)}** из {len(accounts)}.")
+    else:
+        out.append("Выбраны **все** — уведомления про любой отслеживаемый аккаунт.")
+    out.append("")
+    lowered = {name.lower() for name in granted}
+    out += [f"{'✅' if (not granted or name.lower() in lowered) else '⬜'} @{name}" for name in accounts]
+    return "\n".join(out)
+
+
+def key_delay_card(perms: dict) -> str:
+    return "\n".join([
+        header("⏱", "Задержка отправки", "Ключи › Настройка › Задержка"),
+        f"Сейчас: **{format_delay(permission_delay_minutes(perms))}**",
+        DIV,
+        "Уведомления держателю ключа уходят с этой задержкой.",
+        "Вы получаете свои сразу — на владельца задержка не действует.",
+        "",
+        "__Пока задержка не истекла, кнопка «Скрыть у друзей» отменяет отправку полностью.__",
+    ])
 
 
 def members_header(count: int) -> str:

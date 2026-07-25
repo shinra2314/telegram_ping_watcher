@@ -31,7 +31,7 @@ from .bot_notify import (
     execute_pending_broadcast,
     send_admin_bot_message,
 )
-from .common import now_iso, record_app_event, start_supervised
+from .common import flood_wait_seconds, now_iso, record_app_event, start_supervised
 from .digest import format_digest
 from .live import publish_live_event
 from .scan_engine import full_history_scan
@@ -185,6 +185,66 @@ async def digest_loop() -> None:
             logger.exception("Digest loop failed")
         # Guard against double-fire within the same minute.
         await asyncio.sleep(61)
+
+
+PENDING_SEND_POLL_SECONDS = 20
+PENDING_SEND_MAX_ATTEMPTS = 3
+PENDING_SEND_STALE_HOURS = 24
+
+
+async def pending_send_loop() -> None:
+    """Drain ``bot_pending_sends``: deliver copies whose per-key delay elapsed."""
+    from database import cancel_pending_send, get_due_pending_sends, mark_pending_send_result, save_broadcast_messages
+
+    from .bot_notify import deliver_pending_send
+
+    try:
+        from telethon.errors import FloodWaitError
+    except ImportError:  # pragma: no cover
+        FloodWaitError = Exception  # type: ignore[assignment, misc]
+
+    while True:
+        try:
+            for row in await get_due_pending_sends(limit=25):
+                row_id = int(row["id"])
+                # A long outage must not dump a backlog of stale wins on members.
+                created_at = str(row.get("created_at") or "")
+                stale_before = (datetime.now() - timedelta(hours=PENDING_SEND_STALE_HOURS)).isoformat()
+                if created_at and created_at < stale_before:
+                    await cancel_pending_send(row_id)
+                    await record_app_event(
+                        "WARNING", "notifications", "Delayed notification dropped as stale",
+                        {"tg_id": row.get("tg_id"), "created_at": created_at},
+                    )
+                    continue
+                if int(row.get("attempts") or 0) >= PENDING_SEND_MAX_ATTEMPTS:
+                    await cancel_pending_send(row_id)
+                    await record_app_event(
+                        "ERROR", "notifications", "Delayed notification gave up after retries",
+                        {"tg_id": row.get("tg_id"), "attempts": row.get("attempts")},
+                    )
+                    continue
+                try:
+                    message_id = await deliver_pending_send(row)
+                except FloodWaitError as exc:
+                    await mark_pending_send_result(row_id, sent=False)
+                    await asyncio.sleep(flood_wait_seconds(exc.seconds))
+                    continue
+                except Exception as exc:
+                    logger.warning("Delayed notification to %s failed: %s", row.get("tg_id"), exc)
+                    await mark_pending_send_result(row_id, sent=False)
+                    continue
+                if message_id is None:
+                    await mark_pending_send_result(row_id, sent=False)
+                    continue
+                await mark_pending_send_result(row_id, sent=True)
+                token = str(row.get("token") or "")
+                if token:
+                    # Same token as the immediate copies, so "hide" still reaches it.
+                    await save_broadcast_messages(token, [(int(row["tg_id"]), message_id)])
+        except Exception:
+            logger.exception("Pending send loop failed")
+        await asyncio.sleep(PENDING_SEND_POLL_SECONDS)
 
 
 async def _notify_access_flip(tg_id: int, allowed: bool, until) -> None:
@@ -412,6 +472,7 @@ async def startup_maintenance() -> None:
         cleanup_outbox,
         prune_broadcast_messages,
         prune_pending_broadcasts,
+        prune_pending_sends,
         rebuild_search_indexes,
         reconcile_giveaway_flags,
         reconcile_giveaway_outcomes,
@@ -437,6 +498,9 @@ async def startup_maintenance() -> None:
         pruned_pending = await prune_pending_broadcasts(days=7)
         if pruned_pending:
             await record_app_event("INFO", "maintenance", "Pruned decided pending broadcasts", {"count": pruned_pending})
+        pruned_sends = await prune_pending_sends(days=7)
+        if pruned_sends:
+            await record_app_event("INFO", "maintenance", "Pruned settled delayed notifications", {"count": pruned_sends})
         backfilled_deadlines = await backfill_deadlines_from_text()
         if backfilled_deadlines:
             await record_app_event("INFO", "deadline", "Backfilled deadlines from giveaway text", {"count": backfilled_deadlines})

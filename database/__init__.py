@@ -52,6 +52,7 @@ from .bot_access import (
     create_bot_key,
     delete_bot_key,
     delete_broadcast_messages,
+    get_bot_key,
     get_bot_key_by_secret,
     get_bot_member,
     get_broadcast_messages,
@@ -60,6 +61,7 @@ from .bot_access import (
     prune_broadcast_messages,
     revoke_bot_key,
     save_broadcast_messages,
+    set_bot_key_permissions,
     set_bot_member_blocked,
     set_bot_member_prefs,
     touch_bot_member,
@@ -139,6 +141,15 @@ from .pending_broadcasts import (
     get_pending_broadcast,
     prune_pending_broadcasts,
     set_pending_broadcast_admin_message,
+)
+from .pending_sends import (
+    cancel_pending_send,
+    cancel_pending_sends,
+    count_pending_sends,
+    get_due_pending_sends,
+    mark_pending_send_result,
+    prune_pending_sends,
+    queue_pending_send,
 )
 from .push import delete_push_subscription, get_push_subscriptions, save_push_subscription
 from .reminders import (

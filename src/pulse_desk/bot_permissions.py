@@ -1,11 +1,14 @@
-"""Per-key access grants: which bot features a guest may open and which
-notifications reach them.
+"""Per-key access grants: which bot features a guest may open, which
+notifications reach them, and how long those notifications are held back.
 
 A grant is a plain dict::
 
-    {"features": ["stats", ...], "notify": ["wins", ...], "accounts": ["muver"]}
+    {"features": ["stats", ...], "notify": ["wins", ...],
+     "accounts": ["muver"], "delay_minutes": 0}
 
 ``accounts`` is a whitelist of tracked usernames — empty means "all accounts".
+``delay_minutes`` postpones every member copy for that key; the owner always
+gets their own notification immediately.
 Grants are chosen by the owner when an access key (invite link) is created and
 copied onto the member row when the key is redeemed, so revoking or editing the
 key later never strips an already-onboarded guest of a working menu.
@@ -16,6 +19,7 @@ No Telethon/DB imports — everything here is unit-testable in isolation.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 # feature code -> (label, hint shown in the web UI)
@@ -56,10 +60,22 @@ AGGREGATE_TYPES = frozenset({"digest"})
 ALL_FEATURES: list[str] = list(FEATURES)
 ALL_NOTIFY: list[str] = list(NOTIFY_TYPES)
 
+# Send delay: how long a key's member copies are held back. 0 — immediate.
+MAX_DELAY_MINUTES = 1440
+DELAY_PRESETS: tuple[int, ...] = (0, 1, 5, 15, 30, 60)
+
 
 def full_permissions() -> dict:
     """Everything a viewer can get — the pre-grants default for legacy keys."""
-    return {"features": list(ALL_FEATURES), "notify": list(ALL_NOTIFY), "accounts": []}
+    return {"features": list(ALL_FEATURES), "notify": list(ALL_NOTIFY), "accounts": [], "delay_minutes": 0}
+
+
+def clean_delay(raw: Any) -> int:
+    """Coerce any input into a sane minute count inside [0, MAX_DELAY_MINUTES]."""
+    try:
+        return max(0, min(MAX_DELAY_MINUTES, int(raw or 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _clean_codes(raw: Any, allowed: list[str]) -> list[str]:
@@ -98,7 +114,12 @@ def normalize_permissions(data: Any) -> dict:
         return full_permissions()
     features = _clean_codes(data.get("features"), ALL_FEATURES) if "features" in data else list(ALL_FEATURES)
     notify = _clean_codes(data.get("notify"), ALL_NOTIFY) if "notify" in data else list(ALL_NOTIFY)
-    return {"features": features, "notify": notify, "accounts": clean_accounts(data.get("accounts"))}
+    return {
+        "features": features,
+        "notify": notify,
+        "accounts": clean_accounts(data.get("accounts")),
+        "delay_minutes": clean_delay(data.get("delay_minutes")),
+    }
 
 
 def parse_permissions(raw: Optional[str]) -> dict:
@@ -118,6 +139,99 @@ def dump_permissions(perms: dict) -> str:
 
 def has_feature(perms: dict, code: str) -> bool:
     return code in (perms.get("features") or [])
+
+
+def permission_delay_minutes(perms: Any) -> int:
+    """Minutes to hold this key's member copies back; 0 — send immediately."""
+    if isinstance(perms, str) or perms is None:
+        perms = parse_permissions(perms)
+    return clean_delay((perms or {}).get("delay_minutes"))
+
+
+def parse_delay_input(text: str) -> Optional[int]:
+    """Validate free-text minutes from the bot panel; None if unusable."""
+    cleaned = (text or "").strip()
+    match = re.fullmatch(r"(\d+)\s*(?:м|мин|минут[аы]?|m|min)?", cleaned, flags=re.IGNORECASE)
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if value <= MAX_DELAY_MINUTES else None
+
+
+def format_delay(minutes: int) -> str:
+    minutes = clean_delay(minutes)
+    if minutes <= 0:
+        return "мгновенно"
+    if minutes % 60 == 0:
+        return f"{minutes // 60} ч"
+    if minutes > 60:
+        return f"{minutes // 60} ч {minutes % 60} мин"
+    return f"{minutes} мин"
+
+
+# ---- panel mutators: every one returns a new normalized grant dict ----------
+
+
+def toggle_feature(perms: dict, code: str) -> dict:
+    updated = normalize_permissions(perms)
+    if code in FEATURES:
+        granted = set(updated["features"])
+        granted.symmetric_difference_update({code})
+        updated["features"] = [c for c in ALL_FEATURES if c in granted]
+    return updated
+
+
+def toggle_notify(perms: dict, code: str) -> dict:
+    updated = normalize_permissions(perms)
+    if code in NOTIFY_TYPES:
+        granted = set(updated["notify"])
+        granted.symmetric_difference_update({code})
+        updated["notify"] = [c for c in ALL_NOTIFY if c in granted]
+    return updated
+
+
+def toggle_account(perms: dict, name: str) -> dict:
+    """Flip one tracked username in the whitelist.
+
+    An empty whitelist means "all accounts", so the first click has to
+    materialise the full list before removing from it — that is the caller's
+    job via `set_accounts`; here an empty list simply gains its first entry.
+    """
+    updated = normalize_permissions(perms)
+    cleaned = str(name or "").strip().lstrip("@")
+    if not cleaned:
+        return updated
+    current = updated["accounts"]
+    lowered = cleaned.lower()
+    if any(item.lower() == lowered for item in current):
+        updated["accounts"] = [item for item in current if item.lower() != lowered]
+    else:
+        updated["accounts"] = current + [cleaned]
+    return updated
+
+
+def set_accounts(perms: dict, names: Any) -> dict:
+    updated = normalize_permissions(perms)
+    updated["accounts"] = clean_accounts(names)
+    return updated
+
+
+def set_features(perms: dict, codes: Any) -> dict:
+    updated = normalize_permissions(perms)
+    updated["features"] = _clean_codes(codes, ALL_FEATURES)
+    return updated
+
+
+def set_notify(perms: dict, codes: Any) -> dict:
+    updated = normalize_permissions(perms)
+    updated["notify"] = _clean_codes(codes, ALL_NOTIFY)
+    return updated
+
+
+def set_delay(perms: dict, minutes: Any) -> dict:
+    updated = normalize_permissions(perms)
+    updated["delay_minutes"] = clean_delay(minutes)
+    return updated
 
 
 def _mention_names(mentions: Any) -> set[str]:
@@ -186,5 +300,6 @@ def render_permissions_summary(perms: dict) -> str:
             f"📂 Разделы: {feature_line}",
             f"🔔 Уведомления: {notify_line}",
             f"👤 Аккаунты: {accounts_line}",
+            f"⏱ Задержка: {format_delay(permission_delay_minutes(perms))}",
         ]
     )

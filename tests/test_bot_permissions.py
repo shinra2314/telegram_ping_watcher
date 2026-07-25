@@ -12,15 +12,27 @@ if str(SRC_DIR) not in sys.path:
 from pulse_desk.bot_permissions import (
     ALL_FEATURES,
     ALL_NOTIFY,
+    DELAY_PRESETS,
+    MAX_DELAY_MINUTES,
     accounts_allowed,
     allowed_pref_keys,
     dump_permissions,
+    format_delay,
     full_permissions,
     has_feature,
     normalize_permissions,
+    parse_delay_input,
     parse_permissions,
     permission_allows_notification,
+    permission_delay_minutes,
     render_permissions_summary,
+    set_accounts,
+    set_delay,
+    set_features,
+    set_notify,
+    toggle_account,
+    toggle_feature,
+    toggle_notify,
 )
 from pulse_desk.bot_prefs import filter_broadcast_members, render_member_prefs_text
 
@@ -57,6 +69,91 @@ class FeatureGateTests(unittest.TestCase):
         perms = normalize_permissions({"features": ["stats", "market"]})
         self.assertTrue(has_feature(perms, "stats"))
         self.assertFalse(has_feature(perms, "search"))
+
+
+class SendDelayTests(unittest.TestCase):
+    def test_legacy_keys_have_no_delay(self):
+        self.assertEqual(permission_delay_minutes(full_permissions()), 0)
+        self.assertEqual(permission_delay_minutes(parse_permissions("")), 0)
+        self.assertEqual(permission_delay_minutes(None), 0)
+
+    def test_delay_is_clamped_and_garbage_tolerant(self):
+        self.assertEqual(normalize_permissions({"delay_minutes": -5})["delay_minutes"], 0)
+        self.assertEqual(normalize_permissions({"delay_minutes": 10 ** 6})["delay_minutes"], MAX_DELAY_MINUTES)
+        self.assertEqual(normalize_permissions({"delay_minutes": "junk"})["delay_minutes"], 0)
+
+    def test_delay_survives_the_json_column(self):
+        perms = set_delay(full_permissions(), 15)
+        self.assertEqual(permission_delay_minutes(parse_permissions(dump_permissions(perms))), 15)
+
+    def test_reads_a_raw_json_column_directly(self):
+        self.assertEqual(permission_delay_minutes('{"delay_minutes": 30}'), 30)
+
+    def test_parse_delay_input_accepts_plain_and_suffixed_minutes(self):
+        self.assertEqual(parse_delay_input("0"), 0)
+        self.assertEqual(parse_delay_input(" 15 "), 15)
+        self.assertEqual(parse_delay_input("30 мин"), 30)
+        self.assertEqual(parse_delay_input("45min"), 45)
+        self.assertEqual(parse_delay_input(str(MAX_DELAY_MINUTES)), MAX_DELAY_MINUTES)
+
+    def test_parse_delay_input_rejects_junk_and_overflow(self):
+        for text in ("", "  ", "-5", "abc", "1441", "5.5", "1e3"):
+            self.assertIsNone(parse_delay_input(text), text)
+
+    def test_format_delay(self):
+        self.assertEqual(format_delay(0), "мгновенно")
+        self.assertEqual(format_delay(5), "5 мин")
+        self.assertEqual(format_delay(60), "1 ч")
+        self.assertEqual(format_delay(90), "1 ч 30 мин")
+
+    def test_presets_are_valid_inputs(self):
+        for minutes in DELAY_PRESETS:
+            self.assertEqual(set_delay(full_permissions(), minutes)["delay_minutes"], minutes)
+
+    def test_summary_mentions_the_delay(self):
+        self.assertIn("15 мин", render_permissions_summary(set_delay(full_permissions(), 15)))
+
+
+class PanelMutatorTests(unittest.TestCase):
+    def test_toggle_feature_flips_and_keeps_catalog_order(self):
+        perms = toggle_feature(full_permissions(), "market")
+        self.assertNotIn("market", perms["features"])
+        self.assertEqual(toggle_feature(perms, "market")["features"], ALL_FEATURES)
+
+    def test_toggle_ignores_unknown_codes(self):
+        perms = full_permissions()
+        self.assertEqual(toggle_feature(perms, "bogus")["features"], ALL_FEATURES)
+        self.assertEqual(toggle_notify(perms, "bogus")["notify"], ALL_NOTIFY)
+
+    def test_mutators_do_not_touch_the_input(self):
+        perms = full_permissions()
+        toggle_feature(perms, "market")
+        set_delay(perms, 30)
+        toggle_account(perms, "muver")
+        self.assertEqual(perms, full_permissions())
+
+    def test_toggle_notify_flips(self):
+        perms = toggle_notify(full_permissions(), "wins")
+        self.assertNotIn("wins", perms["notify"])
+
+    def test_toggle_account_adds_then_removes(self):
+        added = toggle_account(full_permissions(), "@Muver")
+        self.assertEqual(added["accounts"], ["Muver"])
+        self.assertEqual(toggle_account(added, "muver")["accounts"], [])
+
+    def test_toggle_account_ignores_blanks(self):
+        self.assertEqual(toggle_account(full_permissions(), "  ")["accounts"], [])
+
+    def test_set_helpers_normalise(self):
+        self.assertEqual(set_features(full_permissions(), ["market", "bogus"])["features"], ["market"])
+        self.assertEqual(set_notify(full_permissions(), [])["notify"], [])
+        self.assertEqual(set_accounts(full_permissions(), ["@a", "a", " "])["accounts"], ["a"])
+
+    def test_mutators_preserve_the_other_fields(self):
+        perms = set_delay(set_accounts(full_permissions(), ["muver"]), 20)
+        after = toggle_feature(perms, "market")
+        self.assertEqual(after["accounts"], ["muver"])
+        self.assertEqual(after["delay_minutes"], 20)
 
 
 class AccountFilterTests(unittest.TestCase):

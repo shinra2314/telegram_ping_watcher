@@ -84,9 +84,12 @@ src/pulse_desk/
   giveaway_actions.py — Safe giveaway join: analysis, button detection, confirm
   bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
   bot_permissions.py — Per-key grants (pure, unit tested): which bot sections a
-                      guest may open, which notification types reach them, and
-                      an optional whitelist of tracked accounts. Empty
-                      `permissions` column = full viewer access (legacy keys)
+                      guest may open, which notification types reach them, an
+                      optional whitelist of tracked accounts, and `delay_minutes`
+                      — how long their copies are held back (owner is never
+                      delayed). Empty `permissions` column = full viewer access,
+                      no delay (legacy keys). Edited from the bot's key panel
+                      (`key:*` callbacks in bot/service.py)
   bot_service.py    — init_bot: inline menus, slash commands, access keys,
                       /access scheduled-access management
   bot/stickers.py   — Aperture sticker registry + best-effort sender (gated by
@@ -133,7 +136,7 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 20)
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 21)
   schema.py   — init_db + migrations   backups.py  — file backups
   pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
   giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards
@@ -169,6 +172,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `auto-scan` | Sweeps channels for new messages; also runs retention each sweep: age cleanup, unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`), a size cap that evicts oldest non-favorite/non-win pings (archived to `pulse_desk_archive.db` first) + VACUUM, and archive-record pruning (the archive *file* is kept, but its rows older than `ARCHIVE_RETENTION_DAYS` are aged out) | `SCAN_INTERVAL_SECONDS` (default 900 s), `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS` |
 | `reminders` | Fires deadline reminders (admin + opted-in bot members) | — |
 | `daily-digest` | Sends daily ping digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 09:00) | — |
+| `pending-sends` | Drains `bot_pending_sends`: delivers member copies whose per-key `delay_minutes` elapsed (20 s poll, drops rows older than 24 h) | — |
 | `source-scores` | Recalculates channel reliability scores | — |
 | `access-scheduler` | Warms the scheduled-access cache and notifies members when their access window opens/closes (not the source of truth — `bot_role` recomputes on demand) | — |
 | `obsidian-sync` | Reconciles the Debts board with the Obsidian `Долги.md` note (note wins; syncs the claimed/done bit, appends newly detected wins) | `OBSIDIAN_DEBTS_PATH`, `OBSIDIAN_SYNC_ENABLED`, `OBSIDIAN_SYNC_WRITE`, `OBSIDIAN_SYNC_POLL_SECONDS` |

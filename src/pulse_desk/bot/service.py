@@ -19,13 +19,25 @@ from ..analytics import build_analytics
 from ..app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, CHECK_FRESH_MINUTES, LOG_FILE, logger, settings, state
 from ..bot_notify import BOT_ASSETS_DIR, edit_pending_admin_card, execute_pending_broadcast
 from ..bot_permissions import (
+    ALL_FEATURES,
+    ALL_NOTIFY,
     accounts_allowed,
     allowed_pref_keys,
     dump_permissions,
+    format_delay,
     full_permissions,
     has_feature,
+    parse_delay_input,
     parse_permissions,
+    permission_delay_minutes,
     render_permissions_summary,
+    set_accounts,
+    set_delay,
+    set_features,
+    set_notify,
+    toggle_account,
+    toggle_feature,
+    toggle_notify,
 )
 from ..bot_prefs import (
     KEYWORD_SCOPES,
@@ -48,13 +60,15 @@ from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
 from .views import DIV, SECTION_FEATURES, fmt_dt, help_text, main_menu_buttons
 from .keyboards import (
-    MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
-    giveaway_feed_keyboard, keys_keyboard, logs_keyboard, management_grid,
+    KEY_PANEL_ACCOUNTS_PAGE, MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
+    giveaway_feed_keyboard, key_accounts_keyboard, key_delay_keyboard, key_features_keyboard,
+    key_notify_keyboard, key_panel_keyboard, keys_keyboard, logs_keyboard, management_grid,
     member_access_keyboard, member_card_keyboard, members_list_keyboard,
     ping_card_keyboard, restart_confirm_keyboard, scan_panel_keyboard, section_nav,
 )
 from .cards import (
-    feed_badge, feed_header, giveaway_card, giveaways_header, keys_card,
+    feed_badge, feed_header, giveaway_card, giveaways_header, key_accounts_card,
+    key_delay_card, key_features_card, key_notify_card, key_panel_card, keys_card,
     management_card, member_card, members_header, home_card, ping_card,
     restart_confirm_card, scan_card, summary_card,
 )
@@ -67,9 +81,12 @@ _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "
 async def init_bot() -> None:
     import database
     from database import (
+        cancel_pending_sends,
         claim_pending_broadcast,
         create_access_window,
         create_bot_key,
+        get_bot_key,
+        set_bot_key_permissions,
         member_engagement_stats,
         set_member_engagement,
         create_disable_until_window,
@@ -505,6 +522,27 @@ async def init_bot() -> None:
             ]
             return keys_card(keys), keys_keyboard(items)
 
+        # ---- per-key control panel (owner only) ----------------------------
+        def grantable_accounts() -> list[str]:
+            """Tracked usernames, '@' stripped — the whitelist the grant addresses.
+
+            Rebuilt identically on render and on click, because account toggles
+            travel as an index into this list (callback data is capped at 64 B).
+            """
+            return [name.lstrip("@") for name in (state.ping_usernames or [])]
+
+        async def render_key_panel(key_id: int):
+            key = await get_bot_key(key_id)
+            if not key:
+                return None
+            perms = parse_permissions(key.get("permissions"))
+            accounts = grantable_accounts()
+            return key_panel_card(key, perms, accounts), key_panel_keyboard(key_id, perms, len(accounts))
+
+        async def save_key_permissions(key_id: int, perms: dict) -> None:
+            await set_bot_key_permissions(key_id, dump_permissions(perms))
+            await record_app_event("INFO", "bot", "Bot key grants updated", {"id": key_id, "via": "bot"})
+
         # ---- settings menus (admin) + personal prefs (members) -------------
         PENDING_TTL_SECONDS = 300
         SETTINGS_BACK = [Button.inline("⬅️ Назад", b"st")]
@@ -526,6 +564,7 @@ async def init_bot() -> None:
             "cooldown": "Пришлите кулдаун в секундах (0–3600).",
             "digest_time": "Пришлите время дайджеста в формате `09:00`.",
             "min_score": "Пришлите минимальный score розыгрышей (0–100, 0 — показывать все).",
+            "key_delay": "Пришлите задержку в минутах (0–1440). `0` — отправлять сразу.",
         }
 
         def _pending_expired(pending: dict) -> bool:
@@ -831,6 +870,26 @@ async def init_bot() -> None:
                 text, buttons = await notifications_menu()
                 await event.respond(f"✅ Кулдаун: {value} сек\n\n{text}", buttons=buttons)
                 return
+            if kind == "key_delay":
+                minutes = parse_delay_input(raw)
+                if minutes is None:
+                    await event.respond("❌ Нужно целое число минут от 0 до 1440.")
+                    return
+                try:
+                    key_id = int(pending.get("scope") or 0)
+                except (TypeError, ValueError):
+                    key_id = 0
+                key = await get_bot_key(key_id) if key_id else None
+                if not key:
+                    await event.respond("❌ Ключ не найден — возможно, он был удалён.")
+                    return
+                perms = set_delay(parse_permissions(key.get("permissions")), minutes)
+                await save_key_permissions(key_id, perms)
+                await event.respond(
+                    f"✅ Задержка: {format_delay(minutes)}\n\n{key_delay_card(perms)}",
+                    buttons=key_delay_keyboard(key_id, perms),
+                )
+                return
             if kind == "digest_time":
                 parsed_time = parse_hhmm(raw)
                 if not parsed_time:
@@ -1078,7 +1137,7 @@ async def init_bot() -> None:
                 return
             label = (event.pattern_match.group(1) or "").strip()
             secret = generate_access_key()
-            await create_bot_key(label, secret, "viewer", None)
+            key = await create_bot_key(label, secret, "viewer", None, dump_permissions(full_permissions()))
             link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
             body = (
                 "🔑 **Новый ключ создан**\n"
@@ -1092,6 +1151,10 @@ async def init_bot() -> None:
             else:
                 body += "\n_Бот не настроен на ссылки — передайте ключ вручную через_ `/redeem`."
             await event.respond(body, link_preview=False)
+            screen = await render_key_panel(int(key["id"]))
+            if screen:
+                text, kb = screen
+                await event.respond("⚙️ **Настройте ключ перед отправкой**\n\n" + text, buttons=kb)
 
         @bot_client.on(events.NewMessage(pattern="/keys"))
         @safe
@@ -1525,6 +1588,107 @@ async def init_bot() -> None:
                         text, kb = render_scan_panel()
                         await safe_edit(event, text, buttons=kb)
                         return
+                    if seg[0] == "key" and seg[1] not in ("rm", "del"):
+                        # `key:<id>` root, `key:<section>:<id>[:<arg>]` for the rest.
+                        try:
+                            key_id = int(seg[1]) if len(seg) == 2 else int(seg[2])
+                        except (ValueError, IndexError):
+                            await event.answer("Некорректная команда", alert=True)
+                            return
+                        key = await get_bot_key(key_id)
+                        if not key:
+                            await event.answer("Ключ не найден", alert=True)
+                            return
+                        perms = parse_permissions(key.get("permissions"))
+                        section = seg[1] if len(seg) > 2 else ""
+                        arg = seg[3] if len(seg) > 3 else ""
+                        accounts = grantable_accounts()
+
+                        if section == "link":
+                            secret = key.get("secret") or ""
+                            link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
+                            body = f"🔑 **Ключ #{key_id}** · {key.get('label') or '—'}\n{DIV}\n🔐 `{secret}`"
+                            body += f"\n🔗 {link}" if link else "\n__Передайте ключ вручную:__ `/redeem <ключ>`"
+                            await event.respond(body, link_preview=False)
+                            await event.answer()
+                            return
+
+                        if section == "f" and arg:
+                            if arg == "_all":
+                                perms = set_features(perms, ALL_FEATURES)
+                            elif arg == "_none":
+                                perms = set_features(perms, [])
+                            else:
+                                perms = toggle_feature(perms, arg)
+                            await save_key_permissions(key_id, perms)
+                            await event.answer("Сохранено")
+                        elif section == "n" and arg:
+                            if arg == "_all":
+                                perms = set_notify(perms, ALL_NOTIFY)
+                            elif arg == "_none":
+                                perms = set_notify(perms, [])
+                            else:
+                                perms = toggle_notify(perms, arg)
+                            await save_key_permissions(key_id, perms)
+                            await event.answer("Сохранено")
+                        elif section == "a" and arg:
+                            if arg == "_all":
+                                perms = set_accounts(perms, [])
+                                await save_key_permissions(key_id, perms)
+                                await event.answer("Все аккаунты")
+                            elif arg.startswith("_p"):
+                                page = int(arg[2:]) if arg[2:].isdigit() else 0
+                                await safe_edit(
+                                    event, key_accounts_card(perms, accounts),
+                                    buttons=key_accounts_keyboard(key_id, perms, accounts, page),
+                                )
+                                return
+                            else:
+                                index = int(arg) if arg.isdigit() else -1
+                                if not 0 <= index < len(accounts):
+                                    await event.answer("Список аккаунтов изменился — откройте заново", alert=True)
+                                    return
+                                name = accounts[index]
+                                # An empty whitelist means "all", so materialise it
+                                # before removing the first entry.
+                                base = perms.get("accounts") or list(accounts)
+                                updated = toggle_account(set_accounts(perms, base), name)
+                                if not updated.get("accounts"):
+                                    await event.answer("Нельзя снять последний аккаунт", alert=True)
+                                    return
+                                if len(updated["accounts"]) == len(accounts):
+                                    updated = set_accounts(updated, [])
+                                perms = updated
+                                await save_key_permissions(key_id, perms)
+                                await event.answer(f"@{name}")
+                            page = (int(arg) // KEY_PANEL_ACCOUNTS_PAGE) if arg.isdigit() else 0
+                            await safe_edit(
+                                event, key_accounts_card(perms, accounts),
+                                buttons=key_accounts_keyboard(key_id, perms, accounts, page),
+                            )
+                            return
+                        elif section == "d" and arg:
+                            if arg == "_x":
+                                await prompt_pending(event, "key_delay", scope=str(key_id))
+                                return
+                            perms = set_delay(perms, int(arg) if arg.isdigit() else 0)
+                            await save_key_permissions(key_id, perms)
+                            await event.answer(f"Задержка: {format_delay(permission_delay_minutes(perms))}")
+
+                        if section == "f":
+                            await safe_edit(event, key_features_card(perms), buttons=key_features_keyboard(key_id, perms))
+                        elif section == "n":
+                            await safe_edit(event, key_notify_card(perms), buttons=key_notify_keyboard(key_id, perms))
+                        elif section == "a":
+                            await safe_edit(event, key_accounts_card(perms, accounts), buttons=key_accounts_keyboard(key_id, perms, accounts))
+                        elif section == "d":
+                            await safe_edit(event, key_delay_card(perms), buttons=key_delay_keyboard(key_id, perms))
+                        else:
+                            screen = await render_key_panel(key_id)
+                            if screen:
+                                text, kb = screen
+                                await safe_edit(event, text, buttons=kb)
+                        return
                     if seg[0] == "key" and seg[1] in ("rm", "del") and len(seg) >= 3:
                         try:
                             key_id = int(seg[2])
@@ -1582,7 +1746,11 @@ async def init_bot() -> None:
                     if seg[0] == "adm" and seg[1] in ("newkey", "newkeyp"):
                         premium = seg[1] == "newkeyp"
                         secret = generate_access_key()
-                        await create_bot_key("премиум" if premium else "", secret, "premium" if premium else "viewer", None)
+                        key = await create_bot_key(
+                            "премиум" if premium else "", secret,
+                            "premium" if premium else "viewer", None,
+                            dump_permissions(full_permissions()),
+                        )
                         link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
                         title = "⚡ **Новый премиум-ключ**" if premium else "🔑 **Новый ключ**"
                         body = title + "\n" + DIV + f"\n🔐 `{secret}`"
@@ -1592,6 +1760,10 @@ async def init_bot() -> None:
                             body += f"\n🔗 {link}"
                         await event.respond(body, link_preview=False)
                         await event.answer("Ключ создан")
+                        screen = await render_key_panel(int(key["id"]))
+                        if screen:
+                            text, kb = screen
+                            await event.respond("⚙️ **Настройте ключ перед отправкой**\n\n" + text, buttons=kb)
                         return
                     if seg[0] in ("mem", "acc") and len(seg) >= 3:
                         try:
@@ -1813,7 +1985,10 @@ async def init_bot() -> None:
             if data.startswith("hidebc_"):
                 token = data.split("_", 1)[1]
                 rows = await get_broadcast_messages(token)
-                if not rows:
+                # Copies still waiting on a per-key delay are dropped before they
+                # ever reach the member.
+                cancelled = await cancel_pending_sends(token)
+                if not rows and not cancelled:
                     await event.answer("Уже скрыто или устарело")
                     return
                 hidden = 0
@@ -1834,7 +2009,7 @@ async def init_bot() -> None:
                         rebuilt = []
                         for btn in btn_row:
                             if btn.data == event.data:
-                                rebuilt.append(Button.inline(f"✅ Скрыто у друзей ({hidden})", data=b"noop"))
+                                rebuilt.append(Button.inline(f"✅ Скрыто у друзей ({hidden + cancelled})", data=b"noop"))
                             elif btn.url:
                                 rebuilt.append(Button.url(btn.text, btn.url))
                             elif btn.data:
@@ -1846,6 +2021,8 @@ async def init_bot() -> None:
                 except Exception:
                     logger.debug("Could not update hide button after broadcast hide", exc_info=True)
                 note = f"Скрыто у {hidden} друзей"
+                if cancelled:
+                    note += f", отменено до отправки: {cancelled}"
                 if failed:
                     note += f", не удалось: {failed}"
                 await event.answer(note, alert=bool(failed))

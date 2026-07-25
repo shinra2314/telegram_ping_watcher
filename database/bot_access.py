@@ -48,6 +48,31 @@ async def list_bot_keys(include_revoked: bool = False) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_bot_key(key_id: int) -> Optional[dict]:
+    """One key with its member_count, revoked or not — the panel edits both."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                """
+                SELECT k.*, (SELECT COUNT(*) FROM bot_members m WHERE m.key_id = k.id) AS member_count
+                FROM bot_access_keys k WHERE k.id = ?
+                """,
+                (int(key_id),),
+            )
+        ).fetchone()
+    return dict(row) if row else None
+
+
+async def set_bot_key_permissions(key_id: int, permissions: str) -> None:
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_access_keys SET permissions = ? WHERE id = ?",
+            (permissions or "", int(key_id)),
+        )
+        await db.commit()
+
+
 async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
     if not secret:
         return None

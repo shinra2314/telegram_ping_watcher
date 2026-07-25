@@ -423,6 +423,24 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE pending_broadcasts ADD COLUMN bc_token TEXT DEFAULT ''")
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS bot_pending_sends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER NOT NULL,
+                send_at TEXT NOT NULL,
+                token TEXT NOT NULL DEFAULT '',
+                notif_type TEXT NOT NULL DEFAULT 'mention',
+                message TEXT NOT NULL,
+                link TEXT DEFAULT '',
+                file_path TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                sent_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                cancelled_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS member_engagement (
                 tg_id INTEGER NOT NULL,
                 ping_id INTEGER NOT NULL,
@@ -464,6 +482,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_sched_priority ON access_schedule(tg_id, priority DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_access_audit_user ON access_audit(tg_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_broadcasts_status ON pending_broadcasts(status, expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_sends_due ON bot_pending_sends(send_at, sent_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_sends_token ON bot_pending_sends(token)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_member_engagement_tg ON member_engagement(tg_id)")
         await db.commit()
 

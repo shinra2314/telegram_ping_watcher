@@ -3,6 +3,16 @@ from __future__ import annotations
 
 from telethon import Button
 
+from ..bot_permissions import (
+    ALL_FEATURES,
+    ALL_NOTIFY,
+    DELAY_PRESETS,
+    FEATURES,
+    NOTIFY_TYPES,
+    format_delay,
+    permission_delay_minutes,
+)
+
 
 def section_nav(refresh_cb: bytes) -> list[list[Button]]:
     """Footer for a section view: back to home + refresh.
@@ -151,7 +161,108 @@ def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
     ]
     rows.append([Button.inline("➕ Создать ключ", b"adm:newkey"),
                  Button.inline("⚡ Премиум-ключ", b"adm:newkeyp")])
+    if items:
+        rows.append([Button.inline(f"⚙️ #{kid}", f"key:{kid}".encode()) for kid, _ in items[:4]])
     rows.append([Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")])
+    return rows
+
+
+KEY_PANEL_ACCOUNTS_PAGE = 8
+
+
+def key_panel_keyboard(key_id: int, perms: dict, account_total: int) -> list[list[Button]]:
+    """Root of the per-key control panel: what a guest sees, gets, and when."""
+    granted_accounts = perms.get("accounts") or []
+    scope = f"{len(granted_accounts)}/{account_total}" if granted_accounts else f"все ({account_total})"
+    return [
+        [
+            Button.inline(f"📂 Разделы ({len(perms.get('features') or [])}/{len(ALL_FEATURES)})", f"key:f:{key_id}".encode()),
+            Button.inline(f"🔔 Уведомления ({len(perms.get('notify') or [])}/{len(ALL_NOTIFY)})", f"key:n:{key_id}".encode()),
+        ],
+        [Button.inline(f"👤 Аккаунты · {scope}", f"key:a:{key_id}".encode())],
+        [Button.inline(f"⏱ Задержка · {format_delay(permission_delay_minutes(perms))}", f"key:d:{key_id}".encode())],
+        [
+            Button.inline("🔗 Ссылка", f"key:link:{key_id}".encode()),
+            Button.inline("🗑 Удалить", f"key:del:{key_id}".encode()),
+        ],
+        [Button.inline("⬅️ Ключи", b"menu_keys")],
+    ]
+
+
+def key_features_keyboard(key_id: int, perms: dict) -> list[list[Button]]:
+    granted = set(perms.get("features") or [])
+    toggles = [
+        Button.inline(f"{'✅' if code in granted else '🔒'} {label}", f"key:f:{key_id}:{code}".encode())
+        for code, (label, _hint) in FEATURES.items()
+    ]
+    rows = [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
+    rows.append([
+        Button.inline("☑️ Все", f"key:f:{key_id}:_all".encode()),
+        Button.inline("🔒 Никакие", f"key:f:{key_id}:_none".encode()),
+    ])
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
+    return rows
+
+
+def key_notify_keyboard(key_id: int, perms: dict) -> list[list[Button]]:
+    granted = set(perms.get("notify") or [])
+    toggles = [
+        Button.inline(f"{'✅' if code in granted else '🔕'} {label}", f"key:n:{key_id}:{code}".encode())
+        for code, (label, _hint) in NOTIFY_TYPES.items()
+    ]
+    rows = [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
+    rows.append([
+        Button.inline("☑️ Все", f"key:n:{key_id}:_all".encode()),
+        Button.inline("🔕 Никакие", f"key:n:{key_id}:_none".encode()),
+    ])
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
+    return rows
+
+
+def key_accounts_keyboard(key_id: int, perms: dict, accounts: list[str], page: int = 0) -> list[list[Button]]:
+    """One toggle per tracked username; accounts are addressed by index.
+
+    Callback data caps at 64 bytes, so the index into `accounts` travels instead
+    of the name itself. The caller rebuilds the same list on both sides.
+    """
+    granted = {name.lower() for name in (perms.get("accounts") or [])}
+    pages = max(1, (len(accounts) + KEY_PANEL_ACCOUNTS_PAGE - 1) // KEY_PANEL_ACCOUNTS_PAGE)
+    page = max(0, min(pages - 1, page))
+    start = page * KEY_PANEL_ACCOUNTS_PAGE
+    chunk = accounts[start:start + KEY_PANEL_ACCOUNTS_PAGE]
+    toggles = [
+        Button.inline(
+            f"{'✅' if (not granted or name.lower() in granted) else '⬜'} @{name}"[:28],
+            f"key:a:{key_id}:{start + i}".encode(),
+        )
+        for i, name in enumerate(chunk)
+    ]
+    rows = [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
+    if pages > 1:
+        nav: list[Button] = []
+        if page > 0:
+            nav.append(Button.inline("◀️", f"key:a:{key_id}:_p{page - 1}".encode()))
+        nav.append(Button.inline(f"{page + 1}/{pages}", b"noop"))
+        if page < pages - 1:
+            nav.append(Button.inline("▶️", f"key:a:{key_id}:_p{page + 1}".encode()))
+        rows.append(nav)
+    rows.append([Button.inline("☑️ Все аккаунты", f"key:a:{key_id}:_all".encode())])
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
+    return rows
+
+
+def key_delay_keyboard(key_id: int, perms: dict) -> list[list[Button]]:
+    current = permission_delay_minutes(perms)
+    presets = [
+        Button.inline(
+            ("🔘 " if minutes == current else "") + ("мгновенно" if minutes == 0 else f"{minutes} мин"),
+            f"key:d:{key_id}:{minutes}".encode(),
+        )
+        for minutes in DELAY_PRESETS
+    ]
+    rows = [presets[i:i + 3] for i in range(0, len(presets), 3)]
+    rows.append([Button.inline("✏️ Своё значение…", f"key:d:{key_id}:_x".encode())])
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
     return rows
 
 

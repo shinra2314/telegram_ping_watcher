@@ -200,7 +200,7 @@ class ModeratedEnqueueTests(unittest.TestCase):
             bot_notify.ADMIN_ID = 777
             broadcast_calls: list[dict] = []
 
-            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None):
+            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None, token=""):
                 broadcast_calls.append({"message": message, "notif_type": notif_type, "premium_only": premium_only})
                 return []  # no premium members
 
@@ -233,7 +233,7 @@ class ModeratedEnqueueTests(unittest.TestCase):
             bot_notify.ADMIN_ID = 777
             broadcast_calls: list[dict] = []
 
-            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None):
+            async def fake_broadcast(message, buttons=None, file=None, notif_type="mention", score=None, premium_only=None, mentions=None, token=""):
                 broadcast_calls.append({"notif_type": notif_type, "premium_only": premium_only})
                 return [(5, 10)]
 

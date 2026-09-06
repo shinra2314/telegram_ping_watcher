@@ -9,7 +9,7 @@ if str(SRC_DIR) not in sys.path:
 
 import unittest
 
-from pulse_desk.bot.emoji import build_entities, enrich
+from pulse_desk.bot.emoji import build_entities, enrich, with_vs16_variants
 
 
 MAP = {"🏆": 111, "🎁": 222, "⚙️": 333}
@@ -63,6 +63,66 @@ class EnrichTests(unittest.TestCase):
         self.assertEqual(ents[0].offset, 0)        # bold at start
         self.assertEqual(ents[1].offset, 3)        # 🏆 after "hi "
         self.assertEqual(ents[1].document_id, 111)
+
+
+class Vs16VariantTests(unittest.TestCase):
+    """A pack emoticon that lost (or kept) its VS16 must still match the text."""
+
+    def test_bare_emoticon_gains_vs16_form(self):
+        emap = with_vs16_variants({"⚠": 7})
+        self.assertEqual(emap["⚠"], 7)
+        self.assertEqual(emap["⚠️"], 7)
+
+    def test_vs16_emoticon_gains_bare_form(self):
+        emap = with_vs16_variants({"⚙️": 9})
+        self.assertEqual(emap["⚙"], 9)
+        self.assertEqual(emap["⚙️"], 9)
+
+    def test_existing_key_not_overwritten(self):
+        emap = with_vs16_variants({"⚠": 1, "⚠️": 2})
+        self.assertEqual(emap["⚠"], 1)
+        self.assertEqual(emap["⚠️"], 2)
+
+    def test_bare_pack_key_matches_vs16_text_with_full_length(self):
+        # Regression: without the variant the entity would be 1 unit long and
+        # Telegram would paint it over the wrong character.
+        ents = build_entities("⚠️ сбой", with_vs16_variants({"⚠": 7}))
+        self.assertEqual(len(ents), 1)
+        self.assertEqual(ents[0].offset, 0)
+        self.assertEqual(ents[0].length, 2)
+        self.assertEqual(ents[0].document_id, 7)
+
+    def test_plain_emoji_unaffected(self):
+        self.assertEqual(with_vs16_variants({"🏆": 1}), {"🏆": 1, "🏆️": 1})
+
+
+class GlyphSetTests(unittest.TestCase):
+    """The generated set must cover the emoji the bot actually prints."""
+
+    def _glyphs(self):
+        import importlib.util
+        path = (Path(__file__).resolve().parents[1] / "scripts"
+                / "generate_bot_emoji.py")
+        spec = importlib.util.spec_from_file_location("gen_emoji", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_no_duplicate_emoji_or_stems(self):
+        mod = self._glyphs()
+        emojis = [e for e, _s, _p, _c in mod.GLYPHS]
+        stems = [s for _e, s, _p, _c in mod.GLYPHS]
+        self.assertEqual(len(emojis), len(set(emojis)))
+        self.assertEqual(len(stems), len(set(stems)))
+
+    def test_emoji_map_shape_matches_uploader_contract(self):
+        mod = self._glyphs()
+        self.assertEqual(len(mod.EMOJI_MAP), len(mod.GLYPHS))
+        for stem, value in mod.EMOJI_MAP.items():
+            emoji, painter = value          # upload_emoji_pack.py unpacks a pair
+            self.assertTrue(emoji)
+            self.assertTrue(callable(painter))
+            self.assertIsInstance(stem, str)
 
 
 if __name__ == "__main__":

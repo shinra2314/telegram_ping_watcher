@@ -10,12 +10,19 @@ session file is COPIED to a temp path before connecting, so this never fights
 the running app for the same .session file.
 
 Usage:
-  python scripts/upload_emoji_pack.py --short pulsedesk_aperture
+  python scripts/upload_emoji_pack.py --short pulsedesk_aperture_v2 --set-env
   python scripts/upload_emoji_pack.py --short <name> --title "Pulse Desk" \
          --session MuverGT --set-env
 
 After it prints the short name, set BOT_CUSTOM_EMOJI_SET=<short> and restart
 the bot (or pass --set-env to write it into .env automatically).
+
+Two operational notes:
+  * Stop the app first. Telegram splits updates between connections, so a
+    second client on a session the app already holds never sees @Stickers'
+    replies and the run stalls on the first prompt.
+  * The set is ~85 glyphs = ~170 messages at ~3 s each, so budget ~10 minutes.
+    A short name is claimed for good, so a failed run needs a fresh --short.
 """
 from __future__ import annotations
 

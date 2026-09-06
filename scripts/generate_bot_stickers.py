@@ -1,42 +1,45 @@
 """Generate the Pulse Desk bot sticker set (Aperture philosophy).
 
 Static 512x512 .webp stickers, transparent background: an Aperture reticle
-ring in the event's signal colour wrapped around a Segoe color-emoji glyph,
-plus a monospace unit code. Requires Pillow + C:\\Windows\\Fonts. Manual tool
-(needs the Windows colour-emoji + mono fonts); CI only imports it.
+ring in the event's signal colour wrapped around one of the brand glyphs from
+``generate_bot_emoji`` — the same silhouettes the custom-emoji pack uses, so a
+sticker and its inline emoji are the same drawing at two scales. Plus a
+monospace unit code under the reticle.
+
+Only the unit code needs a font (Consolas); the glyphs are pure geometry.
 
 See assets/bot/DESIGN_PHILOSOPHY.md for the brand rationale.
 """
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
 BASE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from generate_bot_emoji import (  # noqa: E402
+    AMBER, CITRON, CITRON_DEEP, DIM, RED, Painter,
+    g_ban, g_bell, g_check, g_cross, g_dish, g_gift, g_key, g_lock_closed,
+    g_mailbox_empty, g_pingpong, g_satellite, g_trophy, g_warn,
+)
+
 OUT = BASE / "assets" / "bot" / "stickers"
 FONTS = Path(r"C:\Windows\Fonts")
 MONO = str(FONTS / "consola.ttf")     # Consolas — instrument readout
-EMOJI = str(FONTS / "seguiemj.ttf")   # Segoe UI Emoji — colour glyph
 
 SS = 2          # supersample then downscale for crisp edges
 S = 512         # Telegram static-sticker side
-
-# ----------------------------------------------------------------- palette
-CITRON = (205, 255, 74)
-CITRON_DEEP = (168, 216, 31)
-CYAN = (78, 216, 255)
-AMBER = (255, 178, 62)
-RED = (255, 92, 92)
-DIM = (150, 158, 150)
 
 
 def _ring(d: ImageDraw.ImageDraw, cx: int, cy: int, r: int,
           color: tuple[int, int, int], w: int) -> None:
     """Reticle ring: corner brackets, ring, measurement ticks, crosshair.
 
-    No centre lock-dot — the emoji glyph sits at the focal point instead.
+    No centre lock-dot — the brand glyph sits at the focal point instead.
     """
     be, bl = int(r * 1.7), int(r * 0.45)
     for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
@@ -52,22 +55,34 @@ def _ring(d: ImageDraw.ImageDraw, cx: int, cy: int, r: int,
                 (cx + r * math.cos(ang), cy + r * math.sin(ang))],
                fill=color + (a,), width=SS)
     gap, ext = int(r * 0.18), int(r * 0.4)
-    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+    # No downward tick — the unit code sits there.
+    for dx, dy in ((1, 0), (-1, 0), (0, -1)):
         d.line([(cx + dx * (r + gap), cy + dy * (r + gap)),
                 (cx + dx * (r + gap + ext), cy + dy * (r + gap + ext))],
                fill=color + (210,), width=w)
 
 
-def make_sticker(name: str, color: tuple[int, int, int], glyph: str, code: str) -> None:
+def make_sticker(name: str, color: tuple[int, int, int], paint: Painter,
+                 code: str) -> None:
     W = S * SS
     img = Image.new("RGBA", (W, W), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     cx = cy = W // 2
     _ring(d, cx, cy, int(W * 0.30), color, 3 * SS)
-    emoji = ImageFont.truetype(EMOJI, int(W * 0.30))
-    d.text((cx, cy - int(W * 0.01)), glyph, font=emoji, embedded_color=True, anchor="mm")
-    mono = ImageFont.truetype(MONO, int(W * 0.045))
+
+    inner = int(W * 0.38)
+    m = Image.new("L", (inner, inner), 0)
+    paint(m)
+    mask = Image.new("L", (W, W), 0)
+    mask.paste(m, (cx - inner // 2, cy - inner // 2))
+    img.paste(color + (255,), (0, 0), mask)
+
+    try:
+        mono = ImageFont.truetype(MONO, int(W * 0.045))
+    except Exception:
+        mono = ImageFont.load_default()
     d.text((cx, int(W * 0.88)), code, font=mono, fill=color + (230,), anchor="mm")
+
     out = img.resize((S, S), Image.LANCZOS)
     OUT.mkdir(parents=True, exist_ok=True)
     out.save(OUT / f"{name}.webp", "WEBP", lossless=True, quality=100, method=6)
@@ -76,17 +91,19 @@ def make_sticker(name: str, color: tuple[int, int, int], glyph: str, code: str) 
 
 def main() -> None:
     print("Generating Pulse Desk bot stickers (Aperture):")
-    make_sticker("win",        AMBER,       "\U0001F3C6", "PD·WIN")    # 🏆
-    make_sticker("giveaway",   CITRON,      "\U0001F381", "PD·GIFT")   # 🎁
-    make_sticker("check",      CITRON,      "\U0001F4B8", "PD·CHECK")  # 💸
-    make_sticker("scan",       CITRON,      "\U0001F6F0", "PD·SCAN")   # 🛰
-    make_sticker("scan_done",  CITRON_DEEP, "✅",     "PD·DONE")   # ✅
-    make_sticker("access_on",  CITRON,      "\U0001F513", "PD·OPEN")   # 🔓
-    make_sticker("access_off", RED,         "\U0001F512", "PD·LOCK")   # 🔒
-    make_sticker("welcome",    CITRON,      "\U0001F4E1", "PD·01")     # 📡
-    make_sticker("empty",      DIM,         "\U0001F4ED", "PD·NIL")    # 📭
-    make_sticker("error",      RED,         "⚠",     "PD·ERR")    # ⚠
-    make_sticker("pong",       CITRON,      "\U0001F3D3", "PD·PONG")   # 🏓
+    make_sticker("win",        AMBER,       g_trophy,        "PD·WIN")
+    make_sticker("giveaway",   CITRON,      g_gift,          "PD·GIFT")
+    make_sticker("scan",       CITRON,      g_satellite,     "PD·SCAN")
+    make_sticker("scan_done",  CITRON_DEEP, g_check,         "PD·DONE")
+    make_sticker("access_on",  CITRON,      g_key,           "PD·OPEN")
+    make_sticker("access_off", RED,         g_lock_closed,   "PD·LOCK")
+    make_sticker("welcome",    CITRON,      g_dish,          "PD·01")
+    make_sticker("empty",      DIM,         g_mailbox_empty, "PD·NIL")
+    make_sticker("error",      RED,         g_warn,          "PD·ERR")
+    make_sticker("pong",       CITRON,      g_pingpong,      "PD·PONG")
+    make_sticker("alert",      RED,         g_ban,           "PD·STOP")
+    make_sticker("bell",       CITRON,      g_bell,          "PD·PING")
+    make_sticker("fail",       RED,         g_cross,         "PD·FAIL")
     print("Done.")
 
 

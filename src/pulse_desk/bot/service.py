@@ -135,8 +135,11 @@ async def init_bot() -> None:
         # Resolve the Aperture custom-emoji pack (best-effort; empty → plain emoji).
         if settings.bot_custom_emoji_set:
             state.custom_emoji_map = await resolve_custom_emoji_map(bot_client, settings.bot_custom_emoji_set)
-            logger.info("Custom emoji pack '%s': %d glyphs resolved",
-                        settings.bot_custom_emoji_set, len(state.custom_emoji_map))
+            # The map carries a VS16 variant per emoticon, so its key count is
+            # ~2x the pack size — report distinct document ids as the glyph count.
+            glyphs = len(set(state.custom_emoji_map.values()))
+            logger.info("Custom emoji pack '%s': %d glyphs resolved (%d match keys)",
+                        settings.bot_custom_emoji_set, glyphs, len(state.custom_emoji_map))
 
         bot_pending_inputs = state.bot_pending_inputs
 

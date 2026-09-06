@@ -17,7 +17,6 @@ STICKERS_DIR = BASE_DIR / "assets" / "bot" / "stickers"
 _REGISTRY: dict[str, tuple[str, str]] = {
     "win": ("win.webp", "🏆"),
     "giveaway": ("giveaway.webp", "🎁"),
-    "check": ("check.webp", "💸"),
     "scan": ("scan.webp", "🛰"),
     "scan_done": ("scan_done.webp", "✅"),
     "access_on": ("access_on.webp", "🟢"),
@@ -26,6 +25,9 @@ _REGISTRY: dict[str, tuple[str, str]] = {
     "empty": ("empty.webp", "📭"),
     "error": ("error.webp", "⚠️"),
     "pong": ("pong.webp", "🏓"),
+    "alert": ("alert.webp", "🚫"),
+    "bell": ("bell.webp", "🔔"),
+    "fail": ("fail.webp", "❌"),
 }
 
 

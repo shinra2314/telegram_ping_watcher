@@ -100,9 +100,17 @@ src/pulse_desk/
   bot/emoji.py      — Custom-emoji rendering: resolve a @Stickers pack
                       (BOT_CUSTOM_EMOJI_SET) to {emoji: document_id}, inject
                       MessageEntityCustomEmoji into card text (UTF-16 offsets).
-                      No pack → no-op, plain Markdown. Glyph set in
-                      assets/bot/emoji/ (100px webp). Premium-only render;
-                      non-Premium see the same standard emoji as fallback
+                      No pack → no-op, plain Markdown. Premium-only render;
+                      non-Premium see the same standard emoji as fallback.
+                      `with_vs16_variants` registers every emoticon both with
+                      and without U+FE0F — Telegram may hand back a pack key as
+                      bare `⚠` while the cards print `⚠️`, and matching only the
+                      bare codepoint emits an entity one UTF-16 unit short.
+                      Glyph set: assets/bot/emoji/ (85× 100px webp), covering
+                      every emoji the bot prints **in message text**. Inline
+                      keyboard labels cannot carry entities, so keyboards.py
+                      always renders stock Telegram emoji — that is a Telegram
+                      limit, not a gap in the pack
   access_control.py — Pure schedule resolution (Window/Decision, window_contains,
                       resolve_access, next_boundary). Zoneinfo/DST-aware, no I/O,
                       fully unit-tested. Source of truth for bot_role gating
@@ -158,11 +166,17 @@ static/                    — Vanilla JS frontend (no build step). PWA with ser
   bump CACHE_NAME in static/sw.js when shell assets change.
 sessions/                  — Telethon .session credential files (never commit these)
 scripts/                   — One-off tools: generate_bot_assets.py (bot branding
-                             PNGs, needs Pillow), generate_bot_stickers.py
-                             (Aperture .webp sticker set, needs Pillow + Windows
-                             colour-emoji font), generate_bot_emoji.py (Aperture
-                             custom-emoji set, 100px webp, prints @Stickers emoji
-                             assignment), set_bot_profile.py (upload avatar)
+                             PNGs, needs Pillow), generate_bot_emoji.py (the 85
+                             Aperture custom-emoji tiles, 100px webp; glyphs are
+                             Pillow geometry — no emoji font — so `--sheet`
+                             renders a review contact sheet to
+                             assets/bot/emoji-preview.png), generate_bot_stickers.py
+                             (same silhouettes at 512px inside the reticle;
+                             imports the painters from generate_bot_emoji, needs
+                             Consolas only for the unit code),
+                             upload_emoji_pack.py (drives @Stickers from a
+                             Premium session — stop the app first, ~10 min for
+                             the full set), set_bot_profile.py (upload avatar)
 ```
 
 ### Background jobs (always running)

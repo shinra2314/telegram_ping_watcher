@@ -45,3 +45,34 @@ label. The work must read as the panel of a device engineered by someone at the
 top of their field — every grid interval measured, every bracket arm the same
 length, master-level execution disguised as the plainness of a tool that simply
 works.
+
+## The glyph system
+
+The bot speaks in emoji, and stock emoji are somebody else's design language —
+three vendors' worth of gradients, bevels and cartoon faces dropped into an
+instrument panel. Aperture replaces them with one drawn set: every glyph in
+`assets/bot/emoji/` is geometry from `scripts/generate_bot_emoji.py`, not a
+system font traced at 100 px.
+
+Each glyph is a graphite tile with a citron keyline and a flat silhouette. The
+tile is structural, not decorative: a bare citron mark washes out on a light
+chat theme and a graphite one vanishes on a dark theme, so the glyph carries its
+own ground and reads identically in both. Silhouettes are cut, never shaded —
+interior detail is negative space, because a hole survives the downscale to
+18 px that a second colour does not.
+
+Colour is the same governed rule, narrowed to five tokens: citron is action,
+amber is value, red is danger, cyan is information, dim white is structure. The
+status dots are the one exception — there the colour *is* the meaning, so they
+keep their literal hue and nothing else.
+
+Coverage is part of the design. A set that maps half the emoji a surface uses is
+worse than no set at all: the eye reads the seam between the two systems before
+it reads either. The pack therefore covers every emoji the bot prints in message
+text. Inline keyboard labels cannot carry entities and always render stock —
+that boundary is a Telegram limit, not a choice, and it is the reason button
+labels stay sparse.
+
+The stickers are the same silhouettes at 512 px, inside the reticle, with a unit
+code beneath. One drawing, two scales — a sticker and its inline emoji are never
+two different pictures of the same idea.

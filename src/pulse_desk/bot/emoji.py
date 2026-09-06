@@ -17,9 +17,31 @@ from telethon.extensions import markdown
 from telethon.tl.types import MessageEntityCustomEmoji
 
 
+VS16 = "️"
+
+
 def _utf16_len(text: str) -> int:
     """Length of `text` in UTF-16 code units (Telegram entity unit)."""
     return len(text.encode("utf-16-le")) // 2
+
+
+def with_vs16_variants(emap: dict[str, int]) -> dict[str, int]:
+    """Register each emoticon both with and without its variation selector.
+
+    Telegram normalises a pack's emoticons, so a glyph assigned as ``⚠️``
+    (U+26A0 U+FE0F) can come back as bare ``⚠``. The bot's card text uses the
+    VS16 form, and matching only the bare codepoint would emit an entity one
+    UTF-16 unit short — a misaligned entity Telegram rejects or renders on the
+    wrong character. Registering both forms makes the match exact either way;
+    ``build_entities`` tries the longest key first, so the VS16 form wins when
+    the text carries it. Existing keys are never overwritten.
+    """
+    out = dict(emap)
+    for key, doc in emap.items():
+        alt = key[:-1] if key.endswith(VS16) else key + VS16
+        if alt and alt not in out:
+            out[alt] = doc
+    return out
 
 
 def build_entities(clean_text: str, emoji_map: dict[str, int]) -> list[MessageEntityCustomEmoji]:
@@ -87,4 +109,4 @@ async def resolve_custom_emoji_map(client, short_name: str) -> dict[str, int]:
         docs = getattr(pack, "documents", None) or []
         if docs:
             emap[pack.emoticon] = int(docs[0])
-    return emap
+    return with_vs16_variants(emap)

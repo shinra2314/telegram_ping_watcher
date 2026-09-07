@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+from collections import deque
 from typing import Optional
 
 from .app_ctx import logger, settings, state
@@ -31,6 +32,9 @@ _TUNNEL_URL = re.compile(r"https://(?!api\.)[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudfl
 # A dead tunnel restarts through start_supervised, which does not back off on a
 # clean return. Pace it here so a permanently failing binary cannot spin.
 RESTART_DELAY_SECONDS = 10.0
+
+# How much of cloudflared's own output to keep for the failure log.
+TAIL_LINES = 4
 
 
 def extract_tunnel_url(line: Optional[str]) -> Optional[str]:
@@ -72,14 +76,19 @@ async def tunnel_loop() -> None:
         return
 
     logger.info("cloudflared started for %s (pid %s)", local, proc.pid)
+    tail: deque[str] = deque(maxlen=TAIL_LINES)
+    published = False
     try:
         assert proc.stdout is not None
         while True:
             raw = await proc.stdout.readline()
             if not raw:
                 break
-            url = extract_tunnel_url(raw.decode("utf-8", "replace"))
+            line = raw.decode("utf-8", "replace").rstrip()
+            tail.append(line)
+            url = extract_tunnel_url(line)
             if url:
+                published = True
                 await _publish(url)
         await proc.wait()
     except asyncio.CancelledError:
@@ -90,6 +99,17 @@ async def tunnel_loop() -> None:
         if proc.returncode is None:
             proc.terminate()
 
-    logger.warning("cloudflared exited with %s — Mini App buttons are hidden", proc.returncode)
-    await record_app_event("WARNING", "tunnel", "cloudflared exited", {"code": proc.returncode})
+    # A tunnel that dies without ever printing an address usually means the
+    # quick-tunnel API is unreachable — some networks block
+    # api.trycloudflare.com outright. Carry the child's own words into the log
+    # so the cause is in app.log rather than only in a console nobody sees.
+    reason = " | ".join(tail) if not published else ""
+    logger.warning(
+        "cloudflared exited with %s — Mini App buttons are hidden%s",
+        proc.returncode, f": {reason}" if reason else "",
+    )
+    await record_app_event(
+        "WARNING", "tunnel", "cloudflared exited",
+        {"code": proc.returncode, "published": published, "tail": list(tail)},
+    )
     await asyncio.sleep(RESTART_DELAY_SECONDS)

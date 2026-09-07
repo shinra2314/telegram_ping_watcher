@@ -18,6 +18,15 @@ class AppState:
     bot_client: Optional[TelegramClient] = None
     bot_id: Optional[int] = None
     bot_username: Optional[str] = None
+    # Public HTTPS origin of the Mini App, published by the ``tunnel`` job.
+    # None whenever the tunnel is disabled, starting or down — WebApp buttons
+    # are then simply not rendered and the bot falls back to inline keyboards.
+    public_url: Optional[str] = None
+    # Bot connection health, maintained by the ``bot-connection`` supervisor
+    # (see bot_connection.py). While the client is down it receives no updates,
+    # so an outage here means every command/button the owner sends is queued on
+    # Telegram's side until we reconnect.
+    bot_offline_since: Optional[datetime] = None
     # Pending free-text inputs for the bot settings menus: sender_id -> {kind, scope, armed_at}.
     bot_pending_inputs: dict[int, dict] = field(default_factory=dict)
     # Resolved custom-emoji pack: standard-emoji char -> document_id. Empty when
@@ -57,7 +66,6 @@ class AppState:
     ping_user_ids_resolved: set[str] = field(default_factory=set)  # lowercase usernames already attempted
     win_keywords: list = field(default_factory=list)
     giveaway_keywords: list = field(default_factory=list)
-    check_keywords: list = field(default_factory=list)
     high_priority_keywords: list = field(default_factory=list)
     ignore_keywords: list = field(default_factory=list)
     join_button_keywords: list = field(default_factory=list)
@@ -76,8 +84,11 @@ class AppState:
         "processed_usernames": 0,
         "found": 0,
         "fast_channels": 0,
+        "idle_channels": 0,
         "targeted_channels": 0,
         "edit_sweep_messages": 0,
+        "global_search_cards": 0,
+        "global_search_found": 0,
         "scan_strategy": "",
         "history_limit": 0,
         "last_error": None,

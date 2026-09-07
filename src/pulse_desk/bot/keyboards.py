@@ -1,8 +1,12 @@
 """Inline-keyboard builders for the bot UI."""
 from __future__ import annotations
 
-from telethon import Button
+from typing import Optional, Sequence
 
+from telethon import Button
+from telethon.tl.types import KeyboardButtonWebView
+
+from ..app_ctx import state
 from ..bot_permissions import (
     ALL_FEATURES,
     ALL_NOTIFY,
@@ -11,6 +15,15 @@ from ..bot_permissions import (
     NOTIFY_TYPES,
     format_delay,
     permission_delay_minutes,
+)
+from .views import (
+    ALL_ACCOUNTS,
+    ANALYTICS_TABS,
+    EXPIRY_PRESETS,
+    GIVEAWAY_SORTS,
+    GiveawayFilter,
+    account_label,
+    format_expiry,
 )
 
 
@@ -28,7 +41,66 @@ def back_home() -> list[list[Button]]:
     return [[Button.inline("⬅️ Домой", b"menu_main")]]
 
 
-MON_FILTERS = [("all", "Все"), ("important", "Важные"), ("check", "Чеки"), ("win", "Победы")]
+def webapp_row(label: str, path: str = "/app") -> list[Button]:
+    """A one-button row opening the Mini App, or an empty row when it is down.
+
+    The URL is read at send time rather than cached, because a quick tunnel
+    hands out a new hostname on every restart. With no tunnel the row is empty
+    and the caller's keyboard is simply one row shorter — the inline UI below it
+    stays fully usable, which is the whole point of the fallback.
+
+    Custom emoji and custom button shapes are impossible in a Telegram keyboard
+    (button text is a plain string with no entities), so this button is the only
+    way into a surface that has them.
+
+    Telethon 1.43 counts ``KeyboardButtonWebView`` among its inline button
+    types, so the raw TL object goes straight into ``buttons=``.
+    """
+    base = (state.public_url or "").rstrip("/")
+    if not base:
+        return []
+    return [KeyboardButtonWebView(text=label, url=f"{base}{path}")]
+
+
+# Converter shortcuts shown under the landing card, as (src, dst) pairs.
+CONVERT_PRESETS: tuple[tuple[str, str], ...] = (
+    ("USD", "UAH"), ("EUR", "UAH"), ("USDT", "UAH"), ("BTC", "USD"), ("TON", "USD"),
+)
+
+
+def _convert_cb(amount: float, src: str, dst: str) -> bytes:
+    """`cv:p:<amount>:<src>:<dst>` — a re-runnable conversion, ≤64 bytes."""
+    return f"cv:p:{amount:g}:{src}:{dst}".encode()
+
+
+def converter_keyboard() -> list[list[Button]]:
+    """Landing screen: preset pairs + free-text input."""
+    presets = [Button.inline(f"{src}→{dst}", _convert_cb(1, src, dst)) for src, dst in CONVERT_PRESETS]
+    rows = [presets[i:i + 3] for i in range(0, len(presets), 3)]
+    rows.append([Button.inline("✍️ Своя сумма", b"cv:in")])
+    rows.append([Button.inline("⬅️ Домой", b"menu_main"), Button.inline("💹 Курсы", b"menu_market")])
+    return rows
+
+
+def conversion_keyboard(amount: float, src: str, dst: str) -> list[list[Button]]:
+    """Result screen: flip the pair, recompute, or ask for another sum."""
+    return [
+        [Button.inline("🔁 Наоборот", _convert_cb(amount, dst, src)),
+         Button.inline("🔄 Обновить", _convert_cb(amount, src, dst))],
+        [Button.inline("✍️ Другая сумма", b"cv:in"), Button.inline("💱 Конвертер", b"cv")],
+        [Button.inline("⬅️ Домой", b"menu_main")],
+    ]
+
+
+def market_keyboard() -> list[list[Button]]:
+    """Rates view footer — the converter is one tap from the prices."""
+    return [
+        [Button.inline("💱 Конвертер", b"cv")],
+        [Button.inline("⬅️ Домой", b"menu_main"), Button.inline("🔄 Обновить", b"menu_market")],
+    ]
+
+
+MON_FILTERS = [("all", "Все"), ("important", "Важные"), ("giveaway", "Розыгрыши"), ("win", "Победы")]
 
 
 def _feed_cb(active: str, page: int) -> bytes:
@@ -81,24 +153,127 @@ def ping_card_keyboard(ping_id: int, is_admin: bool) -> list[list[Button]]:
     return rows
 
 
-def giveaway_feed_keyboard(items: list[tuple[int, str]]) -> list[list[Button]]:
-    """Giveaways section: one row per candidate, then home/refresh."""
+def _giveaway_feed_cb(state: GiveawayFilter, page: Optional[int] = None) -> bytes:
+    """`menu_giveaways` for an unfiltered page 1, `gw:f:<sort>:<wins>:<acct>:<page>` otherwise.
+
+    The plain form keeps the section's entry point (home button, /giveaways,
+    back-from-card) on one stable callback no matter what the feed grows into.
+    """
+    state = state if page is None else state._replace(page=page)
+    if state.page <= 1 and state.sort == "d" and not state.wins and state.account == ALL_ACCOUNTS:
+        return b"menu_giveaways"
+    return state.cb()
+
+
+def _giveaway_accounts_cb(state: GiveawayFilter, page: int = 0) -> bytes:
+    """`gw:a:<sort>:<wins>:<account>:<picker page>` — the picker keeps the feed's state."""
+    return f"gw:a:{state.sort}:{1 if state.wins else 0}:{state.account}:{max(0, page)}".encode()
+
+
+def _giveaway_open_cb(ping_id: int, state: GiveawayFilter) -> bytes:
+    """`gw:open:<id>[:<sort>:<wins>:<acct>:<page>]` — the card remembers the list."""
+    tail = f":{state.sort}:{1 if state.wins else 0}:{state.account}:{max(1, state.page)}"
+    return f"gw:open:{ping_id}{tail}".encode()
+
+
+def giveaway_feed_keyboard(
+    items: list[tuple[int, str]],
+    page: int = 1,
+    has_more: bool = False,
+    state: Optional[GiveawayFilter] = None,
+    accounts: Sequence[str] = (),
+) -> list[list[Button]]:
+    """Giveaways section: candidates, sort/wins/account filters, pager, home/refresh."""
+    state = (state or GiveawayFilter())._replace(page=max(1, page))
     rows: list[list[Button]] = [
-        [Button.inline(label, f"gw:open:{pid}".encode())] for pid, label in items
+        [Button.inline(label, _giveaway_open_cb(pid, state))] for pid, label in items
     ]
     rows.append([
+        Button.inline(f"▸{label}" if code == state.sort else label, state.with_(sort=code).cb())
+        for code, _db, label in GIVEAWAY_SORTS
+    ])
+    rows.append([
+        Button.inline(
+            ("▸🏆 Победы" if state.wins else "🏆 Победы"),
+            state.with_(wins=not state.wins).cb(),
+        ),
+        Button.inline(f"👤 {account_label(accounts, state.account)}"[:28], _giveaway_accounts_cb(state)),
+    ])
+    if page > 1 or has_more:
+        pager: list[Button] = []
+        if page > 1:
+            pager.append(Button.inline("◀️ Новее", _giveaway_feed_cb(state, page - 1)))
+        pager.append(Button.inline(f"· {page} ·", b"noop"))
+        if has_more:
+            pager.append(Button.inline("Старее ▶️", _giveaway_feed_cb(state, page + 1)))
+        rows.append(pager)
+    rows.append([
         Button.inline("⬅️ Домой", b"menu_main"),
-        Button.inline("🔄 Обновить", b"menu_giveaways"),
+        Button.inline("🔄 Обновить", _giveaway_feed_cb(state)),
     ])
     return rows
 
 
-def giveaway_card_keyboard(ping_id: int) -> list[list[Button]]:
-    """Read-only candidate card: back to the section + refresh."""
+GIVEAWAY_ACCOUNTS_PAGE = 8
+
+
+def giveaway_accounts_keyboard(
+    accounts: Sequence[str],
+    counts: dict,
+    state: Optional[GiveawayFilter] = None,
+    page: int = 0,
+) -> list[list[Button]]:
+    """Account picker for the giveaways feed — one row per tracked username.
+
+    Accounts travel as an index into `accounts`, rebuilt identically by the
+    caller on both render and click (callback data is capped at 64 bytes).
+    """
+    state = state or GiveawayFilter()
+    pages = max(1, (len(accounts) + GIVEAWAY_ACCOUNTS_PAGE - 1) // GIVEAWAY_ACCOUNTS_PAGE)
+    page = max(0, min(pages - 1, page))
+    start = page * GIVEAWAY_ACCOUNTS_PAGE
+    rows: list[list[Button]] = [
+        [Button.inline(
+            f"🏆 {int((counts.get(name.lower()) or {}).get('wins', 0))}"
+            f" · 🎁 {int((counts.get(name.lower()) or {}).get('giveaways', 0))}  @{name}"[:48],
+            state.with_(account=start + i).cb(),
+        )]
+        for i, name in enumerate(accounts[start:start + GIVEAWAY_ACCOUNTS_PAGE])
+    ]
+    if pages > 1:
+        nav: list[Button] = []
+        if page > 0:
+            nav.append(Button.inline("◀️", _giveaway_accounts_cb(state, page - 1)))
+        nav.append(Button.inline(f"{page + 1}/{pages}", b"noop"))
+        if page < pages - 1:
+            nav.append(Button.inline("▶️", _giveaway_accounts_cb(state, page + 1)))
+        rows.append(nav)
+    rows.append([Button.inline("👥 Все аккаунты", state.with_(account=ALL_ACCOUNTS).cb())])
+    rows.append([Button.inline("⬅️ Назад", _giveaway_feed_cb(state, 1))])
+    return rows
+
+
+def giveaway_card_keyboard(ping_id: int, state: Optional[GiveawayFilter] = None) -> list[list[Button]]:
+    """Read-only candidate card: back to the list it came from + refresh."""
+    state = state or GiveawayFilter()
     return [[
-        Button.inline("⬅️ Назад", b"menu_giveaways"),
-        Button.inline("🔄 Обновить", f"gw:open:{ping_id}".encode()),
+        Button.inline("⬅️ Назад", _giveaway_feed_cb(state)),
+        Button.inline("🔄 Обновить", _giveaway_open_cb(ping_id, state)),
     ]]
+
+
+def analytics_keyboard(active: str) -> list[list[Button]]:
+    """Tab strip for the analytics report + home/refresh footer."""
+    tabs = [
+        Button.inline(f"▸{label}" if code == active else label, f"an:{code}".encode())
+        for code, label in ANALYTICS_TABS
+    ]
+    rows = [tabs[i:i + 3] for i in range(0, len(tabs), 3)]
+    rows.append([
+        Button.inline("⬅️ Домой", b"menu_main"),
+        Button.inline("🔄 Обновить", f"an:{active}".encode()),
+    ])
+    return rows
 
 
 def management_grid() -> list[list[Button]]:
@@ -106,7 +281,26 @@ def management_grid() -> list[list[Button]]:
         [Button.inline("⚙️ Настройки", b"st"), Button.inline("🔑 Ключи", b"menu_keys")],
         [Button.inline("👥 Люди", b"adm:members"), Button.inline("⏰ Доступ", b"adm:access")],
         [Button.inline("🔄 Скан", b"menu_scan"), Button.inline("📜 Логи", b"menu_logs")],
-        [Button.inline("♻️ Рестарт", b"menu_restart"), Button.inline("⬅️ Домой", b"menu_main")],
+        [Button.inline("🎰 Рулетка", b"rl"), Button.inline("♻️ Рестарт", b"menu_restart")],
+        [Button.inline("⬅️ Домой", b"menu_main")],
+    ]
+
+
+def roulette_reminder_keyboard() -> list[list[Button]]:
+    """Buttons under the daily nudge: check in now, type a time, or skip."""
+    return [
+        [Button.inline("✅ Прокликал (сейчас)", b"rl:now")],
+        [Button.inline("⏱ Указать время", b"rl:in"), Button.inline("⏭ Не сегодня", b"rl:skip")],
+    ]
+
+
+def roulette_panel_keyboard(cfg: dict) -> list[list[Button]]:
+    """Owner panel for the roulette reminder."""
+    toggle = "🔕 Выключить" if cfg.get("enabled") else "🔔 Включить"
+    return [
+        [Button.inline("✅ Прокликал (сейчас)", b"rl:now")],
+        [Button.inline("⏱ Указать время", b"rl:in"), Button.inline(toggle, b"rl:tog")],
+        [Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"rl")],
     ]
 
 
@@ -146,23 +340,21 @@ def member_access_keyboard(tg: int) -> list[list[Button]]:
     ]
 
 
-def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
-    """Keys panel: revoke + delete per key, then create + nav.
+KEYS_LIST_LIMIT = 12
 
-    Revoke keeps the row (the link stops working); delete erases it. Neither
-    touches people who already joined — block those in the members panel.
+
+def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
+    """Keys panel: one row per key opening its control panel, then create + nav.
+
+    Every lifecycle action (rename, expiry, revoke, delete) lives inside that
+    panel, so the list stays a list no matter how many keys exist.
     """
     rows: list[list[Button]] = [
-        [
-            Button.inline(f"🚫 {label}", f"key:rm:{kid}".encode()),
-            Button.inline("🗑", f"key:del:{kid}".encode()),
-        ]
-        for kid, label in items
+        [Button.inline(f"⚙️ {label}"[:48], f"key:{kid}".encode())]
+        for kid, label in list(items)[:KEYS_LIST_LIMIT]
     ]
     rows.append([Button.inline("➕ Создать ключ", b"adm:newkey"),
                  Button.inline("⚡ Премиум-ключ", b"adm:newkeyp")])
-    if items:
-        rows.append([Button.inline(f"⚙️ #{kid}", f"key:{kid}".encode()) for kid, _ in items[:4]])
     rows.append([Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_keys")])
     return rows
 
@@ -170,22 +362,75 @@ def keys_keyboard(items: list[tuple[int, str]] = ()) -> list[list[Button]]:
 KEY_PANEL_ACCOUNTS_PAGE = 8
 
 
-def key_panel_keyboard(key_id: int, perms: dict, account_total: int) -> list[list[Button]]:
+def key_panel_keyboard(key: dict, perms: dict, account_total: int) -> list[list[Button]]:
     """Root of the per-key control panel: what a guest sees, gets, and when."""
+    key_id = int(key.get("id") or 0)
     granted_accounts = perms.get("accounts") or []
     scope = f"{len(granted_accounts)}/{account_total}" if granted_accounts else f"все ({account_total})"
+    premium = (key.get("role") or "viewer") == "premium"
+    revoked = bool(key.get("revoked"))
+    toggle = (
+        Button.inline("♻️ Вернуть", f"key:on:{key_id}".encode())
+        if revoked else
+        Button.inline("🚫 Отозвать", f"key:rm:{key_id}".encode())
+    )
     return [
         [
             Button.inline(f"📂 Разделы ({len(perms.get('features') or [])}/{len(ALL_FEATURES)})", f"key:f:{key_id}".encode()),
             Button.inline(f"🔔 Уведомления ({len(perms.get('notify') or [])}/{len(ALL_NOTIFY)})", f"key:n:{key_id}".encode()),
         ],
         [Button.inline(f"👤 Аккаунты · {scope}", f"key:a:{key_id}".encode())],
-        [Button.inline(f"⏱ Задержка · {format_delay(permission_delay_minutes(perms))}", f"key:d:{key_id}".encode())],
+        [
+            Button.inline(f"⏱ Задержка · {format_delay(permission_delay_minutes(perms))}", f"key:d:{key_id}".encode()),
+            Button.inline(f"⏳ Срок · {format_expiry(key.get('expires_at'))}"[:40], f"key:e:{key_id}".encode()),
+        ],
+        [
+            Button.inline("🏷 Метка", f"key:name:{key_id}".encode()),
+            Button.inline("👁 Сделать обычным" if premium else "⚡ Сделать премиум", f"key:role:{key_id}".encode()),
+        ],
         [
             Button.inline("🔗 Ссылка", f"key:link:{key_id}".encode()),
-            Button.inline("🗑 Удалить", f"key:del:{key_id}".encode()),
+            Button.inline(f"👥 Вошли ({int(key.get('member_count') or 0)})", f"key:m:{key_id}".encode()),
         ],
-        [Button.inline("⬅️ Ключи", b"menu_keys")],
+        [toggle, Button.inline("🗑 Удалить", f"key:del:{key_id}".encode())],
+        [Button.inline("⬅️ Ключи", b"menu_keys"), Button.inline("🔄 Обновить", f"key:{key_id}".encode())],
+    ]
+
+
+def key_expiry_keyboard(key_id: int, key: dict) -> list[list[Button]]:
+    """Lifetime presets: forever, N days from now, or a typed-in day count."""
+    current = key.get("expires_at")
+    presets = [
+        Button.inline(("🔘 " if not current else "") + "бессрочно", f"key:e:{key_id}:_off".encode())
+    ]
+    presets += [
+        Button.inline(f"{days} дн", f"key:e:{key_id}:{days}".encode())
+        for days in EXPIRY_PRESETS
+    ]
+    rows = [presets[i:i + 3] for i in range(0, len(presets), 3)]
+    rows.append([Button.inline("✏️ Своё значение…", f"key:e:{key_id}:_x".encode())])
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
+    return rows
+
+
+def key_members_keyboard(key_id: int, items: list[tuple[int, str]] = ()) -> list[list[Button]]:
+    """Holders of one key; each opens the existing member card.
+
+    Capped like the keys list — the card above lists everyone, the buttons are
+    a shortcut, and a keyboard of 50 rows is unusable on a phone.
+    """
+    rows: list[list[Button]] = [
+        [Button.inline(label[:48], f"mem:open:{tg}".encode())] for tg, label in list(items)[:KEYS_LIST_LIMIT]
+    ]
+    rows.append([Button.inline("⬅️ Назад", f"key:{key_id}".encode())])
+    return rows
+
+
+def key_delete_keyboard(key_id: int) -> list[list[Button]]:
+    """Two-step delete: deleting a key is the one action here with no undo."""
+    return [
+        [Button.inline("🗑 Да, удалить", f"key:delgo:{key_id}".encode())],
+        [Button.inline("✖️ Отмена", f"key:{key_id}".encode())],
     ]
 
 

@@ -15,12 +15,18 @@ from telegram_ping_watcher import normalize_usernames
 from .. import APP_VERSION
 from .. import watch_settings as ws
 from ..access_control import find_undoable, parse_repeat_rule, plan_undo, resolve_access, window_from_row
-from ..analytics import build_analytics
-from ..app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, CHECK_FRESH_MINUTES, LOG_FILE, logger, settings, state
+from ..analytics import build_analytics, build_detailed_analytics
+from ..app_ctx import ADMIN_ID, API_HASH, API_ID, BOT_TOKEN, LOG_FILE, logger, settings, state
+from ..bot_membership import (
+    access_decision as _shared_access_decision,
+    admin_chat_ids as _shared_admin_chat_ids,
+    resolve_member_access as _shared_resolve_member_access,
+)
 from ..bot_notify import BOT_ASSETS_DIR, edit_pending_admin_card, execute_pending_broadcast
 from ..bot_permissions import (
     ALL_FEATURES,
     ALL_NOTIFY,
+    account_mentioned,
     accounts_allowed,
     allowed_pref_keys,
     dump_permissions,
@@ -53,29 +59,74 @@ from ..bot_prefs import (
     render_tracking_text,
     toggle_member_pref,
 )
-from ..common import record_app_event
+from ..bot_connection import watch_bot_connection
+from ..common import record_app_event, start_background_task
+from ..converter import (
+    Query, USAGE_HINT, parse_query, render_conversion, render_converter_home, supported_text,
+)
 from ..live import publish_live_event
+from ..roulette import apply_checkin, checkin_moment, skip_today
 from ..scan_engine import full_history_scan
 from ..security import generate_access_key
 from ..telegram_accounts import restart_monitoring, telegram_client_for_session
-from .views import DIV, SECTION_FEATURES, fmt_dt, help_text, main_menu_buttons
+from .views import (
+    DIV, SECTION_FEATURES, GiveawayFilter, account_label, expiry_from_days,
+    fmt_dt, format_expiry, help_text, key_expired, main_menu_buttons, paginate,
+    parse_expiry_days, parse_giveaway_filter,
+)
 from .keyboards import (
-    KEY_PANEL_ACCOUNTS_PAGE, MON_FILTERS, back_home, feed_keyboard, giveaway_card_keyboard,
-    giveaway_feed_keyboard, key_accounts_keyboard, key_delay_keyboard, key_features_keyboard,
+    KEY_PANEL_ACCOUNTS_PAGE, MON_FILTERS, analytics_keyboard, back_home, conversion_keyboard,
+    converter_keyboard, feed_keyboard, giveaway_accounts_keyboard, giveaway_card_keyboard,
+    giveaway_feed_keyboard, key_accounts_keyboard, key_delay_keyboard, key_delete_keyboard,
+    key_expiry_keyboard, key_features_keyboard, key_members_keyboard,
     key_notify_keyboard, key_panel_keyboard, keys_keyboard, logs_keyboard, management_grid,
-    member_access_keyboard, member_card_keyboard, members_list_keyboard,
-    ping_card_keyboard, restart_confirm_keyboard, scan_panel_keyboard, section_nav,
+    market_keyboard, member_access_keyboard, member_card_keyboard, members_list_keyboard,
+    ping_card_keyboard, restart_confirm_keyboard, roulette_panel_keyboard, scan_panel_keyboard,
+    section_nav,
 )
 from .cards import (
-    feed_badge, feed_header, giveaway_card, giveaways_header, key_accounts_card,
-    key_delay_card, key_features_card, key_notify_card, key_panel_card, keys_card,
+    analytics_card, feed_badge, feed_header, giveaway_accounts_card, giveaway_card,
+    giveaways_header, key_accounts_card,
+    key_delay_card, key_delete_card, key_expiry_card, key_features_card, key_members_card,
+    key_notify_card, key_panel_card, key_state_badge, keys_card,
     management_card, member_card, members_header, home_card, ping_card,
-    restart_confirm_card, scan_card, summary_card,
+    restart_confirm_card, roulette_card, scan_card, summary_card,
 )
 from .emoji import enrich, resolve_custom_emoji_map
 
 
 _ACCESS_DAY_NAMES = {1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
+
+# `key:<action>:<id>` callbacks that act on the key itself rather than on its
+# grants — they are addressed by name, so they must never be read as a key id.
+KEY_LIFECYCLE_ACTIONS = ("rm", "on", "del", "delgo")
+
+# Fire-and-forget event writes from the bot-connection supervisor; kept alive
+# here so the loop never drops a task mid-write.
+_connection_event_tasks: set[asyncio.Task] = set()
+
+
+def _record_bot_connection(connected: bool, attempt: int) -> None:
+    """Bot connection went up or down — remember it for ``/api/health``.
+
+    Called by the ``bot-connection`` supervisor. While ``bot_offline_since`` is
+    set the bot receives no updates at all, so the dashboard (and the external
+    PulseWatchdog) can tell a wedged bot from a healthy one.
+    """
+    state.bot_offline_since = None if connected else (state.bot_offline_since or datetime.now())
+    try:
+        task = asyncio.get_running_loop().create_task(
+            record_app_event(
+                "INFO" if connected else "WARNING",
+                "telegram",
+                "Telegram bot connection restored" if connected else "Telegram bot connection lost",
+                {"attempts": attempt},
+            )
+        )
+    except RuntimeError:  # no running loop (unit tests)
+        return
+    _connection_event_tasks.add(task)
+    task.add_done_callback(_connection_event_tasks.discard)
 
 
 async def init_bot() -> None:
@@ -103,19 +154,23 @@ async def init_bot() -> None:
         get_ping_by_id,
         get_pings,
         get_recent_giveaway_actions,
+        giveaway_account_counts,
         list_access_windows,
+        list_bot_key_members,
         list_bot_keys,
         list_bot_members,
         mark_ping_read as mark_ping_read_db,
         record_access_audit,
-        revoke_bot_key,
         set_access_window_active,
+        set_bot_key_expiry,
+        set_bot_key_label,
+        set_bot_key_revoked,
+        set_bot_key_role,
         set_bot_member_blocked,
         set_bot_member_prefs,
         set_member_default_policy,
         set_setting,
         toggle_favorite,
-        touch_bot_member,
         upsert_bot_member,
     )
 
@@ -131,6 +186,22 @@ async def init_bot() -> None:
         state.bot_username = bot_me.username
         bot_username = bot_me.username
         logger.info("Bot started: @%s", bot_me.username)
+        state.bot_offline_since = None
+
+        # Telethon stops reconnecting after `connection_retries` failures and
+        # leaves the client dead. Outgoing sends recover on their own
+        # (ensure_bot_connected), incoming updates do not — so without this
+        # supervisor a network flap silently freezes every command and button
+        # until the next notification reconnects us. See bot_connection.py.
+        start_background_task(
+            "bot-connection",
+            watch_bot_connection(
+                bot_client,
+                should_stop=lambda: state.shutting_down,
+                on_change=_record_bot_connection,
+                logger=logger,
+            ),
+        )
 
         # Resolve the Aperture custom-emoji pack (best-effort; empty → plain emoji).
         if settings.bot_custom_emoji_set:
@@ -144,36 +215,14 @@ async def init_bot() -> None:
         bot_pending_inputs = state.bot_pending_inputs
 
         # ---- access control -------------------------------------------------
+        # The rules themselves live in bot_membership so the Mini App resolves
+        # access identically; these stay as thin closures because ~40 call sites
+        # below reference them by name.
         def _bot_admin_chat_ids() -> set[int]:
-            ids: set[int] = set()
-            if ADMIN_ID:
-                ids.add(int(ADMIN_ID))
-            raw = (settings.bot_admin_chats or "").strip()
-            if raw:
-                for chunk in raw.split(","):
-                    chunk = chunk.strip()
-                    if chunk:
-                        try:
-                            ids.add(int(chunk))
-                        except ValueError:
-                            pass
-            return ids
+            return _shared_admin_chat_ids(str(ADMIN_ID or ""), settings.bot_admin_chats or "")
 
         async def _access_decision(sender_id: int, member: dict):
-            """Cached schedule decision for a member: (allowed, reason, until_utc).
-
-            Source of truth is computed here, not a stored flag — so access stays
-            correct even if the scheduler loop is down. The cache only skips repeat
-            SQL until the next window boundary."""
-            now = datetime.now(timezone.utc)
-            cached = state.access_cache.get(sender_id)
-            if cached and now < cached[1]:
-                return cached[0], cached[2], cached[1]
-            rows = await list_access_windows(sender_id)
-            decision = resolve_access(member, [window_from_row(r) for r in rows], now)
-            until = decision.until or (now + timedelta(minutes=1))
-            state.access_cache[sender_id] = (decision.allowed, until, decision.reason)
-            return decision.allowed, decision.reason, until
+            return await _shared_access_decision(sender_id, member)
 
         def _until_phrase(until: Optional[datetime]) -> str:
             if not until:
@@ -181,23 +230,10 @@ async def init_bot() -> None:
             return f" до {until.astimezone().strftime('%d.%m %H:%M')}"
 
         async def resolve_member_access(sender_id: int) -> tuple[Optional[str], dict]:
-            """Resolve a Telegram user to (role, grants).
-
-            role is 'admin', 'viewer'/'premium', or None (no access). Admins bypass
-            both the schedule and the grants; members are gated by their access
-            windows (see access_control.resolve_access) and carry the grants copied
-            from the key they joined with.
-            """
-            if sender_id in _bot_admin_chat_ids():
-                return "admin", full_permissions()
-            member = await get_bot_member(sender_id)
-            if not member or member.get("blocked"):
-                return None, full_permissions()
-            await touch_bot_member(sender_id)
-            allowed, _reason, _until = await _access_decision(sender_id, member)
-            if not allowed:
-                return None, full_permissions()
-            return member.get("role") or "viewer", parse_permissions(member.get("permissions"))
+            """Resolve a Telegram user to (role, grants) — see bot_membership."""
+            return await _shared_resolve_member_access(
+                sender_id, admin_ids=_bot_admin_chat_ids()
+            )
 
         async def bot_role(sender_id: int) -> Optional[str]:
             role, _perms = await resolve_member_access(sender_id)
@@ -315,6 +351,11 @@ async def init_bot() -> None:
                 f"🛰 Аккаунтов онлайн: `{analytics['accounts_online']}`"
             )
 
+        async def render_analytics(tab: str = "sum"):
+            """Analytics report page. Both queries are read-only aggregates."""
+            analytics, detailed = await asyncio.gather(build_analytics(), build_detailed_analytics())
+            return analytics_card(tab, analytics=analytics, detailed=detailed), analytics_keyboard(tab)
+
         async def render_status() -> str:
             accounts_online = sum(1 for acc in list(state.accounts_state.values()) if acc.get("status") == "online")
             account_lines = [
@@ -344,31 +385,88 @@ async def init_bot() -> None:
             """Drop rows about accounts this key was not granted, then trim."""
             return [r for r in rows if accounts_allowed(perms, r.get("mentions"))][:limit]
 
-        async def render_giveaways(perms: Optional[dict] = None):
+        def giveaway_accounts(perms: dict) -> list[str]:
+            """Tracked usernames this key may see, '@' stripped.
+
+            The account filter addresses these by index, so render and click must
+            rebuild the exact same list — hence one helper, no local sorting.
+            """
+            names = [name.lstrip("@") for name in (state.ping_usernames or [])]
+            whitelist = {n.lower() for n in (perms.get("accounts") or [])}
+            return [n for n in names if not whitelist or n.lower() in whitelist]
+
+        async def render_giveaways(
+            filt: Optional[GiveawayFilter] = None,
+            perms: Optional[dict] = None,
+        ):
             perms = perms or full_permissions()
-            board = await get_giveaway_board(limit=10)
+            filt = filt or GiveawayFilter()
+            page = max(1, filt.page)
+            accounts = giveaway_accounts(perms)
+            account = accounts[filt.account] if 0 <= filt.account < len(accounts) else None
+            # Fetch the whole prefix up to the requested page (+1 row to detect a
+            # next one). Any filter applied below eats rows, so widen the window
+            # whenever one is active — an account-scoped key always has one.
+            narrowed = bool(perms.get("accounts")) or filt.wins or account is not None
+            window = FEED_PAGE_SIZE * page + 1
+            board = await get_giveaway_board(limit=window * (8 if narrowed else 1), sort=filt.db_sort)
             stats = board.get("stats") or {}
             need = (board.get("buckets") or {}).get("need_action") or []
             need = [r for r in need if accounts_allowed(perms, r.get("mentions"))]
+            if filt.wins:
+                need = [r for r in need if r.get("is_win")]
+            if account is not None:
+                need = [r for r in need if account_mentioned(r.get("mentions"), account)]
+            rows, has_more = paginate(need, page, FEED_PAGE_SIZE)
             items = []
-            for r in need[:8]:
-                deadline = r.get("deadline_at")
-                when = fmt_dt(deadline) if deadline else fmt_dt(r.get("detected_at"))
+            for r in rows:
+                when = fmt_dt(r.get("date") if filt.sort == "p" else r.get("detected_at"))
                 badge = "🗑" if r.get("deleted_at") else feed_badge(r.get("priority_label"))
                 label = f"{badge} {when} {r.get('chat') or '?'}"
                 items.append((int(r["id"]), label[:48]))
-            return giveaways_header(stats, len(need)), giveaway_feed_keyboard(items)
+            # Header shows the real queue depth, not just what fits on this page.
+            total = (
+                len(need) if narrowed
+                else int((board.get("bucket_totals") or {}).get("need_action") or len(need))
+            )
+            return (
+                giveaways_header(stats, total, filt, account_label(accounts, filt.account)),
+                giveaway_feed_keyboard(items, page, has_more, state=filt, accounts=accounts),
+            )
 
-        async def open_giveaway_view(ping_id: int, perms: Optional[dict] = None):
+        async def render_giveaway_accounts(
+            filt: Optional[GiveawayFilter] = None,
+            page: int = 0,
+            perms: Optional[dict] = None,
+        ):
+            """Account picker: every tracked username with its open wins/giveaways."""
+            perms = perms or full_permissions()
+            filt = filt or GiveawayFilter()
+            accounts = giveaway_accounts(perms)
+            counts = await giveaway_account_counts()
+            return (
+                giveaway_accounts_card(counts, accounts),
+                giveaway_accounts_keyboard(accounts, counts, state=filt, page=page),
+            )
+
+        async def open_giveaway_view(
+            ping_id: int,
+            perms: Optional[dict] = None,
+            filt: Optional[GiveawayFilter] = None,
+        ):
             ping = await get_ping_by_id(ping_id)
             if not ping:
                 return None
             if perms is not None and not accounts_allowed(perms, ping.get("mentions")):
                 return None
-            return giveaway_card(ping), giveaway_card_keyboard(ping_id)
+            return giveaway_card(ping), giveaway_card_keyboard(ping_id, filt or GiveawayFilter())
 
         async def render_management():
             return management_card(), management_grid()
+
+        async def render_roulette_panel():
+            cfg = await ws.load_roulette_settings()
+            return roulette_card(cfg, datetime.now()), roulette_panel_keyboard(cfg)
 
         def render_scan_panel():
             last_scan = fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
@@ -419,14 +517,25 @@ async def init_bot() -> None:
                 f"🟣 SOL: `${m.get('solana', {}).get('usd', 0):.2f}`"
             )
 
+        async def latest_snapshot() -> Optional[dict]:
+            """Newest market snapshot, or None while the market loop is cold."""
+            rows = await get_market_history(limit=1)
+            return rows[0] if rows else None
+
+        async def render_converter():
+            return render_converter_home(await latest_snapshot()), converter_keyboard()
+
+        async def render_conversion_view(query: Query):
+            snapshot = await latest_snapshot()
+            return (
+                render_conversion(snapshot, query),
+                conversion_keyboard(query.amount, query.src, query.dst),
+            )
+
         async def render_home(role: str) -> str:
             analytics = await build_analytics()
             board = await get_giveaway_board(limit=10)
-            urgent = (board.get("stats") or {}).get("overdue", 0)
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(minutes=CHECK_FRESH_MINUTES)
-            ).replace(microsecond=0).isoformat()
-            fresh = await get_pings(limit=50, chat_type="check", message_date_from=cutoff)
+            urgent = int((board.get("bucket_totals") or {}).get("need_action") or 0)
             last_scan = fmt_dt(state.last_scan_finished_at.isoformat() if state.last_scan_finished_at else None)
             if state.last_scan_status:
                 last_scan = f"{last_scan} · {state.last_scan_status}"
@@ -436,7 +545,6 @@ async def init_bot() -> None:
                 urgent=urgent,
                 accounts_online=analytics["accounts_online"],
                 accounts_total=len(state.accounts_state),
-                fresh_checks=len(fresh),
                 last_scan=last_scan,
             )
 
@@ -477,7 +585,6 @@ async def init_bot() -> None:
             "menu_status": "status",
             "menu_giveaways": "giveaways",
             "menu_recent": "recent",
-            "menu_checks": "checks",
             "menu_market": "market",
         }
 
@@ -490,22 +597,29 @@ async def init_bot() -> None:
                 active = "all"
             page = max(1, page)
             # Fetch one extra row to know whether an older page exists. An
-            # account-scoped key needs a wider window, since most rows drop out.
+            # account-scoped key must page over the *filtered* list, so it reads
+            # the whole prefix from the top through a wider window — offsetting
+            # the raw query instead would skip every row the filter removed.
             scoped = bool(perms.get("accounts"))
-            fetch = (FEED_PAGE_SIZE + 1) * (8 if scoped else 1)
-            rows = await get_pings(
-                limit=fetch,
-                offset=(page - 1) * FEED_PAGE_SIZE * (8 if scoped else 1),
-                chat_type=active,
-            )
             if scoped:
+                rows = await get_pings(
+                    limit=(FEED_PAGE_SIZE * page + 1) * 8, offset=0, chat_type=active
+                )
                 rows = [r for r in rows if accounts_allowed(perms, r.get("mentions"))]
-            has_more = len(rows) > FEED_PAGE_SIZE
-            rows = rows[:FEED_PAGE_SIZE]
+                rows, has_more = paginate(rows, page, FEED_PAGE_SIZE)
+            else:
+                rows = await get_pings(
+                    limit=FEED_PAGE_SIZE + 1,
+                    offset=(page - 1) * FEED_PAGE_SIZE,
+                    chat_type=active,
+                )
+                has_more = len(rows) > FEED_PAGE_SIZE
+                rows = rows[:FEED_PAGE_SIZE]
             items = []
             for r in rows:
                 hhmm = fmt_dt(r.get("detected_at"))[-5:]
-                label = f"{feed_badge(r.get('priority_label'))} {hhmm} {r.get('chat') or '?'}"
+                badge = "🗑" if r.get("deleted_at") else feed_badge(r.get("priority_label"))
+                label = f"{badge} {hhmm} {r.get('chat') or '?'}"
                 items.append((int(r["id"]), label[:48]))
             return feed_header(FEED_LABELS[active], len(rows)), feed_keyboard(items, active, page, has_more)
 
@@ -518,9 +632,11 @@ async def init_bot() -> None:
             return ping_card(ping), ping_card_keyboard(ping_id, is_admin)
 
         async def render_keys():
-            keys = await list_bot_keys()
+            # Revoked keys stay listed — the panel is where they get restored
+            # or deleted for good.
+            keys = await list_bot_keys(include_revoked=True)
             items = [
-                (int(k["id"]), f"#{k['id']} {k.get('label') or 'без метки'}"[:40])
+                (int(k["id"]), f"{key_state_badge(k)} #{k['id']} {k.get('label') or 'без метки'}"[:40])
                 for k in keys
             ]
             return keys_card(keys), keys_keyboard(items)
@@ -540,7 +656,29 @@ async def init_bot() -> None:
                 return None
             perms = parse_permissions(key.get("permissions"))
             accounts = grantable_accounts()
-            return key_panel_card(key, perms, accounts), key_panel_keyboard(key_id, perms, len(accounts))
+            return key_panel_card(key, perms, accounts), key_panel_keyboard(key, perms, len(accounts))
+
+        async def render_key_panel_into(event, key_id: int) -> None:
+            """Re-render the panel in place after an edit; the key may be gone."""
+            screen = await render_key_panel(key_id)
+            if screen is None:
+                text, kb = await render_keys()
+                await safe_edit(event, text, buttons=kb)
+                return
+            text, kb = screen
+            await safe_edit(event, text, buttons=kb)
+
+        def key_link_text(key: dict) -> str:
+            """Secret + invite link for one key, ready to forward."""
+            secret = key.get("secret") or ""
+            link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
+            body = f"🔑 **Ключ #{key.get('id')}** · {key.get('label') or '—'}\n{DIV}\n🔐 `{secret}`"
+            body += f"\n🔗 {link}" if link else "\n__Передайте ключ вручную:__ `/redeem <ключ>`"
+            if key.get("revoked"):
+                body += "\n\n🚫 __Ключ отозван — ссылка не сработает, пока его не вернуть.__"
+            elif key_expired(key.get("expires_at")):
+                body += "\n\n⌛ __Срок ключа истёк — продлите его в панели.__"
+            return body
 
         async def save_key_permissions(key_id: int, perms: dict) -> None:
             await set_bot_key_permissions(key_id, dump_permissions(perms))
@@ -554,8 +692,6 @@ async def init_bot() -> None:
             "pf_me": "mentions",
             "pf_gw": "giveaways",
             "pf_wn": "wins",
-            "pf_ch": "checks",
-            "pf_dl": "deadlines",
             "pf_dg": "digest",
         }
         INPUT_PROMPTS = {
@@ -567,7 +703,11 @@ async def init_bot() -> None:
             "cooldown": "Пришлите кулдаун в секундах (0–3600).",
             "digest_time": "Пришлите время дайджеста в формате `09:00`.",
             "min_score": "Пришлите минимальный score розыгрышей (0–100, 0 — показывать все).",
+            "convert": f"Что пересчитать?\n{USAGE_HINT}",
             "key_delay": "Пришлите задержку в минутах (0–1440). `0` — отправлять сразу.",
+            "key_label": "Пришлите метку ключа — как вы будете его узнавать (до 40 символов).",
+            "key_expiry": "Пришлите срок в днях (0–365). `0` — бессрочно.",
+            "roulette_time": "Пришлите время проклика последнего аккаунта: `21:47`.",
         }
 
         def _pending_expired(pending: dict) -> bool:
@@ -612,6 +752,18 @@ async def init_bot() -> None:
             await set_setting("digest", cfg)
             await record_app_event("INFO", "settings", "Digest settings updated", {"via": "bot", **cfg})
             await publish_live_event("settings-updated", {"scope": "digest"})
+
+        async def save_roulette_from_bot(cfg: dict) -> None:
+            await set_setting("roulette", cfg)
+            await record_app_event("INFO", "roulette", "Roulette reminder updated", {"via": "bot", **cfg})
+            await publish_live_event("settings-updated", {"scope": "roulette"})
+
+        async def roulette_checkin(event, when: datetime) -> None:
+            """Record the reported click time and show the refreshed panel."""
+            cfg = apply_checkin(await ws.load_roulette_settings(), when)
+            await save_roulette_from_bot(cfg)
+            text, kb = await render_roulette_panel()
+            await event.respond(f"✅ Проклик в {cfg['time']} записан.\n\n{text}", buttons=kb)
 
         def settings_root_menu() -> tuple[str, list[list[Button]]]:
             text = "⚙️ **Настройки**\n" + DIV + "\nУправление мониторингом прямо из бота."
@@ -670,8 +822,6 @@ async def init_bot() -> None:
             "mentions": ("Упоминания", b"pf_me"),
             "giveaways": ("Розыгрыши", b"pf_gw"),
             "wins": ("Победы", b"pf_wn"),
-            "checks": ("Чеки", b"pf_ch"),
-            "deadlines": ("Дедлайны", b"pf_dl"),
             "digest": ("Дайджест", b"pf_dg"),
         }
 
@@ -774,6 +924,19 @@ async def init_bot() -> None:
         async def handle_pending_input(event, role: str, pending: dict) -> None:
             kind = pending.get("kind")
             raw = (event.message.text or "").strip()
+            if kind == "convert":
+                # Open to every role — the converter is gated by the `market`
+                # feature at the button/command, not by ownership.
+                query = parse_query(raw)
+                if query is None:
+                    await event.respond(
+                        f"❌ **Не понял запрос.**\n{USAGE_HINT}\n{DIV}\n{supported_text()}",
+                        buttons=converter_keyboard(),
+                    )
+                    return
+                text, buttons = await render_conversion_view(query)
+                await event.respond(text, buttons=buttons)
+                return
             if kind == "min_score":
                 # Personal member setting — the only pending input open to non-admins.
                 member = await get_bot_member(event.sender_id)
@@ -873,11 +1036,7 @@ async def init_bot() -> None:
                 text, buttons = await notifications_menu()
                 await event.respond(f"✅ Кулдаун: {value} сек\n\n{text}", buttons=buttons)
                 return
-            if kind == "key_delay":
-                minutes = parse_delay_input(raw)
-                if minutes is None:
-                    await event.respond("❌ Нужно целое число минут от 0 до 1440.")
-                    return
+            if kind in ("key_delay", "key_label", "key_expiry"):
                 try:
                     key_id = int(pending.get("scope") or 0)
                 except (TypeError, ValueError):
@@ -886,11 +1045,47 @@ async def init_bot() -> None:
                 if not key:
                     await event.respond("❌ Ключ не найден — возможно, он был удалён.")
                     return
-                perms = set_delay(parse_permissions(key.get("permissions")), minutes)
-                await save_key_permissions(key_id, perms)
+                if kind == "key_delay":
+                    minutes = parse_delay_input(raw)
+                    if minutes is None:
+                        await event.respond("❌ Нужно целое число минут от 0 до 1440.")
+                        return
+                    perms = set_delay(parse_permissions(key.get("permissions")), minutes)
+                    await save_key_permissions(key_id, perms)
+                    await event.respond(
+                        f"✅ Задержка: {format_delay(minutes)}\n\n{key_delay_card(perms)}",
+                        buttons=key_delay_keyboard(key_id, perms),
+                    )
+                    return
+                if kind == "key_label":
+                    label = raw.strip()[:40]
+                    if not label:
+                        await event.respond("❌ Метка не может быть пустой.")
+                        return
+                    await set_bot_key_label(key_id, label)
+                    await record_app_event(
+                        "INFO", "bot", "Bot key label changed",
+                        {"id": key_id, "label": label, "via": "bot"},
+                    )
+                    screen = await render_key_panel(key_id)
+                    if screen:
+                        text, kb = screen
+                        await event.respond(f"✅ Метка: **{label}**\n\n{text}", buttons=kb)
+                    return
+                days = parse_expiry_days(raw)
+                if days is None:
+                    await event.respond("❌ Нужно целое число дней от 0 до 365 (`0` — бессрочно).")
+                    return
+                expires_at = expiry_from_days(days)
+                await set_bot_key_expiry(key_id, expires_at)
+                await record_app_event(
+                    "INFO", "bot", "Bot key expiry changed",
+                    {"id": key_id, "expires_at": expires_at, "via": "bot"},
+                )
+                key = await get_bot_key(key_id) or key
                 await event.respond(
-                    f"✅ Задержка: {format_delay(minutes)}\n\n{key_delay_card(perms)}",
-                    buttons=key_delay_keyboard(key_id, perms),
+                    f"✅ Срок: {format_expiry(expires_at)}\n\n{key_expiry_card(key)}",
+                    buttons=key_expiry_keyboard(key_id, key),
                 )
                 return
             if kind == "digest_time":
@@ -903,6 +1098,14 @@ async def init_bot() -> None:
                 await save_digest_from_bot(cfg)
                 text, buttons = await notifications_menu()
                 await event.respond(f"✅ Дайджест в {parsed_time}\n\n{text}", buttons=buttons)
+                return
+
+            if kind == "roulette_time":
+                moment = checkin_moment(datetime.now(), raw)
+                if moment is None:
+                    await event.respond("❌ Формат: `21:47`. Попробуйте ещё раз через меню.")
+                    return
+                await roulette_checkin(event, moment)
                 return
 
         # ---- redeem / onboarding -------------------------------------------
@@ -1033,6 +1236,12 @@ async def init_bot() -> None:
         async def stats_handler(event, role, perms):
             await event.respond(await render_stats(), buttons=section_nav(b"menu_stats"))
 
+        @bot_client.on(events.NewMessage(pattern="/analytics"))
+        @viewer_only("analytics")
+        async def analytics_handler(event, role, perms):
+            text, kb = await render_analytics()
+            await event.respond(text, buttons=kb, link_preview=False)
+
         @bot_client.on(events.NewMessage(pattern="/status"))
         @viewer_only("status")
         async def status_handler(event, role, perms):
@@ -1041,7 +1250,7 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/giveaways"))
         @viewer_only("giveaways")
         async def giveaways_handler(event, role, perms):
-            text, kb = await render_giveaways(perms)
+            text, kb = await render_giveaways(perms=perms)
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/recent"))
@@ -1078,16 +1287,28 @@ async def init_bot() -> None:
                 )
             await event.respond("\n\n".join(result), buttons=back_home(), link_preview=False)
 
-        @bot_client.on(events.NewMessage(pattern="/checks"))
-        @viewer_only("checks")
-        async def checks_handler(event, role, perms):
-            text, kb = await render_feed("check", perms=perms)
-            await event.respond(text, buttons=kb, link_preview=False)
-
         @bot_client.on(events.NewMessage(pattern="/market"))
         @viewer_only("market")
         async def market_handler(event, role, perms):
-            await event.respond(await render_market(), buttons=section_nav(b"menu_market"))
+            await event.respond(await render_market(), buttons=market_keyboard())
+
+        @bot_client.on(events.NewMessage(pattern=r"/conv(?:ert)?(?:\s+(.+))?"))
+        @viewer_only("market")
+        async def convert_handler(event, role, perms):
+            raw = (event.pattern_match.group(1) or "").strip()
+            if not raw:
+                text, kb = await render_converter()
+                await event.respond(text, buttons=kb)
+                return
+            query = parse_query(raw)
+            if query is None:
+                await event.respond(
+                    f"❌ **Не понял запрос.**\n{USAGE_HINT}\n{DIV}\n{supported_text()}",
+                    buttons=converter_keyboard(),
+                )
+                return
+            text, kb = await render_conversion_view(query)
+            await event.respond(text, buttons=kb)
 
         @bot_client.on(events.NewMessage(pattern="/ping"))
         @viewer_only()
@@ -1417,12 +1638,29 @@ async def init_bot() -> None:
                 )
             await event.respond("\n".join(lines), buttons=main_menu_buttons("admin"))
 
+        @bot_client.on(events.NewMessage(pattern=r"/roulette(?:\s+(.+))?"))
+        @safe
+        async def roulette_handler(event):
+            if await deny_non_admin(event):
+                return
+            raw = (event.pattern_match.group(1) or "").strip()
+            if raw:
+                moment = checkin_moment(datetime.now(), raw)
+                if moment is None:
+                    await event.respond("❌ Формат: `/roulette 21:47`.")
+                    return
+                await roulette_checkin(event, moment)
+                return
+            text, kb = await render_roulette_panel()
+            await event.respond(text, buttons=kb)
+
         @bot_client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.message and e.message.text and not e.message.text.startswith("/"))))
         @safe
         async def freeform_handler(event):
             role = await bot_role(event.sender_id)
             if role is not None:
-                # Members' free text feeds pending settings inputs, nothing else.
+                # Members' free text only feeds pending settings inputs; the owner
+                # may also answer a roulette nudge with a bare time.
                 pending = bot_pending_inputs.pop(event.sender_id, None)
                 if pending:
                     if _pending_expired(pending):
@@ -1432,6 +1670,16 @@ async def init_bot() -> None:
                         )
                     else:
                         await handle_pending_input(event, role, pending)
+                    return
+                # A bare `21:47` answers the roulette nudge, but only while one
+                # is actually waiting — otherwise a message that merely looks
+                # like a time would be swallowed here.
+                if role == "admin":
+                    cfg = await ws.load_roulette_settings()
+                    if cfg.get("awaiting"):
+                        moment = checkin_moment(datetime.now(), event.message.text or "")
+                        if moment is not None:
+                            await roulette_checkin(event, moment)
                 return
             # A known member closed by schedule gets the reason, not the locked banner.
             notice = await access_block_notice(event.sender_id)
@@ -1457,13 +1705,66 @@ async def init_bot() -> None:
             def feature_ok(code: str) -> bool:
                 return role == "admin" or has_feature(perms, code)
 
+            # ---- converter: landing, preset pairs, free-text input ----
+            if data == "cv" or data.startswith("cv:"):
+                if not feature_ok("market"):
+                    await event.answer("Раздел закрыт владельцем", alert=True)
+                    return
+                if data == "cv:in":
+                    await prompt_pending(event, "convert")
+                    return
+                seg = data.split(":")
+                if len(seg) == 5 and seg[1] == "p":
+                    try:
+                        amount = float(seg[2])
+                    except ValueError:
+                        amount = 1.0
+                    text, kb = await render_conversion_view(Query(amount, seg[3], seg[4]))
+                else:
+                    text, kb = await render_converter()
+                await safe_edit(event, text, buttons=kb)
+                return
+
+            # ---- roulette reminder: panel, check-in, skip, toggle ----
+            if data == "rl" or data.startswith("rl:"):
+                if role != "admin":
+                    await event.answer("Только владелец", alert=True)
+                    return
+                action = data.partition(":")[2]
+                if action == "in":
+                    await prompt_pending(event, "roulette_time")
+                    return
+                now = datetime.now()
+                cfg = await ws.load_roulette_settings()
+                if action == "now":
+                    cfg = apply_checkin(cfg, now)
+                    await save_roulette_from_bot(cfg)
+                    await event.answer(f"Записал: {cfg['time']}")
+                elif action == "skip":
+                    cfg = skip_today(cfg, now)
+                    await save_roulette_from_bot(cfg)
+                    await event.answer("Сегодня больше не напомню")
+                elif action == "tog":
+                    cfg = dict(cfg)
+                    cfg["enabled"] = not cfg.get("enabled")
+                    await save_roulette_from_bot(cfg)
+                    await event.answer("Напоминание включено" if cfg["enabled"] else "Напоминание выключено")
+                await safe_edit(event, roulette_card(cfg, now), buttons=roulette_panel_keyboard(cfg))
+                return
+
             # ---- structured `domain:action:arg` callbacks ----
             if ":" in data:
                 seg = data.split(":")
+                if seg[0] == "an":
+                    if not feature_ok("analytics"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
+                    text, kb = await render_analytics(seg[1] if len(seg) > 1 else "sum")
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
                 if seg[0] == "mon" and len(seg) >= 2 and seg[1] == "feed":
                     active = seg[2] if len(seg) > 2 else "all"
-                    # The чеки filter is its own grant; other filters share the feed grant.
-                    if not feature_ok("checks" if active == "check" else "recent"):
+                    if not feature_ok("recent"):
                         await event.answer("Раздел закрыт владельцем", alert=True)
                         return
                     try:
@@ -1474,7 +1775,7 @@ async def init_bot() -> None:
                     await safe_edit(event, text, buttons=kb, link_preview=False)
                     return
                 if seg[0] == "mon" and len(seg) >= 3 and seg[1] == "open":
-                    if not (feature_ok("recent") or feature_ok("checks")):
+                    if not feature_ok("recent"):
                         await event.answer("Раздел закрыт владельцем", alert=True)
                         return
                     try:
@@ -1565,6 +1866,38 @@ async def init_bot() -> None:
                         await event.edit(buttons=new_buttons)
                     await event.answer("Записал: участвуете 🎯" if action == "joined" else "Ок, пропускаем")
                     return
+                if seg[0] == "gw" and len(seg) >= 2 and seg[1] == "feed":
+                    # Legacy page-only callback, still live on older messages.
+                    if not feature_ok("giveaways"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
+                    try:
+                        page = int(seg[2]) if len(seg) > 2 else 1
+                    except ValueError:
+                        page = 1
+                    text, kb = await render_giveaways(GiveawayFilter(page=max(1, page)), perms=perms)
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
+                if seg[0] == "gw" and len(seg) >= 2 and seg[1] == "f":
+                    if not feature_ok("giveaways"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
+                    text, kb = await render_giveaways(parse_giveaway_filter(seg[2:]), perms=perms)
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
+                if seg[0] == "gw" and len(seg) >= 2 and seg[1] == "a":
+                    # `gw:a:<sort>:<wins>:<account>:<picker page>` — pick an account.
+                    if not feature_ok("giveaways"):
+                        await event.answer("Раздел закрыт владельцем", alert=True)
+                        return
+                    filt = parse_giveaway_filter(seg[2:5])
+                    try:
+                        picker_page = int(seg[5]) if len(seg) > 5 else 0
+                    except ValueError:
+                        picker_page = 0
+                    text, kb = await render_giveaway_accounts(filt, picker_page, perms=perms)
+                    await safe_edit(event, text, buttons=kb, link_preview=False)
+                    return
                 if seg[0] == "gw" and len(seg) >= 3 and seg[1] == "open":
                     if not feature_ok("giveaways"):
                         await event.answer("Раздел закрыт владельцем", alert=True)
@@ -1574,7 +1907,8 @@ async def init_bot() -> None:
                     except ValueError:
                         await event.answer("Некорректная команда", alert=True)
                         return
-                    res = await open_giveaway_view(pid, perms)
+                    # The list state rides along so ⬅️ returns to the same filter.
+                    res = await open_giveaway_view(pid, perms, parse_giveaway_filter(seg[3:]))
                     if res is None:
                         await event.answer("Розыгрыш не найден", alert=True)
                         return
@@ -1591,7 +1925,7 @@ async def init_bot() -> None:
                         text, kb = render_scan_panel()
                         await safe_edit(event, text, buttons=kb)
                         return
-                    if seg[0] == "key" and seg[1] not in ("rm", "del"):
+                    if seg[0] == "key" and seg[1] not in KEY_LIFECYCLE_ACTIONS:
                         # `key:<id>` root, `key:<section>:<id>[:<arg>]` for the rest.
                         try:
                             key_id = int(seg[1]) if len(seg) == 2 else int(seg[2])
@@ -1608,12 +1942,56 @@ async def init_bot() -> None:
                         accounts = grantable_accounts()
 
                         if section == "link":
-                            secret = key.get("secret") or ""
-                            link = f"https://t.me/{bot_username}?start={secret}" if bot_username else ""
-                            body = f"🔑 **Ключ #{key_id}** · {key.get('label') or '—'}\n{DIV}\n🔐 `{secret}`"
-                            body += f"\n🔗 {link}" if link else "\n__Передайте ключ вручную:__ `/redeem <ключ>`"
-                            await event.respond(body, link_preview=False)
+                            await event.respond(key_link_text(key), link_preview=False)
                             await event.answer()
+                            return
+
+                        if section == "name":
+                            await prompt_pending(event, "key_label", scope=str(key_id))
+                            return
+
+                        if section == "role":
+                            new_role = "viewer" if (key.get("role") or "viewer") == "premium" else "premium"
+                            await set_bot_key_role(key_id, new_role)
+                            await record_app_event(
+                                "INFO", "bot", "Bot key role changed",
+                                {"id": key_id, "role": new_role, "via": "bot"},
+                            )
+                            await event.answer("⚡ Премиум" if new_role == "premium" else "👁 Просмотр")
+                            await render_key_panel_into(event, key_id)
+                            return
+
+                        if section == "m":
+                            members = await list_bot_key_members(key_id)
+                            items = [
+                                (
+                                    int(m["tg_id"]),
+                                    f"{'🚫' if m.get('blocked') else '🟢'} "
+                                    f"{m.get('name') or m.get('tg_username') or m['tg_id']}",
+                                )
+                                for m in members
+                            ]
+                            await safe_edit(
+                                event, key_members_card(key, members),
+                                buttons=key_members_keyboard(key_id, items),
+                            )
+                            return
+
+                        if section == "e":
+                            if arg == "_x":
+                                await prompt_pending(event, "key_expiry", scope=str(key_id))
+                                return
+                            if arg:
+                                days = 0 if arg == "_off" else (int(arg) if arg.isdigit() else 0)
+                                expires_at = expiry_from_days(days)
+                                await set_bot_key_expiry(key_id, expires_at)
+                                await record_app_event(
+                                    "INFO", "bot", "Bot key expiry changed",
+                                    {"id": key_id, "expires_at": expires_at, "via": "bot"},
+                                )
+                                key = await get_bot_key(key_id) or key
+                                await event.answer(f"Срок: {format_expiry(expires_at)}")
+                            await safe_edit(event, key_expiry_card(key), buttons=key_expiry_keyboard(key_id, key))
                             return
 
                         if section == "f" and arg:
@@ -1687,36 +2065,54 @@ async def init_bot() -> None:
                         elif section == "d":
                             await safe_edit(event, key_delay_card(perms), buttons=key_delay_keyboard(key_id, perms))
                         else:
-                            screen = await render_key_panel(key_id)
-                            if screen:
-                                text, kb = screen
-                                await safe_edit(event, text, buttons=kb)
+                            await render_key_panel_into(event, key_id)
                         return
-                    if seg[0] == "key" and seg[1] in ("rm", "del") and len(seg) >= 3:
+                    if seg[0] == "key" and seg[1] in KEY_LIFECYCLE_ACTIONS and len(seg) >= 3:
                         try:
                             key_id = int(seg[2])
                         except ValueError:
                             await event.answer("Некорректная команда", alert=True)
                             return
-                        if seg[1] == "rm":
-                            await revoke_bot_key(key_id)
-                            await event.answer("Ключ отозван — ссылка больше не откроет доступ")
-                        else:
-                            deleted = await delete_bot_key(key_id)
-                            if deleted is None:
+                        action = seg[1]
+                        if action in ("rm", "on"):
+                            revoked = action == "rm"
+                            await set_bot_key_revoked(key_id, revoked)
+                            await record_app_event(
+                                "INFO", "bot", "Bot key revoked" if revoked else "Bot key restored",
+                                {"id": key_id, "via": "bot"},
+                            )
+                            await event.answer(
+                                "🚫 Ключ отозван — ссылка больше не откроет доступ"
+                                if revoked else
+                                "♻️ Ключ снова работает"
+                            )
+                            await render_key_panel_into(event, key_id)
+                            return
+                        if action == "del":
+                            # Deleting is the one key action with no undo, so confirm.
+                            key = await get_bot_key(key_id)
+                            if not key:
                                 await event.answer("Ключ уже удалён", alert=True)
-                            else:
-                                # Deleting drops the invite only; people who already
-                                # joined keep their access and their grants.
-                                joined = int(deleted.get("member_count") or 0)
-                                note = "🗑 Ключ удалён"
-                                if joined:
-                                    note += f"\nВошедшие ({joined}) сохраняют доступ — отключить можно в «Люди»."
-                                await event.answer(note, alert=bool(joined))
-                                await record_app_event(
-                                    "INFO", "bot", "Bot access key deleted",
-                                    {"id": key_id, "label": deleted.get("label"), "via": "bot"},
-                                )
+                                text, kb = await render_keys()
+                                await safe_edit(event, text, buttons=kb)
+                                return
+                            await safe_edit(event, key_delete_card(key), buttons=key_delete_keyboard(key_id))
+                            return
+                        deleted = await delete_bot_key(key_id)
+                        if deleted is None:
+                            await event.answer("Ключ уже удалён", alert=True)
+                        else:
+                            # Deleting drops the invite only; people who already
+                            # joined keep their access and their grants.
+                            joined = int(deleted.get("member_count") or 0)
+                            note = "🗑 Ключ удалён"
+                            if joined:
+                                note += f"\nВошедшие ({joined}) сохраняют доступ — отключить можно в «Люди»."
+                            await event.answer(note, alert=bool(joined))
+                            await record_app_event(
+                                "INFO", "bot", "Bot access key deleted",
+                                {"id": key_id, "label": deleted.get("label"), "via": "bot"},
+                            )
                         text, kb = await render_keys()
                         await safe_edit(event, text, buttons=kb)
                         return
@@ -1869,19 +2265,15 @@ async def init_bot() -> None:
                 await safe_edit(event, await render_status(), buttons=section_nav(b"menu_status"))
                 return
             if data == "menu_giveaways":
-                text, kb = await render_giveaways(perms)
+                text, kb = await render_giveaways(perms=perms)
                 await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
             if data == "menu_recent":
                 text, kb = await render_feed("all", perms=perms)
                 await safe_edit(event, text, buttons=kb, link_preview=False)
                 return
-            if data == "menu_checks":
-                text, kb = await render_feed("check", perms=perms)
-                await safe_edit(event, text, buttons=kb, link_preview=False)
-                return
             if data == "menu_market":
-                await safe_edit(event, await render_market(), buttons=section_nav(b"menu_market"))
+                await safe_edit(event, await render_market(), buttons=market_keyboard())
                 return
             if data == "menu_summary":
                 await safe_edit(event, await render_summary(), buttons=section_nav(b"menu_summary"))
@@ -1964,7 +2356,7 @@ async def init_bot() -> None:
                 if key_id is None:
                     await event.answer("Некорректная команда", alert=True)
                     return
-                await revoke_bot_key(key_id)
+                await set_bot_key_revoked(key_id, True)
                 await event.answer("Ключ отозван")
                 text, kb = await render_keys()
                 await safe_edit(event, text, buttons=kb)
@@ -2080,9 +2472,9 @@ async def init_bot() -> None:
                 BotCommand("giveaways", "Розыгрыши"),
                 BotCommand("recent", "Последние упоминания"),
                 BotCommand("latest", "Последние 5"),
-                BotCommand("checks", "Найденные чеки"),
                 BotCommand("search", "Поиск"),
                 BotCommand("market", "Курсы"),
+                BotCommand("convert", "Конвертер валют и крипты"),
                 BotCommand("settings", "Настройки и уведомления"),
                 BotCommand("ping", "Проверка связи"),
             ]
@@ -2097,6 +2489,7 @@ async def init_bot() -> None:
                     BotCommand("members", "Пользователи"),
                     BotCommand("access", "Доступ по расписанию"),
                     BotCommand("actions", "История действий по розыгрышам"),
+                    BotCommand("roulette", "Рулетка йобо"),
                     BotCommand("restart", "Перезапустить мониторинг"),
                 ]
                 await bot_client(SetBotCommandsRequest(

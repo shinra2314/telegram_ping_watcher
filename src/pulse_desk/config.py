@@ -127,7 +127,13 @@ class Settings(BaseSettings):
     # port would put every /api/* route and the SSE stream on the internet.
     miniapp_enabled: bool = Field(default=False, alias="MINIAPP_ENABLED")
     miniapp_port: int = Field(default=8010, alias="MINIAPP_PORT")
+    # "ngrok" or "cloudflared". A cloudflared quick tunnel needs no account but
+    # mints a new hostname per restart, and its control host is blocked on some
+    # networks; ngrok with a reserved NGROK_DOMAIN gives a stable address.
+    tunnel_provider: str = Field(default="ngrok", alias="TUNNEL_PROVIDER")
     cloudflared_bin: str = Field(default="cloudflared", alias="CLOUDFLARED_BIN")
+    ngrok_bin: str = Field(default="ngrok", alias="NGROK_BIN")
+    ngrok_domain: str = Field(default="", alias="NGROK_DOMAIN")
 
     @field_validator("telegram_api_id", "admin_id", mode="before")
     @classmethod

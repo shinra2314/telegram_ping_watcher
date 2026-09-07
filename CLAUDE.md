@@ -257,17 +257,25 @@ src/pulse_desk/
                       MINIAPP_PORT. Separate from the dashboard because a quick
                       tunnel forwards a whole origin: whatever shares that port
                       is on the internet. OpenAPI/docs are off there
-  tunnel.py         — cloudflared quick tunnel (`tunnel` job). Owns
-                      `state.public_url`. A new hostname per restart is fine —
-                      WebApp buttons are built at send time. A missing binary or
-                      a dead tunnel just empties `public_url`, the buttons
-                      vanish and the bot falls back to its inline keyboards.
-                      NOTE: some networks (this machine's included, verified
-                      2026-09-07) block `api.trycloudflare.com:443` while the
-                      rest of Cloudflare resolves fine; cloudflared then exits
-                      without ever printing an address, and its last output
-                      lines are carried into app.log so the cause is visible.
-                      A named tunnel with an own domain is the way around it
+  tunnel.py         — Runs a tunnel agent as a child process and owns
+                      `state.public_url` (`tunnel` job). Provider is
+                      `TUNNEL_PROVIDER`: `ngrok` (default — a free account
+                      carries one reserved domain, so `NGROK_DOMAIN` gives a
+                      *stable* address that survives restarts and can be pinned
+                      in BotFather) or `cloudflared` (quick tunnel, no account,
+                      new hostname per start). Each provider is an argv builder
+                      plus a pure line-extractor, both unit tested; the
+                      supervisor around them is shared. A missing binary or a
+                      dead tunnel just empties `public_url`, the buttons vanish
+                      and the bot falls back to its inline keyboards.
+                      NOTE: on this machine (verified 2026-09-07) only
+                      `api.trycloudflare.com:443` is blocked — `api.cloudflare.com`,
+                      `region1/2.v2.argotunnel.com:7844`, the ngrok agent host
+                      and the Tailscale control plane all connect. So quick
+                      tunnels cannot work here, but ngrok and a *named*
+                      Cloudflare tunnel can, with no VPN. When an agent dies
+                      without printing an address its last output lines go into
+                      app.log, because that is what the cause looks like
   security.py       — HMAC constant-time token validation
   telegram_reconnect.py — Exponential backoff reconnect logic
   process_supervisor.py — Launcher: spawn/supervise EXTERNAL runtimes (Discord
@@ -335,7 +343,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `market-monitor` | Fetches crypto prices (+ fiat cross-rates for the bot converter), alerts on volatility | `MARKET_POLL_SECONDS` |
 | `bot-service` | Telegram bot for notifications + inline menus | `TELEGRAM_BOT_TOKEN` (optional) |
 | `miniapp-server` | Serves the Telegram Mini App on `MINIAPP_PORT`, alone on that port (started only when enabled) | `MINIAPP_ENABLED`, `MINIAPP_PORT` |
-| `tunnel` | Keeps a cloudflared quick tunnel up and `state.public_url` current, so WebApp buttons have an HTTPS origin | `MINIAPP_ENABLED`, `CLOUDFLARED_BIN` |
+| `tunnel` | Keeps the tunnel agent up and `state.public_url` current, so WebApp buttons have an HTTPS origin | `MINIAPP_ENABLED`, `TUNNEL_PROVIDER`, `NGROK_DOMAIN`, `NGROK_BIN`, `CLOUDFLARED_BIN` |
 
 ### Data flow for a "ping"
 

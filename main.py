@@ -40,16 +40,18 @@ from pulse_desk.loops import (
     fetch_market_data,
     obsidian_sync_loop,
     pending_send_loop,
-    reminder_loop,
+    roulette_loop,
     source_score_loop,
     startup_maintenance,
     watchdog_loop,
 )
+from pulse_desk.miniapp_server import serve_miniapp
 from pulse_desk.process_supervisor import get_supervisor
 from pulse_desk.push import generate_vapid_keys
 from pulse_desk.security import is_weak_token, mask_secret
 from pulse_desk.service_registry import load_services
 from pulse_desk.telegram_accounts import start_client
+from pulse_desk.tunnel import tunnel_loop
 
 state.session_names = settings.discover_sessions()
 
@@ -93,13 +95,18 @@ async def lifespan(app: FastAPI):
         await record_app_event("WARNING", "auth", "VIEWER_TOKEN looks weak", {"token": mask_secret(VIEWER_TOKEN)})
     await init_bot()
     start_supervised("market-fetch", fetch_market_data, backoff_base=30.0, backoff_max=1800.0)
-    start_supervised("reminders", reminder_loop, backoff_base=10.0, backoff_max=600.0)
     start_supervised("broadcast-approval", broadcast_approval_loop, backoff_base=10.0, backoff_max=600.0)
     start_supervised("pending-sends", pending_send_loop, backoff_base=10.0, backoff_max=600.0)
     start_supervised("daily-digest", digest_loop, backoff_base=60.0, backoff_max=3600.0)
+    start_supervised("roulette-reminder", roulette_loop, backoff_base=60.0, backoff_max=3600.0)
     start_supervised("source-scores", source_score_loop, backoff_base=30.0, backoff_max=600.0)
     start_supervised("obsidian-sync", obsidian_sync_loop, backoff_base=30.0, backoff_max=600.0)
     start_supervised("access-scheduler", access_scheduler_loop, backoff_base=15.0, backoff_max=600.0)
+    # The Mini App and its tunnel start only when asked for: start_supervised
+    # restarts a job that returns normally, so a disabled tunnel would spin.
+    if settings.miniapp_enabled:
+        start_supervised("miniapp-server", serve_miniapp, backoff_base=5.0, backoff_max=120.0)
+        start_supervised("tunnel", tunnel_loop, backoff_base=10.0, backoff_max=600.0)
     start_background_task("startup-maintenance", startup_maintenance())
     logger.info("Starting monitoring: %s sessions found", len(state.session_names))
     await record_app_event("INFO", "app", "Application started", {"sessions": len(state.session_names), "version": APP_VERSION})

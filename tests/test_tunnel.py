@@ -11,8 +11,10 @@ if str(SRC_DIR) not in sys.path:
 from pulse_desk.tunnel import (
     cloudflared_argv,
     extract_ngrok_url,
+    extract_tailscale_url,
     extract_tunnel_url,
     ngrok_argv,
+    tailscale_argv,
 )
 
 # Verbatim shapes from `cloudflared tunnel --url`, which prints the address
@@ -115,6 +117,62 @@ class ArgvTests(unittest.TestCase):
 
     def test_ngrok_empty_domain_adds_no_flag(self):
         self.assertNotIn("--domain", ngrok_argv("ngrok", 8010, ""))
+
+
+# Verbatim shape of `tailscale funnel <port>` in the foreground. The proxied
+# target on the third line is plain http and must never be taken for the
+# public address.
+FUNNEL = (
+    "Available on the internet:",
+    "",
+    "https://desktop-pulse.tail1a2b3c.ts.net/",
+    "|-- proxy http://127.0.0.1:8010",
+    "",
+    "Press Ctrl+C to exit.",
+)
+
+
+class ExtractTailscaleUrlTests(unittest.TestCase):
+    def test_pulls_the_funnel_address(self):
+        found = [u for u in (extract_tailscale_url(line) for line in FUNNEL) if u]
+        self.assertEqual(found, ["https://desktop-pulse.tail1a2b3c.ts.net"])
+
+    def test_ignores_the_proxied_local_target(self):
+        self.assertIsNone(extract_tailscale_url("|-- proxy http://127.0.0.1:8010"))
+
+    def test_trailing_slash_is_dropped(self):
+        self.assertEqual(
+            extract_tailscale_url("https://pc.tail42.ts.net/"),
+            "https://pc.tail42.ts.net",
+        )
+
+    def test_deeper_tailnet_label(self):
+        self.assertEqual(
+            extract_tailscale_url("https://pc.user-github.ts.net/"),
+            "https://pc.user-github.ts.net",
+        )
+
+    def test_empty_line(self):
+        self.assertIsNone(extract_tailscale_url(""))
+
+    def test_none_line(self):
+        self.assertIsNone(extract_tailscale_url(None))
+
+    def test_other_extractors_do_not_match_a_funnel_line(self):
+        self.assertIsNone(extract_tunnel_url(FUNNEL[2]))
+        self.assertIsNone(extract_ngrok_url(FUNNEL[2]))
+
+    def test_funnel_extractor_does_not_match_the_other_providers(self):
+        self.assertIsNone(extract_tailscale_url(BANNER[2]))
+        self.assertIsNone(extract_tailscale_url(NGROK_STARTED[1]))
+
+
+class TailscaleArgvTests(unittest.TestCase):
+    def test_foreground_funnel_on_the_miniapp_port(self):
+        self.assertEqual(tailscale_argv("tailscale", 8010), ["tailscale", "funnel", "8010"])
+
+    def test_port_is_stringified(self):
+        self.assertTrue(all(isinstance(a, str) for a in tailscale_argv("tailscale", 8010)))
 
 
 if __name__ == "__main__":

@@ -9,11 +9,19 @@ Only the Mini App port is published. A tunnel forwards a whole origin and
 cannot be narrowed to a path, so pointing it at the dashboard's port would put
 every ``/api/*`` route and the SSE stream on the internet.
 
-Two providers, chosen by ``TUNNEL_PROVIDER``:
+Three providers, chosen by ``TUNNEL_PROVIDER``:
+
+``tailscale``
+    ``tailscale funnel <port>`` in the foreground: it prints the address and
+    stays up, which is exactly the shape this supervisor wants. The hostname
+    (``<machine>.<tailnet>.ts.net``) is stable and needs no domain purchase.
+    Requires Funnel to be enabled once for the tailnet.
 
 ``ngrok``
     A free account carries one reserved domain, so ``NGROK_DOMAIN`` gives a
-    *stable* address that survives restarts and can be pinned in BotFather.
+    *stable* address too. Note that Windows Defender's PUA protection
+    quarantines the ngrok binary on this machine (verified 2026-09-07), which
+    is why it is not the default here.
 
 ``cloudflared``
     A quick tunnel needs no account but mints a new hostname every start.
@@ -46,6 +54,11 @@ _CF_URL = re.compile(r"https://(?!api\.)[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\
 # URL on the line.
 _NGROK_URL = re.compile(r"\burl=(https://[^\s\"]+)")
 
+# `tailscale funnel <port>` prints its address under "Available on the internet",
+# with the proxied target on the next line as plain http — hence the ts.net
+# anchor, so the local target can never be mistaken for the public address.
+_TS_URL = re.compile(r"https://[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.ts\.net")
+
 # A dead tunnel restarts through start_supervised, which does not back off on a
 # clean return. Pace it here so a permanently failing binary cannot spin.
 RESTART_DELAY_SECONDS = 10.0
@@ -69,6 +82,17 @@ def extract_ngrok_url(line: Optional[str]) -> Optional[str]:
     return match.group(1).rstrip("/") if match else None
 
 
+def extract_tailscale_url(line: Optional[str]) -> Optional[str]:
+    """The Tailscale Funnel URL in `line`, or None when there is none."""
+    match = _TS_URL.search(line or "")
+    return match.group(0).rstrip("/") if match else None
+
+
+def tailscale_argv(binary: str, port: int) -> list[str]:
+    """Foreground funnel: prints the address, then holds the tunnel open."""
+    return [binary, "funnel", str(port)]
+
+
 def cloudflared_argv(binary: str, port: int) -> list[str]:
     return [binary, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"]
 
@@ -88,7 +112,11 @@ def ngrok_argv(binary: str, port: int, domain: str = "") -> list[str]:
 def provider_spec() -> tuple[str, list[str], Callable[[Optional[str]], Optional[str]]]:
     """(name, argv, url extractor) for the configured provider."""
     port = settings.miniapp_port
-    if (settings.tunnel_provider or "").lower() == "ngrok":
+    provider = (settings.tunnel_provider or "").lower()
+    if provider == "tailscale":
+        binary = shutil.which(settings.tailscale_bin) or settings.tailscale_bin
+        return "tailscale", tailscale_argv(binary, port), extract_tailscale_url
+    if provider == "ngrok":
         binary = shutil.which(settings.ngrok_bin) or settings.ngrok_bin
         return "ngrok", ngrok_argv(binary, port, settings.ngrok_domain), extract_ngrok_url
     binary = shutil.which(settings.cloudflared_bin) or settings.cloudflared_bin

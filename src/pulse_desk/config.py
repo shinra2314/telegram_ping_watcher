@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     public_share_mode: bool = Field(default=False, alias="PUBLIC_SHARE_MODE")
     allow_query_token: bool = Field(default=False, alias="ALLOW_QUERY_TOKEN")
 
-    auto_join_giveaways: bool = Field(default=False, alias="AUTO_JOIN_GIVEAWAYS")
     giveaway_action_account: str = Field(default="alga_kazakhst2n", alias="GIVEAWAY_ACTION_ACCOUNT")
     giveaway_review_mode: str = Field(default="manual", alias="GIVEAWAY_REVIEW_MODE")
     giveaway_analyze_recent_messages: int = Field(default=50, alias="GIVEAWAY_ANALYZE_RECENT_MESSAGES")
@@ -112,28 +111,7 @@ class Settings(BaseSettings):
         default="фаст,конкурс,розыгрыш,условия,условие,итоги",
         alias="GIVEAWAY_KEYWORDS",
     )
-    check_keywords: str = Field(
-        default="чек,мультичек",
-        alias="CHECK_KEYWORDS",
-    )
-    check_fresh_minutes: int = Field(
-        default=720,
-        alias="CHECK_FRESH_MINUTES",
-        description=(
-            "Freshness window for redeemable checks, in minutes (default 720 = 12h). "
-            "A check is shown / notified only if its Telegram message date is within "
-            "this window; older ones are hidden from views and purged from the DB."
-        ),
-    )
-    check_notify_target: str = Field(
-        default="@w3v8f0rm",
-        alias="CHECK_NOTIFY_TARGET",
-        description=(
-            "Sole destination for check notifications: a @username, numeric chat id, "
-            "or channel. Empty falls back to the admin. Member broadcast is skipped "
-            "for checks regardless. Note: a bot can only DM a user who has /start-ed it."
-        ),
-    )
+    global_search_limit: int = Field(default=40, alias="GLOBAL_SEARCH_LIMIT")
     join_button_keywords: str = Field(
         default="участвовать,participate,join,вступить,зарегистрироваться,register",
         alias="JOIN_BUTTON_KEYWORDS",
@@ -141,6 +119,15 @@ class Settings(BaseSettings):
 
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
+
+    # --- Telegram Mini App --------------------------------------------------
+    # The Mini App is served by a SECOND ASGI app on its own port, and only that
+    # port is published through the tunnel. A quick tunnel forwards a whole
+    # origin and cannot be narrowed to a path, so tunnelling the dashboard's
+    # port would put every /api/* route and the SSE stream on the internet.
+    miniapp_enabled: bool = Field(default=False, alias="MINIAPP_ENABLED")
+    miniapp_port: int = Field(default=8010, alias="MINIAPP_PORT")
+    cloudflared_bin: str = Field(default="cloudflared", alias="CLOUDFLARED_BIN")
 
     @field_validator("telegram_api_id", "admin_id", mode="before")
     @classmethod

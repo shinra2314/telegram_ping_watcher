@@ -73,6 +73,47 @@ async def set_bot_key_permissions(key_id: int, permissions: str) -> None:
         await db.commit()
 
 
+async def set_bot_key_label(key_id: int, label: str) -> None:
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_access_keys SET label = ? WHERE id = ?",
+            ((label or "").strip(), int(key_id)),
+        )
+        await db.commit()
+
+
+async def set_bot_key_role(key_id: int, role: str) -> None:
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_access_keys SET role = ? WHERE id = ?",
+            (role or "viewer", int(key_id)),
+        )
+        await db.commit()
+
+
+async def set_bot_key_expiry(key_id: int, expires_at: Optional[str]) -> None:
+    """Set or clear the key's expiry. ``None`` means the invite never expires."""
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_access_keys SET expires_at = ? WHERE id = ?",
+            (expires_at or None, int(key_id)),
+        )
+        await db.commit()
+
+
+async def list_bot_key_members(key_id: int) -> list[dict]:
+    """People who joined through this key, newest first."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                "SELECT * FROM bot_members WHERE key_id = ? ORDER BY joined_at DESC",
+                (int(key_id),),
+            )
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
     if not secret:
         return None
@@ -92,10 +133,19 @@ async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
     return key
 
 
-async def revoke_bot_key(key_id: int) -> None:
+async def set_bot_key_revoked(key_id: int, revoked: bool) -> None:
+    """Flip the invite on or off. Revoking stops new redeems only — people who
+    already joined keep the grants snapshotted on their member row."""
     async with _connect() as db:
-        await db.execute("UPDATE bot_access_keys SET revoked = 1 WHERE id = ?", (key_id,))
+        await db.execute(
+            "UPDATE bot_access_keys SET revoked = ? WHERE id = ?",
+            (1 if revoked else 0, int(key_id)),
+        )
         await db.commit()
+
+
+async def revoke_bot_key(key_id: int) -> None:
+    await set_bot_key_revoked(key_id, True)
 
 
 async def delete_bot_key(key_id: int) -> Optional[dict]:
@@ -155,9 +205,26 @@ async def upsert_bot_member(
 
 
 async def get_bot_member(tg_id: int) -> Optional[dict]:
+    """One member row, with the label of the key they joined through.
+
+    ``key_label`` is what ties a person to their row in the salary workbook, so
+    it travels with the member everywhere the row goes — same join as
+    ``list_bot_members``. A deleted key clears ``key_id``, and the label comes
+    back NULL; revoke a key instead of deleting it to keep the link.
+    """
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
-        row = await (await db.execute("SELECT * FROM bot_members WHERE tg_id = ?", (tg_id,))).fetchone()
+        row = await (
+            await db.execute(
+                """
+                SELECT m.*, k.label AS key_label
+                FROM bot_members m
+                LEFT JOIN bot_access_keys k ON k.id = m.key_id
+                WHERE m.tg_id = ?
+                """,
+                (tg_id,),
+            )
+        ).fetchone()
     return dict(row) if row else None
 
 

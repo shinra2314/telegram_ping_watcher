@@ -196,6 +196,92 @@ class SizeCapTests(unittest.TestCase):
         return pings, fts, arch
 
 
+class PingsRetentionTests(unittest.TestCase):
+    """Age retention must never drop rows that carry lasting value."""
+
+    def setUp(self):
+        database.DB_PATH = TEST_DB_PATH
+        asyncio.run(database.init_db())
+        asyncio.run(self._wipe())
+
+    def tearDown(self):
+        asyncio.run(self._wipe())
+
+    async def _wipe(self):
+        async with database._connect() as db:
+            await db.execute("DELETE FROM pings")
+            await db.execute("DELETE FROM pings_fts")
+            await db.commit()
+
+    def _seed(self) -> None:
+        # (text, days_ago, is_win, is_giveaway, is_favorite, deleted_at)
+        rows = [
+            ("old plain mention", 120, 0, 0, 0, None),
+            ("old win", 120, 1, 0, 0, None),
+            ("old giveaway", 120, 0, 1, 0, None),
+            ("old favourite", 120, 0, 0, 1, None),
+            ("old giveaway deleted from channel", 120, 0, 1, 0, _iso(100)),
+            ("old second plain mention", 120, 0, 0, 0, None),
+            ("fresh plain mention", 1, 0, 0, 0, None),
+        ]
+
+        async def _do():
+            async with database._connect() as db:
+                for text, days, win, giveaway, favorite, deleted_at in rows:
+                    cur = await db.execute(
+                        "INSERT INTO pings (chat, sender, text, detected_at, status, is_win, is_giveaway, "
+                        "is_favorite, deleted_at) VALUES (?, 'sender', ?, ?, 'new', ?, ?, ?, ?)",
+                        ("chat", text, _iso(days), win, giveaway, favorite, deleted_at),
+                    )
+                    await db.execute(
+                        "INSERT INTO pings_fts(rowid, chat, sender, mentions, text) VALUES (?, 'chat', 'sender', '', ?)",
+                        (cur.lastrowid, text),
+                    )
+                await db.commit()
+        asyncio.run(_do())
+
+    async def _texts(self) -> set:
+        async with database._connect() as db:
+            rows = await (await db.execute("SELECT text FROM pings")).fetchall()
+            return {row[0] for row in rows}
+
+    async def _counts(self):
+        async with database._connect() as db:
+            pings = (await (await db.execute("SELECT COUNT(*) FROM pings")).fetchone())[0]
+            fts = (await (await db.execute("SELECT COUNT(*) FROM pings_fts")).fetchone())[0]
+            return pings, fts
+
+    def test_age_retention_keeps_wins_giveaways_and_favorites(self):
+        self._seed()
+        stats = asyncio.run(database.cleanup_old_data(days=7, pings_retention_days=90))
+
+        # Only the low-value 120-day-old mention and check age out.
+        self.assertEqual(stats["pings"], 2)
+        self.assertEqual(
+            asyncio.run(self._texts()),
+            {
+                "old win",
+                "old giveaway",
+                "old favourite",
+                "old giveaway deleted from channel",
+                "fresh plain mention",
+            },
+        )
+
+    def test_age_retention_keeps_fts_in_sync(self):
+        self._seed()
+        asyncio.run(database.cleanup_old_data(days=7, pings_retention_days=90))
+        pings, fts = asyncio.run(self._counts())
+        self.assertEqual(pings, fts)  # no orphan FTS rows left behind
+
+    def test_age_retention_disabled_keeps_everything(self):
+        self._seed()
+        stats = asyncio.run(database.cleanup_old_data(days=7, pings_retention_days=0))
+        self.assertEqual(stats["pings"], 0)
+        pings, _ = asyncio.run(self._counts())
+        self.assertEqual(pings, 7)
+
+
 class ArchiveRetentionTests(unittest.TestCase):
     def setUp(self):
         database.DB_PATH = TEST_DB_PATH

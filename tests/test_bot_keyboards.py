@@ -9,7 +9,7 @@ if str(SRC_DIR) not in sys.path:
 
 import unittest
 
-from pulse_desk.bot.keyboards import back_home, section_nav, webapp_row
+from pulse_desk.bot.keyboards import back_home, section_nav
 
 
 class SectionNavTests(unittest.TestCase):
@@ -37,64 +37,136 @@ class BackHomeTests(unittest.TestCase):
         self.assertEqual(rows[0][0].text, "⬅️ Домой")
 
 
-from pulse_desk.bot.keyboards import feed_keyboard, ping_card_keyboard
+from pulse_desk.bot.keyboards import (
+    feed_filters_keyboard, feed_keyboard, feed_presets_keyboard, ping_card_keyboard,
+    ping_giveaway_keyboard, ping_status_keyboard, ping_tags_keyboard,
+)
+from pulse_desk.bot.views import FEED_TYPES, FeedFilter, feed_filter_cb
 
 
 class FeedKeyboardTests(unittest.TestCase):
+    """Лента теперь носит всю выборку в кнопке, а не один код фильтра.
+
+    Старая форма (`mon:feed:<фильтр>`) осталась только входом: такие кнопки
+    ещё живут в чатах, и клавиатура обязана их принимать.
+    """
+
     ITEMS = [(842, "🔥 14:02 @chan"), (840, "• 13:40 @chan2")]
 
     def test_each_item_is_a_row_opening_that_ping(self):
-        rows = feed_keyboard(self.ITEMS, "all")
+        rows = feed_keyboard(self.ITEMS, FeedFilter())
         self.assertEqual(rows[0][0].data, b"mon:open:842")
         self.assertEqual(rows[1][0].data, b"mon:open:840")
 
-    def test_filter_row_has_all_filters(self):
-        rows = feed_keyboard(self.ITEMS, "all")
-        filt = rows[len(self.ITEMS)]
+    def test_quick_type_row_carries_the_whole_state(self):
+        state = FeedFilter(favorite=True, sort="p")
+        filt = feed_keyboard(self.ITEMS, state)[len(self.ITEMS)]
         datas = [b.data for b in filt]
-        self.assertIn(b"mon:feed:all", datas)
-        self.assertIn(b"mon:feed:giveaway", datas)
-        self.assertIn(b"mon:feed:win", datas)
-        self.assertIn(b"mon:feed:important", datas)
+        self.assertEqual(len(datas), 4)
+        # switching type keeps favourite and sort, and returns to page 1
+        self.assertIn(feed_filter_cb(state.with_(type="w")), datas)
+        self.assertTrue(all(d.startswith(b"mon:f:") for d in datas))
 
-    def test_active_filter_is_marked(self):
-        rows = feed_keyboard(self.ITEMS, "giveaway")
-        filt = rows[len(self.ITEMS)]
-        active = [b.text for b in filt if b.data == b"mon:feed:giveaway"][0]
-        inactive = [b.text for b in filt if b.data == b"mon:feed:all"][0]
+    def test_active_type_is_marked(self):
+        filt = feed_keyboard(self.ITEMS, FeedFilter(type="g"))[len(self.ITEMS)]
+        active = [b.text for b in filt if b.data == feed_filter_cb(FeedFilter(type="g"))][0]
+        inactive = [b.text for b in filt if b.data == feed_filter_cb(FeedFilter(type="a"))][0]
         self.assertNotEqual(active, "Розыгрыши")
         self.assertEqual(inactive, "Все")
 
-    def test_footer_home_and_refresh_keep_filter(self):
+    def test_legacy_string_filter_is_still_accepted(self):
         rows = feed_keyboard(self.ITEMS, "win")
-        footer = rows[-1]
-        self.assertEqual(footer[0].data, b"menu_main")
-        self.assertEqual(footer[1].data, b"mon:feed:win")
+        self.assertEqual(rows[-1][1].data, feed_filter_cb(FeedFilter(type="w")))
 
-    def test_empty_feed_still_has_filter_and_footer(self):
-        rows = feed_keyboard([], "all")
-        self.assertEqual(len(rows), 2)  # filter row + footer
+    def test_toolbar_hides_bulk_read_from_a_guest(self):
+        guest = [b.data for b in feed_keyboard(self.ITEMS, FeedFilter())[len(self.ITEMS) + 1]]
+        owner = [b.data for b in feed_keyboard(self.ITEMS, FeedFilter(), is_admin=True)[len(self.ITEMS) + 1]]
+        self.assertNotIn(b"mon:ra:a:a:0:d:0:0:1", guest)
+        self.assertIn(b"mon:ra:a:a:0:d:0:0:1", owner)
+        self.assertIn(b"mon:q", guest)
+
+    def test_footer_home_and_refresh_keep_the_selection(self):
+        state = FeedFilter(type="w", favorite=True)
+        footer = feed_keyboard(self.ITEMS, state)[-1]
+        self.assertEqual(footer[0].data, b"menu_main")
+        self.assertEqual(footer[1].data, feed_filter_cb(state))
+
+    def test_empty_feed_still_has_types_toolbar_and_footer(self):
+        self.assertEqual(len(feed_keyboard([], FeedFilter())), 3)
 
     def test_no_pager_on_single_page(self):
-        datas = [b.data for row in feed_keyboard(self.ITEMS, "all") for b in row]
-        self.assertNotIn(b"mon:feed:all:2", datas)
+        datas = [b.data for row in feed_keyboard(self.ITEMS, FeedFilter()) for b in row]
+        self.assertNotIn(FeedFilter(page=2).cb(), datas)
 
     def test_pager_next_when_more(self):
-        rows = feed_keyboard(self.ITEMS, "all", page=1, has_more=True)
+        rows = feed_keyboard(self.ITEMS, FeedFilter(), has_more=True)
         datas = [b.data for row in rows for b in row]
-        self.assertIn(b"mon:feed:all:2", datas)
-        self.assertNotIn(b"mon:feed:all:0", datas)  # no prev on page 1
+        self.assertIn(FeedFilter(page=2).cb(), datas)
+        # Telegram has no disabled buttons, so page 1 simply has no "newer" arrow.
+        texts = [b.text for row in rows for b in row]
+        self.assertFalse(any("Новее" in text for text in texts))
 
-    def test_pager_prev_returns_to_plain_callback_on_page_2(self):
-        rows = feed_keyboard(self.ITEMS, "giveaway", page=2, has_more=True)
-        datas = [b.data for row in rows for b in row]
-        self.assertIn(b"mon:feed:giveaway", datas)      # prev → page 1 plain form
-        self.assertIn(b"mon:feed:giveaway:3", datas)    # next → page 3
+    def test_pager_walks_both_ways_from_page_two(self):
+        state = FeedFilter(type="g", page=2)
+        datas = [b.data for row in feed_keyboard(self.ITEMS, state, has_more=True) for b in row]
+        self.assertIn(state.cb(1), datas)
+        self.assertIn(state.cb(3), datas)
 
     def test_refresh_keeps_page(self):
-        rows = feed_keyboard(self.ITEMS, "all", page=3)
-        footer = rows[-1]
-        self.assertEqual(footer[1].data, b"mon:feed:all:3")
+        state = FeedFilter(page=3)
+        self.assertEqual(feed_keyboard(self.ITEMS, state)[-1][1].data, state.cb())
+
+
+class FeedFiltersKeyboardTests(unittest.TestCase):
+    def test_every_type_is_offered(self):
+        rows = feed_filters_keyboard(FeedFilter())
+        datas = [b.data for row in rows for b in row]
+        self.assertTrue(all(any(d.startswith(b"mon:ff:" + code.encode()) for d in datas)
+                            for code, _db, _label in FEED_TYPES))
+
+    def test_cycle_buttons_show_the_current_value(self):
+        rows = feed_filters_keyboard(FeedFilter(status="n", sort="p"))
+        texts = [b.text for row in rows for b in row]
+        self.assertTrue(any("Новые" in t for t in texts))
+        self.assertTrue(any("Приоритет" in t for t in texts))
+
+    def test_clear_search_appears_only_when_a_query_is_applied(self):
+        plain = [b.data for row in feed_filters_keyboard(FeedFilter()) for b in row]
+        with_q = [b.data for row in feed_filters_keyboard(FeedFilter(query=True)) for b in row]
+        self.assertFalse(any(d.startswith(b"mon:qx") for d in plain))
+        self.assertTrue(any(d.startswith(b"mon:qx") for d in with_q))
+
+    def test_export_is_owner_only(self):
+        guest = [b.data for row in feed_filters_keyboard(FeedFilter()) for b in row]
+        owner = [b.data for row in feed_filters_keyboard(FeedFilter(), is_admin=True) for b in row]
+        self.assertFalse(any(d.startswith(b"mon:ex") for d in guest))
+        self.assertTrue(any(d.startswith(b"mon:ex:c") for d in owner))
+
+    def test_reset_returns_the_default_selection(self):
+        datas = [b.data for row in feed_filters_keyboard(FeedFilter(type="w", favorite=True))
+                 for b in row]
+        self.assertIn(b"mon:ff:a:a:0:d:0:0:1", datas)
+
+    def test_back_returns_to_the_feed_with_the_same_selection(self):
+        state = FeedFilter(type="w", status="n")
+        self.assertEqual(feed_filters_keyboard(state)[-1][0].data, state.cb())
+
+
+class FeedPresetsKeyboardTests(unittest.TestCase):
+    def test_presets_are_addressed_by_index(self):
+        rows = feed_presets_keyboard(["Победы за неделю", "Гивы"], FeedFilter())
+        self.assertEqual(rows[0][0].data, b"mon:ps:0")
+        self.assertEqual(rows[0][1].data, b"mon:pd:0")
+        self.assertEqual(rows[1][0].data, b"mon:ps:1")
+
+    def test_empty_list_says_so_without_a_dead_button(self):
+        rows = feed_presets_keyboard([], FeedFilter())
+        self.assertEqual(rows[0][0].data, b"noop")
+
+    def test_saving_carries_the_current_selection(self):
+        state = FeedFilter(type="w", favorite=True)
+        datas = [b.data for row in feed_presets_keyboard([], state) for b in row]
+        self.assertIn(b"mon:pn:w:a:1:d:0:0:1", datas)
 
 
 class PingCardKeyboardTests(unittest.TestCase):
@@ -111,10 +183,76 @@ class PingCardKeyboardTests(unittest.TestCase):
         self.assertNotIn(b"ping:read:842", datas)
 
     def test_back_returns_to_feed_and_refresh_reopens(self):
-        rows = ping_card_keyboard(842, is_admin=False)
-        footer = rows[-1]
-        self.assertEqual(footer[0].data, b"mon:feed:all")
+        footer = ping_card_keyboard(842, is_admin=False)[-1]
+        self.assertEqual(footer[0].data, FeedFilter().cb())
         self.assertEqual(footer[1].data, b"mon:open:842")
+
+    def test_back_returns_to_the_selection_the_card_was_opened_from(self):
+        state = FeedFilter(type="w", favorite=True, page=2)
+        footer = ping_card_keyboard(842, is_admin=False, state=state)[-1]
+        self.assertEqual(footer[0].data, state.cb())
+        self.assertEqual(footer[1].data, b"mon:open:842:w:a:1:d:0:0:2")
+
+    def test_owner_gets_the_full_action_set(self):
+        row = {"id": 842, "status": "new", "is_giveaway": 1, "giveaway_status": "pending"}
+        datas = [b.data for r in ping_card_keyboard(row, is_admin=True) for b in r]
+        self.assertTrue(any(d.startswith(b"pg:st:842") for d in datas))
+        self.assertTrue(any(d.startswith(b"pg:nt:842") for d in datas))
+        self.assertTrue(any(d.startswith(b"pg:gw:842") for d in datas))
+        self.assertTrue(any(d.startswith(b"pg:hs:842") for d in datas))
+        self.assertTrue(any(d.startswith(b"pg:tg:842") for d in datas))
+
+    def test_giveaway_actions_are_hidden_for_a_plain_mention(self):
+        datas = [b.data for r in ping_card_keyboard({"id": 842}, is_admin=True) for b in r]
+        self.assertFalse(any(d.startswith(b"pg:gw:") for d in datas))
+        self.assertFalse(any(d.startswith(b"pg:hs:") for d in datas))
+
+    def test_a_real_link_becomes_a_url_button(self):
+        rows = ping_card_keyboard({"id": 1, "link": "https://t.me/c/1/2"}, is_admin=False)
+        self.assertTrue(any(getattr(b, "url", None) for row in rows for b in row))
+
+    def test_a_placeholder_link_is_not_a_button(self):
+        # `link` sometimes holds the reason there is no link ("нет ссылки"), and
+        # Telegram rejects a url button whose url is not one.
+        rows = ping_card_keyboard({"id": 1, "link": "нет ссылки"}, is_admin=False)
+        self.assertFalse(any(getattr(b, "url", None) for row in rows for b in row))
+
+    def test_status_submenu_marks_the_current_value_and_returns(self):
+        rows = ping_status_keyboard(842, "important", FeedFilter(type="w"))
+        marked = [b.text for row in rows for b in row if b.text.startswith("▸")]
+        self.assertEqual(marked, ["▸Важное"])
+        self.assertEqual(rows[-1][0].data, b"mon:open:842:w:a:0:d:0:0:1")
+
+    def test_giveaway_submenu_offers_every_outcome(self):
+        datas = [b.data for row in ping_giveaway_keyboard(842, "") for b in row]
+        self.assertTrue(any(d.startswith(b"pg:gws:842:claimed") for d in datas))
+        self.assertTrue(any(d.startswith(b"pg:gws:842:missed_unsubscribe") for d in datas))
+
+    def test_every_ping_callback_fits_the_telegram_limit(self):
+        row = {"id": 999999999, "status": "new", "is_giveaway": 1}
+        deep = FeedFilter(type="w", status="s", favorite=True, sort="p",
+                          ascending=True, query=True, page=9999)
+        keyboards = [
+            ping_card_keyboard(row, is_admin=True, state=deep),
+            ping_status_keyboard(999999999, "new", deep),
+            ping_giveaway_keyboard(999999999, "missed_unsubscribe", deep),
+            ping_tags_keyboard(999999999, ["розыгрыш", "долг"], deep),
+        ]
+        for rows in keyboards:
+            for r in rows:
+                for b in r:
+                    if b.data:
+                        self.assertLessEqual(len(b.data), 64, b.data)
+
+    def test_tags_are_removed_by_index_and_added_by_prompt(self):
+        rows = ping_tags_keyboard(842, ["гив", "долг"])
+        self.assertTrue(rows[0][0].data.startswith(b"pg:tgd:842:0"))
+        self.assertTrue(rows[1][0].data.startswith(b"pg:tgd:842:1"))
+        self.assertTrue(any(b.data.startswith(b"pg:tga:842")
+                            for row in rows for b in row))
+
+    def test_empty_tag_list_has_no_dead_button(self):
+        self.assertEqual(ping_tags_keyboard(842, [])[0][0].data, b"noop")
 
 
 from pulse_desk.bot.keyboards import (
@@ -382,45 +520,3 @@ class AnalyticsKeyboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class WebappRowTests(unittest.TestCase):
-    def setUp(self):
-        from pulse_desk.app_ctx import state
-
-        self.state = state
-        self.addCleanup(setattr, state, "public_url", None)
-
-    def test_no_tunnel_means_no_row(self):
-        self.state.public_url = None
-        self.assertEqual(webapp_row("Панель", "/app"), [])
-
-    def test_empty_url_means_no_row(self):
-        self.state.public_url = ""
-        self.assertEqual(webapp_row("Панель", "/app"), [])
-
-    def test_row_carries_the_full_url(self):
-        self.state.public_url = "https://fox.trycloudflare.com"
-        row = webapp_row("Панель", "/app")
-        self.assertEqual(len(row), 1)
-        self.assertEqual(row[0].url, "https://fox.trycloudflare.com/app")
-        self.assertEqual(row[0].text, "Панель")
-
-    def test_trailing_slash_is_not_doubled(self):
-        self.state.public_url = "https://fox.trycloudflare.com/"
-        self.assertEqual(
-            webapp_row("Панель", "/app")[0].url, "https://fox.trycloudflare.com/app"
-        )
-
-    def test_default_path_is_the_app_root(self):
-        self.state.public_url = "https://fox.trycloudflare.com"
-        self.assertEqual(webapp_row("Панель")[0].url, "https://fox.trycloudflare.com/app")
-
-    def test_button_is_an_inline_web_view(self):
-        from telethon.tl.custom.button import Button as TButton
-        from telethon.tl.types import KeyboardButtonWebView
-
-        self.state.public_url = "https://fox.trycloudflare.com"
-        button = webapp_row("Панель", "/app")[0]
-        self.assertIsInstance(button, KeyboardButtonWebView)
-        self.assertTrue(TButton._is_inline(button))

@@ -15,7 +15,7 @@
   even though no console is visible.
 
   Run manually to test:  .\scripts\start_dashboard.ps1
-  Skip opening a window:  .\scripts\start_dashboard.ps1 -NoOpen
+  (-NoOpen is accepted and ignored: there is no web UI to open.)
 #>
 param(
     [switch]$NoOpen,
@@ -37,13 +37,11 @@ function Log($msg) {
     try { Add-Content -LiteralPath $LogFile -Value $line -Encoding utf8 } catch { }
 }
 
-function Open-Dashboard($url) {
-    $edge = Get-Command msedge -ErrorAction SilentlyContinue
-    $chrome = Get-Command chrome -ErrorAction SilentlyContinue
-    if ($edge) { Start-Process $edge.Source "--app=$url" }
-    elseif ($chrome) { Start-Process $chrome.Source "--app=$url" }
-    else { Start-Process $url }
-}
+# The web UI was removed on 2026-09-12: the app is driven from the Telegram bot
+# and the root URL now 404s. Opening a browser at logon would only show that
+# error page, so this is a no-op. `-NoOpen` stays accepted because the installed
+# Task Scheduler action and the docs still pass it.
+function Open-Dashboard($url) { }
 
 function Test-Health($url) {
     try {

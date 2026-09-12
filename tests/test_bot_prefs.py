@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from pulse_desk.bot_prefs import (
+    DEFAULT_DIGEST_TIME,
     DEFAULT_MEMBER_PREFS,
     KEYWORD_SCOPES,
     filter_broadcast_members,
@@ -48,7 +49,7 @@ class ParseMemberPrefsTests(unittest.TestCase):
         self.assertTrue(prefs["muted"])
         self.assertFalse(prefs["wins"])
         self.assertTrue(prefs["mentions"])
-        self.assertFalse(prefs["deadlines"])
+        self.assertFalse(prefs["digest"])
 
     def test_unknown_keys_ignored(self):
         prefs = parse_member_prefs('{"bogus": true}')
@@ -58,8 +59,8 @@ class ParseMemberPrefsTests(unittest.TestCase):
 
 class MemberAllowsTests(unittest.TestCase):
     def test_muted_blocks_every_type(self):
-        prefs = dict(DEFAULT_MEMBER_PREFS, muted=True, deadlines=True, digest=True)
-        for notif_type in ("mention", "giveaway", "win", "deadline", "digest", "other"):
+        prefs = dict(DEFAULT_MEMBER_PREFS, muted=True, digest=True)
+        for notif_type in ("mention", "giveaway", "win", "digest", "other"):
             self.assertFalse(member_allows(prefs, notif_type))
 
     def test_each_type_respects_its_toggle(self):
@@ -67,7 +68,6 @@ class MemberAllowsTests(unittest.TestCase):
             "mention": "mentions",
             "giveaway": "giveaways",
             "win": "wins",
-            "deadline": "deadlines",
             "digest": "digest",
         }
         for notif_type, pref_key in cases.items():
@@ -77,9 +77,8 @@ class MemberAllowsTests(unittest.TestCase):
             prefs[pref_key] = False
             self.assertFalse(member_allows(prefs, notif_type), notif_type)
 
-    def test_deadline_and_digest_default_off(self):
+    def test_digest_defaults_off(self):
         prefs = parse_member_prefs(None)
-        self.assertFalse(member_allows(prefs, "deadline"))
         self.assertFalse(member_allows(prefs, "digest"))
 
     def test_unknown_type_falls_back_to_not_muted(self):
@@ -125,8 +124,7 @@ class FilterBroadcastMembersTests(unittest.TestCase):
         members = [self._member(1)]
         for notif_type in ("mention", "giveaway", "win"):
             self.assertEqual(len(filter_broadcast_members(members, notif_type, set())), 1, notif_type)
-        for notif_type in ("deadline", "digest"):
-            self.assertEqual(filter_broadcast_members(members, notif_type, set()), [], notif_type)
+        self.assertEqual(filter_broadcast_members(members, "digest", set()), [])
 
 
 class TogglePrefTests(unittest.TestCase):
@@ -165,9 +163,11 @@ class TimeParsingTests(unittest.TestCase):
         now = datetime(2026, 6, 12, 9, 0, 0)
         self.assertEqual(seconds_until_hhmm(now, "09:00"), 86400.0)
 
-    def test_invalid_time_falls_back_without_raising(self):
+    def test_invalid_time_falls_back_to_the_digest_default(self):
         now = datetime(2026, 6, 12, 8, 0, 0)
-        self.assertEqual(seconds_until_hhmm(now, "garbage"), 3600.0)
+        hour, minute = int(DEFAULT_DIGEST_TIME[:2]), int(DEFAULT_DIGEST_TIME[3:])
+        expected = (hour - 8) * 3600.0 + minute * 60.0
+        self.assertEqual(seconds_until_hhmm(now, "garbage"), expected)
 
     def test_parse_quiet_hours(self):
         self.assertEqual(parse_quiet_hours_input("23:00-08:00"), ("23:00", "08:00"))
@@ -181,7 +181,7 @@ class KeywordScopesTests(unittest.TestCase):
         keys = {scope[0] for scope in KEYWORD_SCOPES.values()}
         self.assertEqual(
             keys,
-            {"win_keywords", "giveaway_keywords", "check_keywords", "high_priority_keywords", "ignore_keywords"},
+            {"win_keywords", "giveaway_keywords", "high_priority_keywords", "ignore_keywords"},
         )
 
 

@@ -210,14 +210,19 @@ class NotificationGateTests(unittest.TestCase):
 class ApertureCatalogTests(unittest.TestCase):
     """The catalogs must cover every section/notification the bot actually has."""
 
-    def test_checks_are_grantable_as_a_section_and_a_notification(self):
-        self.assertIn("checks", ALL_FEATURES)
-        self.assertIn("checks", ALL_NOTIFY)
+    def test_giveaways_are_grantable_as_a_section_and_a_notification(self):
+        self.assertIn("giveaways", ALL_FEATURES)
+        self.assertIn("giveaways", ALL_NOTIFY)
 
-    def test_check_events_map_onto_the_checks_grant(self):
-        perms = normalize_permissions({"notify": ["checks"]})
-        self.assertTrue(permission_allows_notification(perms, "check"))
+    def test_giveaway_events_map_onto_the_giveaways_grant(self):
+        perms = normalize_permissions({"notify": ["giveaways"]})
+        self.assertTrue(permission_allows_notification(perms, "giveaway"))
         self.assertFalse(permission_allows_notification(perms, "win"))
+
+    def test_removed_grants_are_gone_from_the_catalogs(self):
+        for code in ("checks", "deadlines"):
+            self.assertNotIn(code, ALL_FEATURES)
+            self.assertNotIn(code, ALL_NOTIFY)
 
 
 class BroadcastFilterTests(unittest.TestCase):

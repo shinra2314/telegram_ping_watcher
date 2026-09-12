@@ -98,7 +98,7 @@ class ThresholdTests(unittest.TestCase):
 
     def test_critical_jobs_present(self):
         t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300)
-        for name in ("auto-scan", "reminders", "source-scores", "access-scheduler", "market-fetch"):
+        for name in ("auto-scan", "broadcast-approval", "source-scores", "access-scheduler", "market-fetch"):
             self.assertIn(name, t)
 
     def test_optional_jobs_excluded(self):
@@ -123,3 +123,44 @@ class FormatAgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BotJobMonitoringTests(unittest.TestCase):
+    """`bot-connection` is what keeps incoming updates flowing.
+
+    It used to be fire-and-forget and absent from both monitoring lists, so if
+    it died the bot went deaf while /api/health still reported ok.
+    """
+
+    def test_bot_connection_is_watched_when_a_bot_is_configured(self):
+        t = default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, bot_configured=True
+        )
+        self.assertIn("bot-connection", t)
+
+    def test_no_bot_means_no_false_outage(self):
+        t = default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, bot_configured=False
+        )
+        self.assertNotIn("bot-connection", t)
+
+    def test_outbox_is_watched(self):
+        t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300)
+        self.assertIn("pending-sends", t)
+
+    def test_expected_jobs_and_thresholds_agree(self):
+        from pulse_desk.jobs import expected_jobs
+
+        thresholds = set(default_thresholds(
+            scan_interval_seconds=900, market_poll_seconds=300, bot_configured=True
+        ))
+        expected = expected_jobs(bot_configured=True)
+        # Every job we page about for staleness must also be one we require to
+        # exist; the two lists silently disagreed before.
+        self.assertTrue(thresholds <= expected, thresholds - expected)
+
+    def test_expected_jobs_tracks_the_bot(self):
+        from pulse_desk.jobs import expected_jobs
+
+        self.assertIn("bot-connection", expected_jobs(bot_configured=True))
+        self.assertNotIn("bot-connection", expected_jobs(bot_configured=False))

@@ -69,6 +69,31 @@ def is_channel_inaccessible(exc: BaseException) -> bool:
     return any(marker in text for marker in _CHANNEL_INACCESSIBLE_MARKERS)
 
 
+_UNREACHABLE_RECIPIENT_MARKERS = (
+    "as username",              # No user has "x" as username
+    "cannot find any entity",
+    "peer_id_invalid",
+    "user_is_blocked",
+    "user_is_bot",
+    "user_deactivated",
+    "input_user_deactivated",
+    "bot can't initiate conversation",
+    "chat_write_forbidden",
+    "bot_domain_invalid",
+)
+
+
+def is_unreachable_recipient(exc: BaseException) -> bool:
+    """Permanent delivery failures for one bot recipient.
+
+    A bot can only message users who pressed /start on it, so a wrong or stale
+    notify target fails identically on every attempt. Retrying it three times
+    with backoff stalls the ping pipeline that is waiting on the send.
+    """
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    return any(marker in text for marker in _UNREACHABLE_RECIPIENT_MARKERS)
+
+
 TRANSIENT_RPC_MAX_RETRIES = 3
 TRANSIENT_RPC_BASE_DELAY_SECONDS = 2.0
 TRANSIENT_RPC_MAX_DELAY_SECONDS = 30.0

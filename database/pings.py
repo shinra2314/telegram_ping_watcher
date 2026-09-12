@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import aiosqlite
@@ -72,11 +73,10 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                 """
                 INSERT INTO pings (
                     date, chat, chat_id, sender, sender_id, message_id, mentions,
-                    link, text, chat_type, detected_at, is_win, is_check, auto_joined, is_giveaway,
-                    giveaway_status, priority_score, priority_label, note,
-                    deadline_at, deadline_source, deadline_text, reminder_at, reminder_sent_at, action_status
+                    link, text, chat_type, detected_at, is_win, is_giveaway,
+                    giveaway_status, priority_score, priority_label, note, action_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.get("date"),
@@ -91,18 +91,11 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                     record.get("chat_type"),
                     detected_at,
                     1 if record.get("is_win") else 0,
-                    1 if record.get("is_check") else 0,
-                    1 if record.get("auto_joined") else 0,
                     1 if record.get("is_giveaway") else 0,
                     record.get("giveaway_status") or ("pending" if (record.get("is_giveaway") or record.get("is_win")) else ""),
                     int(record.get("priority_score") or 0),
                     record.get("priority_label") or "normal",
                     record.get("note") or "",
-                    record.get("deadline_at"),
-                    record.get("deadline_source") or "",
-                    record.get("deadline_text") or "",
-                    record.get("reminder_at"),
-                    record.get("reminder_sent_at"),
                     record.get("action_status") or "new",
                 ),
             )
@@ -130,30 +123,14 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         link = COALESCE(NULLIF(?, ''), link),
                         text = COALESCE(?, text),
                         chat_type = COALESCE(NULLIF(?, ''), chat_type),
-                        is_win = ?, is_check = CASE WHEN ? = 1 THEN 1 ELSE is_check END,
-                        auto_joined = ?, is_giveaway = ?,
+                        is_win = ?,
+                        is_giveaway = ?,
                         giveaway_status = CASE
                             WHEN ? = 1 AND (giveaway_status IS NULL OR giveaway_status = '') THEN 'pending'
                             WHEN ? = 0 THEN ''
                             ELSE giveaway_status
                         END,
                         priority_score = ?, priority_label = COALESCE(NULLIF(?, ''), priority_label),
-                        deadline_at = CASE
-                            WHEN COALESCE(deadline_source, '') = 'manual' THEN deadline_at
-                            WHEN ? IS NOT NULL THEN ?
-                            ELSE deadline_at
-                        END,
-                        deadline_source = CASE
-                            WHEN COALESCE(deadline_source, '') = 'manual' THEN deadline_source
-                            WHEN ? IS NOT NULL THEN COALESCE(NULLIF(?, ''), deadline_source)
-                            ELSE deadline_source
-                        END,
-                        deadline_text = CASE
-                            WHEN COALESCE(deadline_source, '') = 'manual' THEN deadline_text
-                            WHEN ? IS NOT NULL THEN COALESCE(NULLIF(?, ''), deadline_text)
-                            ELSE deadline_text
-                        END,
-                        reminder_at = COALESCE(?, reminder_at),
                         action_status = CASE
                             WHEN action_status IS NULL OR action_status = '' OR action_status = 'new'
                             THEN COALESCE(NULLIF(?, ''), action_status)
@@ -171,20 +148,11 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         record.get("text"),
                         record.get("chat_type"),
                         1 if record.get("is_win") else 0,
-                        1 if record.get("is_check") else 0,
-                        1 if record.get("auto_joined") else 0,
                         1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
                         1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
                         1 if record.get("is_giveaway") else 0,
                         int(record.get("priority_score") or 0),
                         record.get("priority_label") or "",
-                        record.get("deadline_at"),
-                        record.get("deadline_at"),
-                        record.get("deadline_at"),
-                        record.get("deadline_source") or "",
-                        record.get("deadline_at"),
-                        record.get("deadline_text") or "",
-                        record.get("reminder_at"),
                         record.get("action_status") or "",
                         ping_id,
                     ),
@@ -212,15 +180,13 @@ def _build_pings_filters(
     status: Optional[str] = None,
     favorite: Optional[bool] = None,
     mention: Optional[str] = None,
+    mention_any: Optional[Sequence[str]] = None,
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     message_date_from: Optional[str] = None,
     priority_min: Optional[int] = None,
     action_status: Optional[str] = None,
-    deadline_from: Optional[str] = None,
-    deadline_to: Optional[str] = None,
-    has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
     tag: Optional[str] = None,
 ) -> tuple[list[str], list[Any]]:
@@ -232,10 +198,6 @@ def _build_pings_filters(
             _add_where(where, params, "is_giveaway = 1")
         elif chat_type == "win":
             _add_where(where, params, "is_win = 1")
-        elif chat_type == "check":
-            _add_where(where, params, "is_check = 1")
-        elif chat_type == "auto_joined":
-            _add_where(where, params, "auto_joined = 1")
         elif chat_type == "important":
             _add_where(where, params, "priority_score >= 60")
         else:
@@ -252,6 +214,21 @@ def _build_pings_filters(
             "EXISTS (SELECT 1 FROM ping_mentions pm WHERE pm.ping_id = pings.id AND lower(pm.username) = lower(?))",
             needle,
         )
+    if mention_any:
+        # An account-scoped bot key may cover several tracked usernames. Filtering
+        # them here (indexed, via ping_mentions) rather than in Python means the
+        # caller can page normally instead of over-fetching whole pages of rows
+        # and JSON-decoding `mentions` on every one of them.
+        needles = [str(name).strip().lstrip("@").lower() for name in mention_any]
+        needles = [name for name in needles if name]
+        if needles:
+            placeholders = ", ".join("?" for _ in needles)
+            _add_where(
+                where,
+                params,
+                f"EXISTS (SELECT 1 FROM ping_mentions pm WHERE pm.ping_id = pings.id AND lower(pm.username) IN ({placeholders}))",
+                *needles,
+            )
     if search:
         raw_search = search.strip()
         text = f"%{raw_search}%"
@@ -299,12 +276,6 @@ def _build_pings_filters(
         _add_where(where, params, "priority_score >= ?", priority_min)
     if action_status:
         _add_where(where, params, "action_status = ?", action_status)
-    if deadline_from:
-        _add_where(where, params, "deadline_at >= ?", deadline_from)
-    if deadline_to:
-        _add_where(where, params, "deadline_at <= ?", deadline_to)
-    if has_deadline is not None:
-        _add_where(where, params, "deadline_at IS NOT NULL" if has_deadline else "deadline_at IS NULL")
     if source_score_min is not None:
         _add_where(
             where,
@@ -328,9 +299,6 @@ async def mark_pings_read(
     date_to: Optional[str] = None,
     priority_min: Optional[int] = None,
     action_status: Optional[str] = None,
-    deadline_from: Optional[str] = None,
-    deadline_to: Optional[str] = None,
-    has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
     only_new: bool = True,
 ) -> int:
@@ -344,9 +312,6 @@ async def mark_pings_read(
         date_to=date_to,
         priority_min=priority_min,
         action_status=action_status,
-        deadline_from=deadline_from,
-        deadline_to=deadline_to,
-        has_deadline=has_deadline,
         source_score_min=source_score_min,
     )
     if only_new:
@@ -366,10 +331,6 @@ async def update_ping_meta(
     note: Optional[str] = None,
     is_favorite: Optional[bool] = None,
     giveaway_status: Optional[str] = None,
-    deadline_at: Optional[str] = None,
-    deadline_source: Optional[str] = None,
-    deadline_text: Optional[str] = None,
-    reminder_at: Optional[str] = None,
     action_status: Optional[str] = None,
 ) -> None:
     updates: dict[str, Any] = {}
@@ -381,16 +342,6 @@ async def update_ping_meta(
         updates["is_favorite"] = 1 if is_favorite else 0
     if giveaway_status is not None:
         updates["giveaway_status"] = giveaway_status
-    if deadline_at is not None:
-        updates["deadline_at"] = deadline_at or None
-        updates["deadline_source"] = (deadline_source or "manual") if deadline_at else ""
-        updates["deadline_text"] = deadline_text or ("Ручной дедлайн" if deadline_at else "")
-    if deadline_text is not None:
-        updates["deadline_text"] = deadline_text
-    if reminder_at is not None:
-        updates["reminder_at"] = reminder_at or None
-        if not reminder_at:
-            updates["reminder_sent_at"] = None
     if action_status is not None:
         updates["action_status"] = action_status
     if not updates:
@@ -398,32 +349,6 @@ async def update_ping_meta(
     set_clause = ", ".join(f"{key} = ?" for key in updates)
     async with _connect() as db:
         await db.execute(f"UPDATE pings SET {set_clause} WHERE id = ?", (*updates.values(), ping_id))
-        await db.commit()
-
-
-async def update_ping_deadline(
-    ping_id: int,
-    deadline_at: Optional[str],
-    deadline_source: str,
-    deadline_text: str = "",
-    action_status: Optional[str] = None,
-) -> None:
-    async with _connect() as db:
-        await db.execute(
-            """
-            UPDATE pings
-            SET deadline_at = ?,
-                deadline_source = ?,
-                deadline_text = ?,
-                action_status = CASE
-                    WHEN ? IS NOT NULL AND (action_status IS NULL OR action_status = '' OR action_status = 'new')
-                    THEN ?
-                    ELSE action_status
-                END
-            WHERE id = ?
-            """,
-            (deadline_at, deadline_source, deadline_text, action_status, action_status, ping_id),
-        )
         await db.commit()
 
 
@@ -449,20 +374,29 @@ async def delete_ping(chat_id: int, message_id: int) -> None:
 
 
 async def delete_ping_by_message_id(message_id: int) -> None:
-    """See delete_ping: win/giveaway rows are soft-deleted, the rest removed."""
+    """See delete_ping: win/giveaway rows are soft-deleted, the rest removed.
+
+    Used only for deletion events that carry no chat, which Telegram sends for
+    private chats and basic groups — those share one per-account message-id
+    sequence, so the bare id identifies the message. Channel posts are numbered
+    per channel and collide with it constantly, so they are excluded here: a
+    deleted DM must not mark an unrelated channel win as "post removed" or drop
+    a channel mention that is still live.
+    """
+    scope = "COALESCE(chat_type, '') <> 'channel' AND message_id = ?"
     async with _connect() as db:
         await db.execute(
-            "UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE message_id = ? AND (is_win = 1 OR is_giveaway = 1)",
+            f"UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE {scope} AND (is_win = 1 OR is_giveaway = 1)",
             (_now_iso(), message_id),
         )
         rows = await (await db.execute(
-            "SELECT id FROM pings WHERE message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            f"SELECT id FROM pings WHERE {scope} AND is_win = 0 AND is_giveaway = 0",
             (message_id,),
         )).fetchall()
         for row in rows:
             await db.execute("DELETE FROM pings_fts WHERE rowid = ?", (row[0],))
         await db.execute(
-            "DELETE FROM pings WHERE message_id = ? AND is_win = 0 AND is_giveaway = 0",
+            f"DELETE FROM pings WHERE {scope} AND is_win = 0 AND is_giveaway = 0",
             (message_id,),
         )
         await db.commit()
@@ -494,15 +428,13 @@ async def get_pings(
     status: Optional[str] = None,
     favorite: Optional[bool] = None,
     mention: Optional[str] = None,
+    mention_any: Optional[Sequence[str]] = None,
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     message_date_from: Optional[str] = None,
     priority_min: Optional[int] = None,
     action_status: Optional[str] = None,
-    deadline_from: Optional[str] = None,
-    deadline_to: Optional[str] = None,
-    has_deadline: Optional[bool] = None,
     source_score_min: Optional[float] = None,
     tag: Optional[str] = None,
 ) -> list[dict[str, Any]]:
@@ -514,15 +446,13 @@ async def get_pings(
             status=status,
             favorite=favorite,
             mention=mention,
+            mention_any=mention_any,
             search=search,
             date_from=date_from,
             date_to=date_to,
             message_date_from=message_date_from,
             priority_min=priority_min,
             action_status=action_status,
-            deadline_from=deadline_from,
-            deadline_to=deadline_to,
-            has_deadline=has_deadline,
             source_score_min=source_score_min,
             tag=tag,
         )
@@ -531,7 +461,7 @@ async def get_pings(
             query += " WHERE " + " AND ".join(where)
 
         direction = "DESC" if sort_order.upper() == "DESC" else "ASC"
-        valid_sort_fields = {"detected_at", "date", "chat", "sender", "status", "id", "priority_score", "deadline_at", "action_status"}
+        valid_sort_fields = {"detected_at", "date", "chat", "sender", "status", "id", "priority_score", "action_status"}
         field = sort_by if sort_by in valid_sort_fields else "detected_at"
         query += f" ORDER BY {field} {direction}"
         if limit and limit > 0:

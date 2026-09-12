@@ -575,7 +575,6 @@ async def sync_once(state, settings, *, force: bool = False) -> dict:
     """One reconcile pass: note→app status, app→note appends, refresh snapshot."""
     from database import get_giveaway_pings_with_links, set_setting, update_ping_meta
 
-    from .live import publish_live_event
 
     path = _note_path(settings)
     if path is None:
@@ -629,11 +628,11 @@ async def sync_once(state, settings, *, force: bool = False) -> dict:
         state.obsidian_sync_meta = meta
 
     try:
-        await set_setting("obsidian_sync", json.dumps(meta, ensure_ascii=False))
+        # Runtime bookkeeping (last_sync_at, file hash), rewritten every poll —
+        # auditing it filled settings_history with 141k rows / 111 MB.
+        await set_setting("obsidian_sync", json.dumps(meta, ensure_ascii=False), audit=False)
     except Exception:
         pass
-    if applied or appended or force:
-        await publish_live_event("obsidian-sync", {"applied": applied, "appended": appended})
     return meta
 
 

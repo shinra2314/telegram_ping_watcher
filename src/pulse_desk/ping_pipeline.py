@@ -1,26 +1,33 @@
-"""Ping processing pipeline: classify message, score, deadlines, persist, notify."""
+"""Ping processing pipeline: classify message, score, persist, notify."""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import HTTPException
 from telethon import TelegramClient, types
 from telethon.tl.functions.channels import GetFullChannelRequest
 
-from telegram_ping_watcher import chat_type_from_entity, message_looks_like_broadcast_channel, message_to_record
+from telegram_ping_watcher import (
+    chat_type_from_entity,
+    mentions_in_text,
+    message_looks_like_broadcast_channel,
+    message_to_record,
+)
 
-from .app_ctx import CHECK_FRESH_MINUTES, logger, state
-from .bot_notify import send_bot_notification, send_check_notification
+from .analytics import invalidate_analytics_cache
+from .app_ctx import logger, state
+from .bot_notify import send_bot_notification
 from .common import now_iso, record_app_event
-from .deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
 from .giveaway_actions import analyze_and_store_giveaway
-from .giveaways import check_addressed_to_other, giveaway_outcome_resolution, is_check_text, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
-from .live import publish_live_event
-from .push import send_push
+from .giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
+from .public_preview import chat_username, fetch_public_message_text, is_unreadable_media
 
 CHANNEL_PROFILE_TTL_SECONDS = 6 * 60 * 60
+RESOLVE_RETRY_SECONDS = 600.0
+# tracked username -> monotonic deadline before the next resolve attempt.
+_resolve_retry_at: dict[str, float] = {}
 
 
 def check_is_win(text: str) -> bool:
@@ -31,20 +38,8 @@ def check_is_giveaway(text: str, chat_type: str = "") -> bool:
     return matches_strict_giveaway_rule(text, chat_type, state.giveaway_keywords)
 
 
-def check_is_check(text: str) -> bool:
-    # Redeemable crypto check AND not explicitly addressed to someone else.
-    return is_check_text(text, state.check_keywords) and not check_addressed_to_other(
-        text, state.ping_usernames
-    )
-
-
 def classify_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Set is_win / is_giveaway; both require a tracked-username mention.
-
-    Mention-less records exist only via the check-capture path
-    (require_mentions=False), so a channel check announcing someone else's
-    win ("Победители: @stranger") must not land on the giveaway board.
-    """
+    """Set is_win / is_giveaway; both require a tracked-username mention."""
     mentions_me = bool(record.get("mentions"))
     text = record.get("text") or ""
     record["is_win"] = mentions_me and check_is_win(text)
@@ -52,16 +47,16 @@ def classify_record(record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def check_is_fresh(record: dict[str, Any]) -> bool:
-    """True if the check's Telegram message date is within the freshness window.
+def upgraded_to_win(existing: Optional[dict[str, Any]], record: dict[str, Any]) -> bool:
+    """True when a re-read turned an already-stored ping into a win.
 
-    A history/backfill sweep can surface checks posted days ago; their link is
-    long dead, so we must not notify for them. ``record_reference_datetime``
-    reads the message ``date`` (falling back to ``detected_at``) as local-naive,
-    matching ``datetime.now()``.
+    Channels often edit the original post to append the winner list, so the
+    message is already in the database when it becomes a win. Without this the
+    flag would flip silently and the owner would only see it on the dashboard.
     """
-    age = datetime.now() - record_reference_datetime(record)
-    return age <= timedelta(minutes=CHECK_FRESH_MINUTES)
+    if not existing:
+        return False
+    return bool(record.get("is_win")) and not bool(existing.get("is_win"))
 
 
 def priority_label(score: int) -> str:
@@ -146,7 +141,6 @@ async def refresh_channel_profile(
     chat_id: int,
     chat_label: str = "",
     force: bool = False,
-    deadline_reference: Optional[datetime] = None,
 ) -> dict[str, Any]:
     from database import get_channel_profile, upsert_channel_profile
 
@@ -159,9 +153,6 @@ async def refresh_channel_profile(
             return cached or {"chat_id": chat_id, "chat": chat_label, "last_error": "not a channel"}
         full = await client(GetFullChannelRequest(entity))
         description = getattr(getattr(full, "full_chat", None), "about", "") or ""
-        match = parse_deadline(description, now=deadline_reference or datetime.now())
-        deadline_at = iso_or_none(match.deadline_at if match else None)
-        deadline_text = match.matched_text if match else ""
         chat_name = getattr(entity, "title", None) or chat_label or str(chat_id)
         username = getattr(entity, "username", None) or ""
         await upsert_channel_profile(
@@ -169,8 +160,6 @@ async def refresh_channel_profile(
             chat=chat_name,
             username=username,
             description=description,
-            deadline_at=deadline_at,
-            deadline_text=deadline_text,
             last_error="",
         )
         return await get_channel_profile(chat_id) or {}
@@ -180,109 +169,10 @@ async def refresh_channel_profile(
             chat=(cached or {}).get("chat") or chat_label or str(chat_id),
             username=(cached or {}).get("username") or "",
             description=(cached or {}).get("description") or "",
-            deadline_at=(cached or {}).get("deadline_at"),
-            deadline_text=(cached or {}).get("deadline_text") or "",
             last_error=str(exc),
         )
         logger.debug("Could not refresh channel profile for %s", chat_id, exc_info=True)
         return await get_channel_profile(chat_id) or {"chat_id": chat_id, "chat": chat_label, "last_error": str(exc)}
-
-
-def parse_profile_deadline(profile: dict[str, Any], reference: datetime):
-    description = profile.get("description") or ""
-    if not description:
-        return None
-    return parse_participation_deadline(description, now=reference)
-
-
-async def apply_deadline_metadata(client: TelegramClient, record: dict[str, Any], chat_id: Optional[int]) -> dict[str, Any]:
-    if not record.get("is_giveaway"):
-        return record
-    reference = record_reference_datetime(record)
-    is_outcome = is_giveaway_outcome_text(record.get("text") or "")
-    if is_outcome:
-        match = parse_claim_deadline(record.get("text") or "", now=reference)
-        if match:
-            record["deadline_at"] = iso_or_none(match.deadline_at)
-            record["deadline_source"] = "claim_window_text"
-            record["deadline_text"] = match.matched_text
-        else:
-            record["deadline_at"] = None
-            record["deadline_source"] = ""
-            record["deadline_text"] = ""
-        return record
-    if record.get("chat_type") == "channel" and chat_id:
-        profile = await refresh_channel_profile(client, chat_id, record.get("chat") or "", deadline_reference=reference)
-        profile_match = parse_profile_deadline(profile, reference)
-        if profile_match:
-            record["deadline_at"] = iso_or_none(profile_match.deadline_at)
-            record["deadline_source"] = "channel_description"
-            record["deadline_text"] = profile_match.matched_text
-        else:
-            match = parse_participation_deadline(record.get("text") or "", now=reference)
-            if match:
-                record["deadline_at"] = iso_or_none(match.deadline_at)
-                record["deadline_source"] = "channel_post_text"
-                record["deadline_text"] = match.matched_text
-            else:
-                record["deadline_at"] = None
-                record["deadline_source"] = "channel_description_missing"
-                record["deadline_text"] = profile.get("last_error") or "Дедлайн не найден в описании канала или тексте поста"
-        return record
-    match = parse_participation_deadline(record.get("text") or "", now=reference)
-    if match:
-        record["deadline_at"] = iso_or_none(match.deadline_at)
-        record["deadline_source"] = "message_text"
-        record["deadline_text"] = match.matched_text
-    return record
-
-
-async def refresh_ping_deadline(client: TelegramClient, ping_id: int) -> dict[str, Any]:
-    from database import get_ping_by_id, replace_ping_reminders, update_ping_deadline
-
-    ping = await get_ping_by_id(ping_id)
-    if not ping:
-        raise HTTPException(404, "Ping not found")
-    if not ping.get("is_giveaway") and not ping.get("is_win"):
-        raise HTTPException(400, "Ping is not a giveaway or win")
-    if (ping.get("deadline_source") or "") == "manual":
-        return {"status": "ok", "ping": ping, "deadline_at": ping.get("deadline_at"), "deadline_source": "manual", "deadline_text": ping.get("deadline_text") or ""}
-
-    reference = record_reference_datetime(ping)
-    deadline_at: Optional[str] = None
-    deadline_source = ""
-    deadline_text = ""
-    is_outcome = is_giveaway_outcome_text(ping.get("text") or "") or bool(ping.get("is_win"))
-    if ping.get("chat_type") == "channel" and ping.get("chat_id") and not is_outcome:
-        profile = await refresh_channel_profile(
-            client,
-            int(ping["chat_id"]),
-            ping.get("chat") or "",
-            force=True,
-            deadline_reference=reference,
-        )
-        profile_match = parse_profile_deadline(profile, reference)
-        if profile_match:
-            deadline_at = iso_or_none(profile_match.deadline_at)
-            deadline_source = "channel_description"
-            deadline_text = profile_match.matched_text
-
-    if not deadline_at:
-        match = parse_claim_deadline(ping.get("text") or "", now=reference) if is_outcome else parse_participation_deadline(ping.get("text") or "", now=reference)
-        if match:
-            deadline_at = iso_or_none(match.deadline_at)
-            deadline_source = "claim_window_text" if is_outcome else ("channel_post_text" if ping.get("chat_type") == "channel" else "message_text")
-            deadline_text = match.matched_text
-        else:
-            deadline_source = "channel_description_missing" if ping.get("chat_type") == "channel" and not is_outcome else ""
-            deadline_text = "Дедлайн не найден в описании канала или тексте поста" if deadline_source else ""
-
-    next_action = "claim_prize" if is_outcome else "waiting_result"
-    await update_ping_deadline(ping_id, deadline_at, deadline_source, deadline_text, next_action)
-    await replace_ping_reminders(ping_id, deadline_at)
-    updated = await get_ping_by_id(ping_id)
-    await publish_live_event("deadline-updated", {"ping_id": ping_id, "deadline_at": deadline_at, "deadline_source": deadline_source})
-    return {"status": "ok", "ping": updated, "deadline_at": deadline_at, "deadline_source": deadline_source, "deadline_text": deadline_text}
 
 
 async def get_chat_type(client: TelegramClient, chat_id: int) -> str:
@@ -314,43 +204,77 @@ async def resolve_ping_user_ids(client: TelegramClient) -> None:
     """Resolve tracked usernames to user ids so text-mentions (name links) match.
 
     Channels can ping a user by their display name instead of @username; those
-    arrive as MessageEntityMentionName carrying a user_id, not text. Each username
-    is looked up at most once per process to avoid repeated network calls.
+    arrive as MessageEntityMentionName carrying a user_id, not text. A username
+    is looked up once on success; a failed lookup (flood wait, hiccup at start-up)
+    is retried after a cooldown instead of staying blind for the whole process.
     """
-    pending = [u for u in state.ping_usernames if u.lower() not in state.ping_user_ids_resolved]
-    for username in pending:
-        state.ping_user_ids_resolved.add(username.lower())
+    now = time.monotonic()
+    for username in state.ping_usernames:
+        key = username.lower()
+        if key in state.ping_user_ids_resolved or _resolve_retry_at.get(key, 0.0) > now:
+            continue
         try:
             entity = await client.get_entity(username)
         except Exception:
+            _resolve_retry_at[key] = now + RESOLVE_RETRY_SECONDS
             logger.debug("Could not resolve tracked username %s to user id", username, exc_info=True)
             continue
         uid = getattr(entity, "id", None)
-        if uid is not None:
-            state.ping_user_ids[int(uid)] = username
+        if uid is None:
+            _resolve_retry_at[key] = now + RESOLVE_RETRY_SECONDS
+            continue
+        state.ping_user_ids[int(uid)] = username
+        state.ping_user_ids_resolved.add(key)
+        _resolve_retry_at.pop(key, None)
 
 
-async def fan_push_ping(ping: dict) -> None:
-    from database import get_push_subscriptions
+async def undecodable_media_record(client: TelegramClient, message: Any) -> Optional[dict[str, Any]]:
+    """Record for a post whose media Telethon cannot decode, read from t.me.
 
-    if not state.vapid_private_pem:
-        return
-    subscriptions = await get_push_subscriptions()
-    if not subscriptions:
-        return
-    payload = {
-        "title": f"Ping: {ping.get('chat', '?')}",
-        "body": (ping.get("text") or "")[:100],
-        "url": ping.get("link") or "/",
-        "tag": f"ping-{ping.get('id', '')}",
-    }
-    claims = {"sub": "mailto:push@pulse.local"}
-    for sub in subscriptions:
-        subscription_info = {
-            "endpoint": sub["endpoint"],
-            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
-        }
-        await send_push(subscription_info, payload, state.vapid_private_pem, claims)
+    Telegram strips media newer than the client's layer down to
+    ``messageMediaUnsupported``, leaving no text, no entities and nothing for
+    server-side search to index — which is how a win inside a mini-app lottery
+    result card went unnoticed. The public page still renders the card, so the
+    text is recovered from there and matched like any other message: no tracked
+    mention, no ping.
+    """
+    if not is_unreadable_media(message):
+        return None
+    try:
+        username = chat_username(await message.get_chat())
+    except Exception:
+        logger.debug("Could not resolve the chat of an undecodable message", exc_info=True)
+        return None
+    if not username:
+        # Private channel: no public page, nothing to recover from.
+        return None
+    try:
+        text = await fetch_public_message_text(username, getattr(message, "id", None))
+    except Exception:
+        logger.debug("Could not read the public page of %s/%s", username, getattr(message, "id", None), exc_info=True)
+        return None
+    mentions = mentions_in_text(text, state.ping_regex, state.ping_usernames)
+    if not mentions:
+        return None
+    record = await message_to_record(
+        client,
+        message,
+        state.ping_regex,
+        state.ping_usernames,
+        require_mentions=False,
+        tracked_ids=state.ping_user_ids or None,
+    )
+    if not record:
+        return None
+    record["text"] = text
+    record["mentions"] = mentions
+    await record_app_event(
+        "INFO",
+        "scan",
+        "Undecodable post recovered from its public page",
+        {"chat": record.get("chat"), "message_id": record.get("message_id"), "mentions": mentions},
+    )
+    return record
 
 
 async def process_ping_message(
@@ -360,44 +284,60 @@ async def process_ping_message(
     account_label: str = "",
     notify: bool = True,
     source: str = "telegram",
+    search_mentions: Optional[list[str]] = None,
+    search_text: str = "",
+    search_is_win: bool = False,
 ) -> Optional[int]:
-    from database import get_ping_by_message_ref, replace_ping_reminders, save_ping
+    """Store one message as a ping, when it mentions a tracked username.
+
+    ``search_*`` carry a verdict that came from Telegram's own search index
+    instead of the local text — the only source for a mini-app card whose
+    body Telethon cannot decode (see ``global_search``). They are ignored
+    whenever the message has real text to parse.
+    """
+    from database import get_ping_by_message_ref, save_ping
 
     chat_type = await get_message_chat_type(client, message)
     if chat_type != "channel":
         return None
     await resolve_ping_user_ids(client)
-    is_check = check_is_check(getattr(message, "raw_text", "") or "")
-    record = await message_to_record(client, message, state.ping_regex, state.ping_usernames, tracked_ids=state.ping_user_ids or None)
+    record = await message_to_record(
+        client,
+        message,
+        state.ping_regex,
+        state.ping_usernames,
+        require_mentions=not search_mentions,
+        tracked_ids=state.ping_user_ids or None,
+    )
     if not record:
-        # Checks rarely mention a tracked username — capture them anyway.
-        if not is_check:
-            return None
-        record = await message_to_record(
-            client, message, state.ping_regex, state.ping_usernames,
-            require_mentions=False, tracked_ids=state.ping_user_ids or None,
-        )
-        if not record:
-            return None
+        record = await undecodable_media_record(client, message)
+    if not record:
+        return None
+    if search_mentions and not record.get("mentions") and not (record.get("text") or "").strip():
+        # Nothing local to judge by: the server matched the mention, trust it.
+        record["mentions"] = list(search_mentions)
+        record["text"] = search_text or record.get("text") or ""
+    if not record.get("mentions"):
+        return None
     record["chat_type"] = chat_type
     record["detected_at"] = now_iso()
-    record["is_check"] = is_check
     classify_record(record)
+    if search_is_win:
+        record["is_win"] = True
     apply_giveaway_state(record)
-    await apply_deadline_metadata(client, record, getattr(message, "chat_id", None))
-    record["auto_joined"] = False
     apply_priority(record)
     apply_action_state(record)
 
     existing = await get_ping_by_message_ref(record.get("chat_id"), record.get("message_id"))
     ping_id = await save_ping(record)
-    if ping_id and record.get("deadline_at"):
-        await replace_ping_reminders(int(ping_id), record.get("deadline_at"), record.get("reminder_at"))
+    # Counters just moved; drop the memoised analytics so the next card is fresh.
+    invalidate_analytics_cache()
     if ping_id and should_analyze_giveaway(bool(record.get("is_giveaway")), existing is None, source):
         await analyze_and_store_giveaway(client, int(ping_id), record, message)
 
     if not ping_id:
         return None
+    win_upgrade = upgraded_to_win(existing, record)
     if existing is None:
         logger.info("Channel ping found by %s in %s", account_label or "unknown", record["chat"])
         await record_app_event(
@@ -406,34 +346,18 @@ async def process_ping_message(
             "Channel ping found",
             {"account": account_label, "chat": record.get("chat"), "ping_id": ping_id},
         )
-        await publish_live_event(
-            "ping",
-            {
-                "ping_id": ping_id,
-                "chat": record.get("chat"),
-                "deadline_at": record.get("deadline_at"),
-                "action_status": record.get("action_status"),
-            },
+    elif win_upgrade:
+        logger.info("Ping upgraded to win by %s in %s", account_label or "unknown", record["chat"])
+        await record_app_event(
+            "INFO",
+            source,
+            "Ping upgraded to win",
+            {"account": account_label, "chat": record.get("chat"), "ping_id": ping_id},
         )
-    elif source == "telegram-edit":
-        await publish_live_event(
-            "ping-updated",
-            {
-                "ping_id": ping_id,
-                "chat": record.get("chat"),
-                "source": source,
-            },
-        )
+    if notify and win_upgrade:
+        # The post was edited into a win — the first-detection card said
+        # "mention"/"giveaway", so send the 🏆 card now.
+        await send_bot_notification(record, ping_id=ping_id)
     if notify and existing is None:
-        if record.get("is_check"):
-            # Only notify for "actual" checks — message posted within the window.
-            if check_is_fresh(record):
-                await send_check_notification(record, ping_id=ping_id)
-            else:
-                logger.info("Stale check skipped (message older than %s min): %s", CHECK_FRESH_MINUTES, record.get("chat"))
-        else:
-            await send_bot_notification(record, ping_id=ping_id, auto_joined=record["auto_joined"])
-    if notify and existing is None and ping_id:
-        saved_record = {**record, "id": ping_id}
-        asyncio.create_task(fan_push_ping(saved_record))
+        await send_bot_notification(record, ping_id=ping_id)
     return int(ping_id) if existing is None else None

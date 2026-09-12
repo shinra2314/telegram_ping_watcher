@@ -55,7 +55,8 @@ if (-not (Test-Path -LiteralPath $EnvFile) -and (Test-Path -LiteralPath $EnvExam
 Write-Host ""
 Write-Host "Starting Pulse Desk with the project interpreter:" -ForegroundColor Green
 Write-Host $VenvPython
-Write-Host "Open http://127.0.0.1:8000 after the server starts."
+Write-Host "Pulse Desk works from the Telegram bot; the web UI was removed."
+Write-Host "Health check: http://127.0.0.1:8000/api/health"
 Write-Host ""
 
 & $VenvPython main.py

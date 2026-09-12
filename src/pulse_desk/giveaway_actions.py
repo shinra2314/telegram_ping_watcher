@@ -9,7 +9,6 @@ from telethon import TelegramClient
 from . import watch_settings as ws
 from .app_ctx import logger, state
 from .giveaways import analyze_giveaway
-from .live import publish_live_event
 from .telegram_errors import call_rpc_resilient
 
 
@@ -48,7 +47,6 @@ async def analyze_and_store_giveaway(client: TelegramClient, ping_id: Optional[i
         )
         saved = await upsert_giveaway_candidate(candidate)
         await record_giveaway_action(int(ping_id), "analyze", saved.get("status", "pending_review"), "system", context={"score": saved.get("score")})
-        await publish_live_event("giveaway-candidate", {"ping_id": ping_id, "status": saved.get("status"), "score": saved.get("score")})
         return saved
     except Exception as exc:
         logger.exception("Giveaway analysis failed")

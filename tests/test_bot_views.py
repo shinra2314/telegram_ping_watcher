@@ -227,34 +227,3 @@ class DivTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class MainMenuWebappTests(unittest.TestCase):
-    def setUp(self):
-        from pulse_desk.app_ctx import state
-
-        self.state = state
-        self.addCleanup(setattr, state, "public_url", None)
-
-    def test_no_tunnel_leaves_the_menu_unchanged(self):
-        self.state.public_url = None
-        rows = main_menu_buttons("admin")
-        self.assertTrue(all(getattr(b, "url", None) is None for row in rows for b in row))
-
-    def test_tunnel_adds_one_panel_row_on_top(self):
-        self.state.public_url = "https://fox.trycloudflare.com"
-        rows = main_menu_buttons("admin")
-        self.assertEqual(len(rows[0]), 1)
-        self.assertEqual(rows[0][0].url, "https://fox.trycloudflare.com/app")
-
-    def test_panel_row_does_not_replace_the_inline_sections(self):
-        self.state.public_url = "https://fox.trycloudflare.com"
-        with_tunnel = main_menu_buttons("admin")
-        self.state.public_url = None
-        without = main_menu_buttons("admin")
-        self.assertEqual(len(with_tunnel), len(without) + 1)
-
-    def test_guest_also_gets_the_panel(self):
-        self.state.public_url = "https://fox.trycloudflare.com"
-        rows = main_menu_buttons("viewer")
-        self.assertEqual(rows[0][0].url, "https://fox.trycloudflare.com/app")

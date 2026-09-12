@@ -64,6 +64,7 @@ def default_thresholds(
     scan_interval_seconds: int,
     market_poll_seconds: int,
     flood_wait_max_seconds: int = 1800,
+    bot_configured: bool = False,
 ) -> dict[str, int]:
     """Max seconds each monitored job may go without a successful cycle.
 
@@ -80,14 +81,21 @@ def default_thresholds(
     that a throttled-but-healthy scan never pages, while a wedged loop (no
     progress at all) still trips after the window.
     """
-    return {
+    thresholds = {
         "auto-scan": max(600, scan_interval_seconds + flood_wait_max_seconds + 300),
-        "reminders": 600,
         "broadcast-approval": 300,
         "source-scores": 1200,
         "access-scheduler": 360,
         "market-fetch": max(600, market_poll_seconds * 3 + 120),
+        # 20 s poll; a wedged outbox holds every delayed member copy.
+        "pending-sends": 300,
     }
+    if bot_configured:
+        # The loop ticks at least every BOT_CONNECTION_POLL_SECONDS (15 s), and a
+        # reconnect backoff tops out at 300 s, so silence past that means the
+        # supervisor itself is gone — and with it every incoming button press.
+        thresholds["bot-connection"] = 600
+    return thresholds
 
 
 def format_age(age_seconds: int | None) -> str:

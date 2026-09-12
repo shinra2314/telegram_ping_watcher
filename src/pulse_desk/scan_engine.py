@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Optional
 
 from telethon import TelegramClient
@@ -12,8 +13,14 @@ from telegram_ping_watcher import chat_type_from_entity
 from . import watch_settings as ws
 from .app_ctx import logger, state
 from .common import flood_wait_seconds, now_iso, record_app_event
+from .global_search import scan_global_mentions
 from .ping_pipeline import process_ping_message, resolve_ping_user_ids
-from .scan import channel_sweep_start_id, normalize_scan_history_limit
+from .scan import (
+    channel_has_new_messages,
+    channel_sweep_start_id,
+    edit_sweep_due,
+    normalize_scan_history_limit,
+)
 from .telegram_accounts import mark_account_cooldown, mark_auth_key_duplicated
 from .telegram_errors import (
     auth_key_duplicated_message,
@@ -23,6 +30,10 @@ from .telegram_errors import (
 )
 
 scan_status = state.scan_status
+
+# (session, chat_id) -> monotonic timestamp of the last recent-window pass.
+# Process-local on purpose: after a restart every channel gets one fresh pass.
+_edit_sweep_last_run: dict[tuple[str, Any], float] = {}
 
 
 def channel_checkpoint_key(username: str, chat_id: Any) -> str:
@@ -89,9 +100,19 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                 last_error=scan_status.get("last_error"),
             )
 
-    async def scan_recent_channel_window(entity: Any, chat_id: Any, user_label: str) -> int:
+    async def scan_recent_channel_window(entity: Any, chat_id: Any, user_label: str, *, force: bool = True) -> int:
+        """Re-read the newest messages of a channel to catch edited-in results.
+
+        ``force`` is the active-channel case (something was posted this sweep).
+        Idle channels run this on their own slower cadence — it costs one extra
+        request per channel per sweep, which is what made full sweeps crawl.
+        """
         if ws.EDIT_SCAN_RECENT_MESSAGES <= 0:
             return 0
+        sweep_key = (session_name, chat_id)
+        if not force and not edit_sweep_due(_edit_sweep_last_run.get(sweep_key), time.monotonic()):
+            return 0
+        _edit_sweep_last_run[sweep_key] = time.monotonic()
         recent_found = 0
         scanned_messages = 0
         try:
@@ -166,6 +187,16 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
             if sweep_start_id is not None:
                 scan_status["fast_channels"] = int(scan_status.get("fast_channels") or 0) + 1
                 scan_status["current_username"] = "all"
+                if not channel_has_new_messages(latest_message_id, sweep_start_id):
+                    # The dialog list already said this channel is idle — spend
+                    # no request on it. Its edit pass still runs on its cadence.
+                    scan_status["idle_channels"] = int(scan_status.get("idle_channels") or 0) + 1
+                    await mark_processed_units(len(state.ping_usernames))
+                    recent_found = await scan_recent_channel_window(entity, chat_id, user_label, force=False)
+                    if recent_found:
+                        found += recent_found
+                        scan_status["found"] += recent_found
+                    continue
                 new_last_id = max(int(sweep_start_id or 0), latest_message_id)
                 try:
                     async for message in iter_messages_resilient(client, entity, min_id=sweep_start_id, limit=iter_limit, logger=logger):
@@ -212,6 +243,13 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                     break
                 checkpoint_key = channel_checkpoint_key(username, chat_id)
                 last_id = checkpoint_by_username.get(username, 0)
+                if not channel_has_new_messages(latest_message_id, last_id):
+                    # This username is already checkpointed past the channel's
+                    # newest message — the search would return nothing. A single
+                    # unchecked username drops the whole channel into this path,
+                    # so skipping the settled ones is most of the cost.
+                    await mark_processed_units()
+                    continue
                 scan_status["targeted_channels"] = int(scan_status.get("targeted_channels") or 0) + 1
                 scan_status["current_username"] = username
                 new_last_id = max(int(last_id or 0), latest_message_id)
@@ -255,6 +293,11 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
             if recent_found:
                 found += recent_found
                 scan_status["found"] += recent_found
+        if not state.scan_cancel_event.is_set():
+            # Reading messages cannot see a mini-app result card (Telethon gets
+            # empty text); Telegram's global search index can. One query per
+            # tracked username closes that blind spot for the whole account.
+            found += await scan_global_mentions(client, account_label=user_label, session_name=session_name)
         logger.info("Channel scan finished for %s, found %s", user_label, found)
     except Exception as exc:
         if is_auth_key_duplicated(exc):
@@ -291,8 +334,11 @@ async def full_history_scan() -> None:
             "processed_usernames": 0,
             "found": 0,
             "fast_channels": 0,
+            "idle_channels": 0,
             "targeted_channels": 0,
             "edit_sweep_messages": 0,
+            "global_search_cards": 0,
+            "global_search_found": 0,
             "scan_strategy": "adaptive-fast-channel-sweep",
             "history_limit": ws.SCAN_HISTORY_LIMIT,
             "last_error": None,
@@ -459,8 +505,11 @@ async def backfill_name_mention_scan(per_channel_limit: int = 1000) -> None:
             "processed_usernames": 0,
             "found": 0,
             "fast_channels": 0,
+            "idle_channels": 0,
             "targeted_channels": 0,
             "edit_sweep_messages": 0,
+            "global_search_cards": 0,
+            "global_search_found": 0,
             "scan_strategy": "name-mention-backfill",
             "history_limit": per_channel_limit,
             "last_error": None,

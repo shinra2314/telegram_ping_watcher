@@ -21,7 +21,15 @@ async def get_setting(key: str, default: Any = None) -> Any:
                 return default
 
 
-async def set_setting(key: str, value: Any) -> None:
+async def set_setting(key: str, value: Any, *, audit: bool = True) -> None:
+    """Write a settings key, recording the change in ``settings_history``.
+
+    ``audit=False`` is for keys that carry pure runtime bookkeeping — a
+    last-run timestamp, a file hash — where every write differs from the last
+    and the history is noise. Auditing one such key (``obsidian_sync``, written
+    every 30 s) had grown ``settings_history`` to 141 666 rows and 111 MB, 82 %
+    of the whole database.
+    """
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         existing = await (await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))).fetchone()
@@ -35,7 +43,7 @@ async def set_setting(key: str, value: Any) -> None:
             """,
             (key, new_value, _now_iso()),
         )
-        if old_value != new_value:
+        if audit and old_value != new_value:
             await db.execute(
                 "INSERT INTO settings_history (key, old_value, new_value, changed_at) VALUES (?, ?, ?, ?)",
                 (key, old_value, new_value, _now_iso()),

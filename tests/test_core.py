@@ -19,7 +19,6 @@ from telegram_ping_watcher import (
     message_looks_like_broadcast_channel,
     normalize_usernames,
 )
-from pulse_desk.deadlines import parse_claim_deadline, parse_deadline, parse_participation_deadline
 from pulse_desk.dashboard import build_dashboard_summary
 from pulse_desk.giveaways import (
     RequiredChannel,
@@ -77,7 +76,6 @@ class CoreParsingTests(unittest.TestCase):
                 "accounts_online": 1,
                 "accounts_total": 2,
                 "tracked_usernames": ["Alpha", "Beta"],
-                "auto_join_giveaways": False,
                 "scan": {
                     "running": True,
                     "processed_usernames": 3,
@@ -99,10 +97,10 @@ class CoreParsingTests(unittest.TestCase):
                 "channel_memberships_total": 9,
                 "channel_chats_total": 7,
             },
-            tasks={"overdue": [{}], "today": [{}], "tomorrow": [], "no_deadline": [], "all_open": [{}, {}]},
+            tasks={"claim_prize": [{}], "waiting_result": [{}], "all_open": [{}, {}]},
             giveaway_board={
-                "stats": {"overdue": 1, "claim_prize": 2, "no_deadline": 1},
-                "bucket_counts": {"need_action": 2, "waiting_result": 4, "no_deadline": 1, "suspicious": 1},
+                "stats": {"claim_prize": 2},
+                "bucket_counts": {"need_action": 2, "waiting_result": 4, "suspicious": 1},
             },
             problem_events=[{"message": "scan warning"}],
         )
@@ -120,12 +118,11 @@ class CoreParsingTests(unittest.TestCase):
                 "accounts_online": 1,
                 "accounts_total": 1,
                 "tracked_usernames": ["Alpha"],
-                "auto_join_giveaways": False,
                 "scan": {"running": False},
                 "last_scan": {"status": "finished"},
             },
             analytics={"total_pings": 4, "new_pings": 0, "important": 0, "resolved": 4, "favorites": 0, "total_channels": 1},
-            tasks={"overdue": [], "today": [], "tomorrow": [], "no_deadline": [], "all_open": []},
+            tasks={"claim_prize": [], "waiting_result": [], "all_open": []},
             giveaway_board={"stats": {}, "bucket_counts": {}},
         )
         self.assertEqual(summary["health_level"], "good")
@@ -215,6 +212,47 @@ class CoreParsingTests(unittest.TestCase):
             ["@sakmangg69"],
         )
 
+    def test_extract_mentions_from_profile_link_in_text(self):
+        regex = build_ping_regex(["Sanrayder"])
+        text = "🏆 Победитель: http://t.me/Sanrayder — забирай приз"
+        message = SimpleNamespace(raw_text=text, entities=None)
+        self.assertEqual(extract_mentions(message, regex, ["Sanrayder"]), ["@Sanrayder"])
+
+        for variant in ("t.me/Sanrayder", "https://t.me/@Sanrayder", "https://www.telegram.me/Sanrayder"):
+            message = SimpleNamespace(raw_text=f"итоги {variant}", entities=None)
+            self.assertEqual(extract_mentions(message, regex, ["Sanrayder"]), ["@Sanrayder"], variant)
+
+        message = SimpleNamespace(raw_text="t.me/Sanrayderbot", entities=None)
+        self.assertEqual(extract_mentions(message, regex, ["Sanrayder"]), [])
+
+    def test_extract_mentions_from_hidden_hyperlink(self):
+        from telethon import types as tg_types
+
+        text = "Победитель: Саня"
+        offset = text.index("Саня")
+        message = SimpleNamespace(
+            raw_text=text,
+            entities=[tg_types.MessageEntityTextUrl(offset=offset, length=4, url="https://t.me/Sanrayder")],
+        )
+        regex = build_ping_regex(["Sanrayder"])
+        self.assertEqual(extract_mentions(message, regex, ["Sanrayder"]), ["@Sanrayder"])
+
+    def test_extract_mentions_from_hidden_user_id_link(self):
+        from telethon import types as tg_types
+
+        text = "Победитель: Саня"
+        offset = text.index("Саня")
+        message = SimpleNamespace(
+            raw_text=text,
+            entities=[tg_types.MessageEntityTextUrl(offset=offset, length=4, url="tg://user?id=777")],
+        )
+        regex = build_ping_regex(["Sanrayder"])
+        self.assertEqual(extract_mentions(message, regex, ["Sanrayder"]), [])
+        self.assertEqual(
+            extract_mentions(message, regex, ["Sanrayder"], {777: "Sanrayder"}),
+            ["@Sanrayder"],
+        )
+
     def test_build_ping_regex_matches_exact_username(self):
         regex = build_ping_regex(["Alpha"])
         self.assertIsNotNone(regex.search("hello @Alpha"))
@@ -269,67 +307,6 @@ class CoreParsingTests(unittest.TestCase):
     def test_local_iso_datetime(self):
         value = datetime(2026, 5, 7, 12, 30, tzinfo=timezone.utc)
         self.assertIn("2026-05-07T", local_iso_datetime(value))
-
-    def test_parse_numeric_deadline_without_year(self):
-        match = parse_deadline("Итоги до 11.05 в 18:00", now=datetime(2026, 5, 1, 10, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T18:00:00")
-
-    def test_parse_text_month_deadline_default_time(self):
-        match = parse_deadline("дедлайн 11 мая", now=datetime(2026, 5, 1, 10, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T23:59:00")
-
-    def test_parse_iso_deadline(self):
-        match = parse_deadline("deadline 2026-05-11 09:30", now=datetime(2026, 5, 1, 10, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T09:30:00")
-
-    def test_parse_relative_deadline_minutes(self):
-        match = parse_deadline("Итоги: Через 120 минут", now=datetime(2026, 5, 10, 20, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-10T22:00:00")
-
-    def test_parse_deadline_tomorrow_with_time(self):
-        match = parse_deadline("Итоги завтра в 18:30", now=datetime(2026, 5, 10, 20, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T18:30:00")
-
-    def test_parse_deadline_time_only_marker_rolls_forward(self):
-        match = parse_deadline("До 20:00 принимаем условия", now=datetime(2026, 5, 10, 21, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T20:00:00")
-
-    def test_parse_relative_deadline_short_hour(self):
-        match = parse_deadline("Розыгрыш, итоги через час", now=datetime(2026, 5, 10, 20, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-10T21:00:00")
-
-    def test_parse_claim_window_after_result_marker(self):
-        match = parse_claim_deadline(
-            "🎉 Результаты розыгрыша:\nПобедители, у вас есть сутки, чтобы получить приз",
-            now=datetime(2026, 5, 10, 20, 0),
-        )
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T20:00:00")
-
-    def test_parse_claim_window_hours(self):
-        match = parse_claim_deadline("Отпишите в течение 24 часов для получения приза", now=datetime(2026, 5, 10, 20, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-11T20:00:00")
-
-    def test_claim_deadline_ignores_original_results_time(self):
-        text = "Итоги завтра 21:00\nПобедители: @Alpha"
-        self.assertIsNone(parse_claim_deadline(text, now=datetime(2026, 5, 10, 20, 0)))
-        self.assertEqual(parse_participation_deadline(text, now=datetime(2026, 5, 10, 20, 0)).deadline_at.isoformat(), "2026-05-11T21:00:00")
-
-    def test_claim_deadline_reads_otpiska_window(self):
-        match = parse_claim_deadline("Победители: @Alpha\nНа отписку 30 минут", now=datetime(2026, 5, 10, 20, 0))
-        self.assertIsNotNone(match)
-        self.assertEqual(match.deadline_at.isoformat(), "2026-05-10T20:30:00")
-
-    def test_parse_deadline_absent(self):
-        self.assertIsNone(parse_deadline("тут нет даты", now=datetime(2026, 5, 1, 10, 0)))
 
     def test_ping_tags_default_is_empty_list(self):
         import json
@@ -428,13 +405,6 @@ class CoreParsingTests(unittest.TestCase):
         self.assertIn("Побед: 1", result)
         self.assertIn("Всего: 2", result)
 
-    def test_push_module_imports(self):
-        from pulse_desk.push import generate_vapid_keys
-        keys = generate_vapid_keys()
-        self.assertIn("private_key", keys)
-        self.assertIn("public_key", keys)
-        self.assertTrue(len(keys["public_key"]) > 20)
-
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -490,7 +460,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
 
         await database.delete_ping(1, 3)
         await database.delete_ping(1, 4)
-        await database.delete_ping_by_message_id(5)
+        await database.delete_ping(1, 5)
 
         self.assertIsNone(await database.get_ping_by_message_ref(1, 3))
         giveaway = await database.get_ping_by_message_ref(1, 4)
@@ -505,6 +475,43 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await database.delete_ping(1, 4)
         again = await database.get_ping_by_message_ref(1, 4)
         self.assertEqual(again["deleted_at"], first_deleted_at)
+
+    async def test_delete_ping_by_message_id_never_touches_channels(self):
+        """A chat-less MessageDeleted event can only come from a private chat or
+        a basic group, so identically numbered channel posts must survive."""
+        base = {
+            "date": "2026-05-07T10:00:00",
+            "sender": "Alice",
+            "sender_id": 2,
+            "mentions": ["@Alpha"],
+            "detected_at": "2026-05-07T10:01:00",
+            "is_giveaway": False,
+            "is_win": False,
+        }
+        await database.save_ping({
+            **base, "chat": "Channel", "chat_id": 1, "message_id": 7,
+            "link": "https://t.me/test/7", "text": "channel win @Alpha",
+            "chat_type": "channel", "is_win": True,
+        })
+        await database.save_ping({
+            **base, "chat": "Channel", "chat_id": 1, "message_id": 8,
+            "link": "https://t.me/test/8", "text": "channel mention @Alpha",
+            "chat_type": "channel",
+        })
+        await database.save_ping({
+            **base, "chat": "DM", "chat_id": 9, "message_id": 7,
+            "link": "https://t.me/c/9/7", "text": "dm mention @Alpha",
+            "chat_type": "private",
+        })
+
+        await database.delete_ping_by_message_id(7)
+        await database.delete_ping_by_message_id(8)
+
+        channel_win = await database.get_ping_by_message_ref(1, 7)
+        self.assertIsNotNone(channel_win)
+        self.assertIsNone(channel_win["deleted_at"])          # not flagged as removed
+        self.assertIsNotNone(await database.get_ping_by_message_ref(1, 8))  # not dropped
+        self.assertIsNone(await database.get_ping_by_message_ref(9, 7))     # the real target went
 
     async def test_save_ping_updates_duplicate_message_text_and_mentions(self):
         base_record = {
@@ -696,6 +703,136 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(ping_id, [row["id"] for row in board["buckets"]["done"]])
         self.assertEqual(board["stats"]["missed_reply"], 1)
 
+    async def test_won_prize_stays_on_the_board_despite_manual_requirements(self):
+        """Captcha/comment rules gate *joining* a giveaway. Once it is won the
+        prize is owed, so the analysis must not hide it from every bucket."""
+        ping_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Captcha Channel",
+            "chat_id": 21,
+            "sender": "Channel",
+            "sender_id": 21,
+            "message_id": 210,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/prize/210",
+            "text": "Победитель @Alpha",
+            "chat_type": "channel",
+            "detected_at": "2026-05-07T10:01:00",
+            "is_win": True,
+            "action_status": "claim_prize",
+        })
+        await database.upsert_giveaway_candidate({
+            "ping_id": int(ping_id),
+            "status": "manual_required",
+            "score": 10,
+            "reasons": ["captcha"],
+            "required_channels": [],
+            "join_buttons": [],
+            "external_requirements": ["captcha_or_verification"],
+            "blocked_reason": "Manual-only requirement: captcha_or_verification",
+            "estimated_value": None,
+        })
+
+        board = await database.get_giveaway_board(limit=50)
+        buckets = board["buckets"]
+        self.assertIn(ping_id, [row["id"] for row in buckets["need_action"]])
+        row = next(r for r in buckets["need_action"] if r["id"] == ping_id)
+        self.assertEqual(row["workflow_stage"], "claim")
+        self.assertEqual(row["workflow_hint"], "claim_prize")
+        # and it is not double-listed as a suspicious candidate
+        self.assertNotIn(ping_id, [r["id"] for r in buckets["suspicious"]])
+
+    async def test_giveaway_board_totals_are_not_capped_by_limit(self):
+        """`bucket_counts` follows the page limit; `bucket_totals` must not —
+        the bot header would otherwise report 3 open prizes when there are 7."""
+        for index in range(7):
+            await database.save_ping({
+                "date": "2026-05-07T10:00:00",
+                "chat": "Prize Channel",
+                "chat_id": 20,
+                "sender": "Channel",
+                "sender_id": 20,
+                "message_id": 200 + index,
+                "mentions": ["@Alpha"],
+                "link": f"https://t.me/prize/{200 + index}",
+                "text": f"Победитель @Alpha #{index}",
+                "chat_type": "channel",
+                "detected_at": "2026-05-07T10:01:00",
+                "is_win": True,
+                "action_status": "claim_prize",
+            })
+
+        board = await database.get_giveaway_board(limit=3)
+        self.assertEqual(len(board["buckets"]["need_action"]), 3)
+        self.assertEqual(board["bucket_counts"]["need_action"], 3)
+        self.assertEqual(board["bucket_totals"]["need_action"], 7)
+
+        full = await database.get_giveaway_board(limit=50)
+        self.assertEqual(full["bucket_totals"]["need_action"], 7)
+        self.assertEqual(full["bucket_counts"]["need_action"], 7)
+
+    async def test_giveaway_board_sorts_by_message_date_on_request(self):
+        """Same bucket rank, opposite orders: the scan found the older post last."""
+        old_post = await database.save_ping({
+            "date": "2026-05-01T09:00:00",       # published first…
+            "chat": "Prize Channel", "chat_id": 30, "sender": "Channel", "sender_id": 30,
+            "message_id": 301, "mentions": ["@Alpha"], "link": "https://t.me/prize/301",
+            "text": "Победитель @Alpha (старый пост)", "chat_type": "channel",
+            "detected_at": "2026-05-09T10:00:00",  # …but noticed last
+            "is_win": True, "action_status": "claim_prize",
+        })
+        new_post = await database.save_ping({
+            "date": "2026-05-08T09:00:00",
+            "chat": "Prize Channel", "chat_id": 30, "sender": "Channel", "sender_id": 30,
+            "message_id": 302, "mentions": ["@Alpha"], "link": "https://t.me/prize/302",
+            "text": "Победитель @Alpha (свежий пост)", "chat_type": "channel",
+            "detected_at": "2026-05-08T10:00:00",
+            "is_win": True, "action_status": "claim_prize",
+        })
+
+        by_detected = await database.get_giveaway_board(limit=20)
+        self.assertEqual(by_detected["sort"], "detected")
+        self.assertEqual([r["id"] for r in by_detected["buckets"]["need_action"]][:2], [old_post, new_post])
+
+        by_posted = await database.get_giveaway_board(limit=20, sort="posted")
+        self.assertEqual(by_posted["sort"], "posted")
+        self.assertEqual([r["id"] for r in by_posted["buckets"]["need_action"]][:2], [new_post, old_post])
+
+    async def test_unknown_sort_falls_back_to_detected(self):
+        board = await database.get_giveaway_board(limit=5, sort="nonsense")
+        self.assertEqual(board["sort"], "detected")
+
+    async def test_giveaway_account_counts_split_wins_from_giveaways(self):
+        await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Prize Channel", "chat_id": 31, "sender": "Channel", "sender_id": 31,
+            "message_id": 311, "mentions": ["@Alpha"], "link": "https://t.me/prize/311",
+            "text": "Победитель @Alpha", "chat_type": "channel",
+            "detected_at": "2026-05-07T10:01:00", "is_win": True, "action_status": "claim_prize",
+        })
+        await database.save_ping({
+            "date": "2026-05-07T11:00:00",
+            "chat": "Prize Channel", "chat_id": 31, "sender": "Channel", "sender_id": 31,
+            "message_id": 312, "mentions": ["@Alpha", "@Beta"], "link": "https://t.me/prize/312",
+            "text": "Конкурс для @Alpha и @Beta", "chat_type": "channel",
+            "detected_at": "2026-05-07T11:01:00", "is_giveaway": True,
+        })
+        closed = await database.save_ping({
+            "date": "2026-05-07T12:00:00",
+            "chat": "Prize Channel", "chat_id": 31, "sender": "Channel", "sender_id": 31,
+            "message_id": 313, "mentions": ["@Beta"], "link": "https://t.me/prize/313",
+            "text": "Победитель @Beta", "chat_type": "channel",
+            "detected_at": "2026-05-07T12:01:00", "is_win": True,
+        })
+        await database.update_ping_meta(int(closed), giveaway_status="claimed")
+
+        counts = await database.giveaway_account_counts()
+        self.assertEqual(counts["alpha"], {"wins": 1, "giveaways": 1, "total": 2})
+        self.assertEqual(counts["beta"], {"wins": 0, "giveaways": 1, "total": 1})  # claimed one dropped
+
+        everything = await database.giveaway_account_counts(open_only=False)
+        self.assertEqual(everything["beta"]["wins"], 1)
+
     async def test_debt_board_groups_pending_prizes_by_tracked_username(self):
         alpha_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",
@@ -745,15 +882,33 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "action_status": "claim_prize",
         })
 
+        group_id = await database.save_ping({
+            "date": "2026-05-07T10:00:00",
+            "chat": "Giveaway Chat",
+            "chat_id": 16,
+            "sender": "Random Bot",
+            "sender_id": 160,
+            "message_id": 94,
+            "mentions": ["@Alpha"],
+            "link": "https://t.me/chat/94",
+            "text": "Результаты розыгрыша. Победители: @Alpha",
+            "chat_type": "group",
+            "is_win": True,
+            "priority_score": 50,
+            "action_status": "claim_prize",
+        })
+
         board = await database.get_debt_board(["Alpha", "Beta"])
-        self.assertEqual(board["stats"]["total"], 1)
+        board_ids = [row["id"] for row in board["rows"]]
+        self.assertEqual(board["stats"]["total"], 2)
         self.assertEqual(board["stats"]["critical"], 1)
         self.assertEqual(board["rows"][0]["id"], alpha_id)
-        self.assertNotIn(private_id, [row["id"] for row in board["rows"]])
+        self.assertIn(group_id, board_ids)        # group results count as wins
+        self.assertNotIn(private_id, board_ids)   # forwarded copies in DMs do not
         self.assertEqual(board["rows"][0]["giveaway_status"], "pending")
         alpha_profile = next(profile for profile in board["profiles"] if profile["username"] == "Alpha")
         beta_profile = next(profile for profile in board["profiles"] if profile["username"] == "Beta")
-        self.assertEqual([row["id"] for row in alpha_profile["rows"]], [alpha_id])
+        self.assertEqual([row["id"] for row in alpha_profile["rows"]], [alpha_id, group_id])
         self.assertEqual(beta_profile["rows"], [])
 
     async def test_market_history_uses_fetched_at_iso(self):
@@ -794,10 +949,10 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest["processed_usernames"], 3)
         self.assertEqual(latest["found"], 4)
 
-    async def test_deadline_fields_and_tasks_roundtrip(self):
+    async def test_giveaway_ping_lands_in_task_overview(self):
         ping_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",
-            "chat": "Deadline Channel",
+            "chat": "Giveaway Channel",
             "chat_id": 100,
             "sender": "Channel",
             "sender_id": 100,
@@ -809,21 +964,18 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "detected_at": "2026-05-07T10:01:00",
             "is_giveaway": True,
             "is_win": False,
-            "deadline_at": "2026-05-11T18:00:00",
-            "deadline_source": "channel_description",
-            "deadline_text": "Итоги до 11.05 в 18:00",
             "action_status": "waiting_result",
         })
-        await database.replace_ping_reminders(int(ping_id), "2026-05-11T18:00:00", "2026-05-10T18:00:00")
-        rows = await database.get_pings(has_deadline=True, action_status="waiting_result")
-        self.assertEqual(rows[0]["deadline_source"], "channel_description")
+        rows = await database.get_pings(chat_type="giveaway", action_status="waiting_result")
+        self.assertTrue(any(row["id"] == ping_id for row in rows))
         tasks = await database.get_task_overview()
         self.assertTrue(any(row["id"] == ping_id for row in tasks["all_open"]))
+        self.assertTrue(any(row["id"] == ping_id for row in tasks["waiting_result"]))
 
     async def test_channel_profile_and_source_scores(self):
-        await database.upsert_channel_profile(200, "Source Channel", "source", "Итоги 11 мая", "2026-05-11T23:59:00", "Итоги 11 мая")
+        await database.upsert_channel_profile(200, "Source Channel", "source", "Итоги 11 мая")
         profile = await database.get_channel_profile(200)
-        self.assertEqual(profile["deadline_at"], "2026-05-11T23:59:00")
+        self.assertEqual(profile["description"], "Итоги 11 мая")
         await database.save_ping({
             "date": "2026-05-07T10:00:00",
             "chat": "Source Channel",
@@ -845,31 +997,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         sources = await database.get_source_scores()
         self.assertEqual(sources[0]["chat_id"], 200)
 
-    async def test_backfill_channel_post_text_deadline_uses_message_date(self):
-        ping_id = await database.save_ping({
-            "date": "2026-05-10T12:00:00",
-            "chat": "Channel With Post Deadline",
-            "chat_id": 300,
-            "sender": "Channel",
-            "sender_id": 300,
-            "message_id": 301,
-            "mentions": ["@Alpha"],
-            "link": "https://t.me/test/301",
-            "text": "Розыгрыш\nИтоги: 10.05 в 21:00 по МСК",
-            "chat_type": "channel",
-            "detected_at": "2026-05-11T10:01:00",
-            "is_giveaway": True,
-            "is_win": False,
-            "action_status": "waiting_result",
-        })
-        changed = await database.backfill_deadlines_from_text()
-        self.assertGreaterEqual(changed, 1)
-        rows = await database.get_pings(has_deadline=True, chat_type="giveaway")
-        row = next(item for item in rows if item["id"] == ping_id)
-        self.assertEqual(row["deadline_at"], "2026-05-10T21:00:00")
-        self.assertEqual(row["deadline_source"], "channel_post_text")
-
-    async def test_backfill_result_claim_window_uses_message_date(self):
+    async def test_result_post_becomes_a_claimable_win(self):
         ping_id = await database.save_ping({
             "date": "2026-05-10T12:00:00",
             "chat": "Result Channel",
@@ -887,13 +1015,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "action_status": "waiting_result",
         })
         await database.reconcile_giveaway_outcomes()
-        changed = await database.backfill_deadlines_from_text()
-        self.assertGreaterEqual(changed, 1)
         row = await database.get_ping_by_id(ping_id)
         self.assertEqual(row["is_win"], 1)
         self.assertEqual(row["action_status"], "claim_prize")
-        self.assertEqual(row["deadline_at"], "2026-05-11T12:00:00")
-        self.assertEqual(row["deadline_source"], "claim_window_text")
 
     async def test_reconcile_giveaways_requires_channel_and_keyword(self):
         stale_channel = await database.save_ping({
@@ -910,9 +1034,6 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "detected_at": "2026-05-07T10:01:00",
             "is_giveaway": True,
             "is_win": False,
-            "deadline_at": "2026-05-11T18:00:00",
-            "deadline_source": "channel_post_text",
-            "deadline_text": "11.05",
         })
         valid_channel = await database.save_ping({
             "date": "2026-05-07T10:00:00",
@@ -951,7 +1072,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["id"] for row in rows], [valid_channel])
         stale = await database.get_ping_by_id(stale_channel)
         private = await database.get_ping_by_id(private_keyword)
-        self.assertEqual(stale["deadline_at"], None)
+        self.assertEqual(stale["is_giveaway"], 0)
         self.assertEqual(private["is_giveaway"], 0)
 
     async def test_reconcile_win_flags_requires_mentions(self):
@@ -969,7 +1090,6 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "detected_at": "2026-07-04T16:37:32",
             "is_giveaway": False,
             "is_win": False,
-            "is_check": True,
         })
         mentioned = await database.save_ping({
             "date": "2026-07-04T16:38:00",
@@ -1046,9 +1166,6 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "is_win": False,
             "giveaway_status": "pending",
             "action_status": "waiting_result",
-            "deadline_at": "2026-07-06T18:00:00",
-            "deadline_source": "channel_post_text",
-            "deadline_text": "итоги завтра",
         })
         mentioned = await database.save_ping({
             "date": "2026-07-04T16:39:00",
@@ -1072,7 +1189,6 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         healed = await database.get_ping_by_id(stale_giveaway)
         self.assertEqual(healed["is_giveaway"], 0)
         self.assertEqual(healed["giveaway_status"], "")
-        self.assertEqual(healed["deadline_at"], None)
         flagged = await database.get_ping_by_id(mentioned)
         self.assertEqual(flagged["is_giveaway"], 1)
         self.assertEqual(flagged["giveaway_status"], "pending")
@@ -1099,49 +1215,6 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         row = await database.get_ping_by_id(foreign)
         self.assertEqual(row["is_win"], 0)
         self.assertEqual(row["action_status"], "waiting_result")
-
-    async def test_update_channel_deadlines_does_not_overwrite_existing_deadline(self):
-        existing_id = await database.save_ping({
-            "date": "2026-05-07T10:00:00",
-            "chat": "Deadline Channel",
-            "chat_id": 305,
-            "sender": "Channel",
-            "sender_id": 305,
-            "message_id": 305,
-            "mentions": ["@Alpha"],
-            "link": "https://t.me/test/305",
-            "text": "Конкурс, итоги 11.05",
-            "chat_type": "channel",
-            "detected_at": "2026-05-07T10:01:00",
-            "is_giveaway": True,
-            "is_win": False,
-            "deadline_at": "2026-05-11T23:59:00",
-            "deadline_source": "channel_post_text",
-            "deadline_text": "итоги 11.05",
-        })
-        missing_id = await database.save_ping({
-            "date": "2026-05-07T10:00:00",
-            "chat": "Deadline Channel",
-            "chat_id": 305,
-            "sender": "Channel",
-            "sender_id": 305,
-            "message_id": 306,
-            "mentions": ["@Alpha"],
-            "link": "https://t.me/test/306",
-            "text": "Конкурс без даты",
-            "chat_type": "channel",
-            "detected_at": "2026-05-07T10:01:00",
-            "is_giveaway": True,
-            "is_win": False,
-        })
-        changed = await database.update_channel_deadlines(305, "2026-05-12T18:00:00", "описание 12.05")
-        self.assertEqual(changed, 1)
-        existing = await database.get_ping_by_id(existing_id)
-        missing = await database.get_ping_by_id(missing_id)
-        self.assertEqual(existing["deadline_at"], "2026-05-11T23:59:00")
-        self.assertEqual(existing["deadline_source"], "channel_post_text")
-        self.assertEqual(missing["deadline_at"], "2026-05-12T18:00:00")
-        self.assertEqual(missing["deadline_source"], "channel_description")
 
     async def test_giveaway_candidate_and_action_roundtrip(self):
         ping_id = await database.save_ping({
@@ -1262,12 +1335,11 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "detected_at": "2026-05-07T10:01:00",
             "is_giveaway": True,
             "is_win": False,
-            "deadline_at": "2026-05-11T18:00:00",
             "action_status": "waiting_result",
         })
-        no_deadline_id = await database.save_ping({
+        need_action_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",
-            "chat": "No Deadline Channel",
+            "chat": "Need Action Channel",
             "chat_id": 421,
             "sender": "Channel",
             "sender_id": 421,
@@ -1309,7 +1381,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         })
         board = await database.get_giveaway_board(limit=20)
         self.assertIn(waiting_id, [row["id"] for row in board["buckets"]["waiting_result"]])
-        self.assertIn(no_deadline_id, [row["id"] for row in board["buckets"]["no_deadline"]])
+        self.assertIn(need_action_id, [row["id"] for row in board["buckets"]["need_action"]])
         self.assertIn(suspicious_id, [row["id"] for row in board["buckets"]["suspicious"]])
         self.assertGreaterEqual(board["stats"]["total"], 3)
 
@@ -1354,6 +1426,40 @@ class BotAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await database.list_bot_members()), 1)
         keys = await database.list_bot_keys()
         self.assertEqual(keys[0]["member_count"], 1)
+
+    async def test_key_edits_after_creation(self):
+        key = await database.create_bot_key("draft", "edit-secret-123456", "viewer", None)
+        await database.set_bot_key_label(key["id"], "  друзья  ")
+        await database.set_bot_key_role(key["id"], "premium")
+        await database.set_bot_key_expiry(key["id"], "2999-01-01T00:00:00")
+        updated = await database.get_bot_key(key["id"])
+        self.assertEqual(updated["label"], "друзья")
+        self.assertEqual(updated["role"], "premium")
+        self.assertEqual(updated["expires_at"], "2999-01-01T00:00:00")
+        self.assertIsNotNone(await database.get_bot_key_by_secret("edit-secret-123456"))
+
+        # Clearing the expiry makes the key permanent again.
+        await database.set_bot_key_expiry(key["id"], None)
+        self.assertIsNone((await database.get_bot_key(key["id"]))["expires_at"])
+
+    async def test_revoke_can_be_undone(self):
+        key = await database.create_bot_key("back", "undo-secret-123456", "viewer", None)
+        await database.set_bot_key_revoked(key["id"], True)
+        self.assertIsNone(await database.get_bot_key_by_secret("undo-secret-123456"))
+        self.assertEqual(await database.list_bot_keys(), [])
+        self.assertEqual(len(await database.list_bot_keys(include_revoked=True)), 1)
+
+        await database.set_bot_key_revoked(key["id"], False)
+        self.assertIsNotNone(await database.get_bot_key_by_secret("undo-secret-123456"))
+
+    async def test_list_key_members_only_returns_that_keys_holders(self):
+        mine = await database.create_bot_key("mine", "mine-secret-123456", "viewer", None)
+        other = await database.create_bot_key("other", "othr-secret-123456", "viewer", None)
+        await database.upsert_bot_member(11, "a", "A", mine["id"], "viewer")
+        await database.upsert_bot_member(22, "b", "B", other["id"], "viewer")
+
+        holders = await database.list_bot_key_members(mine["id"])
+        self.assertEqual([m["tg_id"] for m in holders], [11])
 
     async def test_delete_key_removes_it_but_keeps_the_member(self):
         key = await database.create_bot_key("gone", "del-secret-1234567", "viewer", None, '{"features": ["stats"]}')

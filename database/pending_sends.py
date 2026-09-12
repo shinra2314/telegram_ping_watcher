@@ -99,6 +99,21 @@ async def count_pending_sends(token: str) -> int:
     return int(row[0]) if row else 0
 
 
+async def pending_sends_backlog() -> int:
+    """Queued member copies not yet delivered — the outbox depth for /api/health.
+
+    A rising number means ``pending_send_loop`` is wedged or the bot cannot
+    send; nothing surfaced that before, so a stuck outbox was invisible.
+    """
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT COUNT(*) FROM bot_pending_sends WHERE sent_at IS NULL AND cancelled_at IS NULL"
+            )
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 async def prune_pending_sends(days: int = 7) -> int:
     cutoff = (datetime.now() - timedelta(days=days)).replace(microsecond=0).isoformat()
     async with _connect() as db:

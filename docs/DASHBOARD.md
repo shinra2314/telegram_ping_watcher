@@ -3,7 +3,10 @@
 Pulse Desk is the **host shell** for your local stack. Instead of starting the
 Telegram side and the Discord side in separate windows, one auto-started Pulse
 Desk process brings everything up and gives a single control plane at
-`http://127.0.0.1:8000` → tab **Сервисы**.
+the Telegram bot: ⚙️ Управление → 🧩 **Сервисы**. (Until 2026-09-12 this was a web tab at
+`http://127.0.0.1:8000`; the web app is gone and the section moved into the bot verbatim —
+start/stop/restart, health probe, log tail. The service's own panel cannot be embedded in
+Telegram, so the bot prints its URL instead.)
 
 ```
 Boot/logon
@@ -20,8 +23,7 @@ What lives where:
 |---|---|
 | Process supervisor (spawn / restart / logs / health) | `src/pulse_desk/process_supervisor.py` |
 | Service manifest loader | `src/pulse_desk/service_registry.py` |
-| HTTP control endpoints (`/api/services/*`, admin-only) | `routers/launcher.py` |
-| Frontend tab | `static/js/app-services.js` + section in `static/index.html` |
+| Bot section (list, start/stop/restart, logs) | `src/pulse_desk/bot/sections/services.py` |
 | Boot script | `scripts/start_dashboard.ps1` |
 | Auto-start install/remove | `scripts/install_autostart.ps1` / `uninstall_autostart.ps1` |
 

@@ -47,7 +47,13 @@ from .access_windows import (
     set_member_timezone,
 )
 from .backups import backup_db_if_present, create_db_backup, list_db_backups
-from .boards import get_debt_board, get_giveaway_board, get_task_overview
+from .boards import (
+    get_debt_board,
+    get_giveaway_board,
+    get_task_overview,
+    giveaway_account_counts,
+    giveaway_bucket_total,
+)
 from .bot_access import (
     create_bot_key,
     delete_bot_key,
@@ -56,12 +62,17 @@ from .bot_access import (
     get_bot_key_by_secret,
     get_bot_member,
     get_broadcast_messages,
+    list_bot_key_members,
     list_bot_keys,
     list_bot_members,
     prune_broadcast_messages,
     revoke_bot_key,
     save_broadcast_messages,
+    set_bot_key_expiry,
+    set_bot_key_label,
     set_bot_key_permissions,
+    set_bot_key_revoked,
+    set_bot_key_role,
     set_bot_member_blocked,
     set_bot_member_prefs,
     touch_bot_member,
@@ -72,7 +83,6 @@ from .channels import (
     get_source_score,
     get_source_scores,
     recalculate_source_scores,
-    update_channel_deadlines,
     upsert_channel_profile,
 )
 from .checkpoints import (
@@ -109,7 +119,6 @@ from .maintenance import (
     cleanup_unbounded_tables,
     db_size_bytes,
     enforce_db_size_cap,
-    purge_stale_checks,
 )
 from .market import get_market_history, save_market_snapshot
 from .outbox import cleanup_outbox, enqueue_outbox_event, get_outbox_after, get_outbox_stats
@@ -131,7 +140,6 @@ from .pings import (
     save_ping,
     search_pings_fts,
     toggle_favorite,
-    update_ping_deadline,
     update_ping_meta,
 )
 from .pending_broadcasts import (
@@ -140,6 +148,7 @@ from .pending_broadcasts import (
     get_due_pending_broadcasts,
     get_pending_broadcast,
     prune_pending_broadcasts,
+    release_pending_broadcast,
     set_pending_broadcast_admin_message,
 )
 from .pending_sends import (
@@ -148,16 +157,11 @@ from .pending_sends import (
     count_pending_sends,
     get_due_pending_sends,
     mark_pending_send_result,
+    pending_sends_backlog,
     prune_pending_sends,
     queue_pending_send,
 )
 from .push import delete_push_subscription, get_push_subscriptions, save_push_subscription
-from .reminders import (
-    backfill_deadlines_from_text,
-    get_due_reminders,
-    mark_reminder_sent,
-    replace_ping_reminders,
-)
 from .scan_runs import (
     get_latest_scan_run,
     get_scan_run_health,

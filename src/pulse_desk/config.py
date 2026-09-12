@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     )
 
     base_dir: Path = BASE_DIR
-    static_dir: Path = BASE_DIR / "static"
     data_dir: Path = BASE_DIR / "data"
     session_dir: Path = BASE_DIR / "sessions"
     log_dir: Path = BASE_DIR / "logs"
@@ -52,11 +51,8 @@ class Settings(BaseSettings):
     )
     extra_usernames: str = Field(default="", alias="EXTRA_USERNAMES")
 
-    web_auth_token: str = Field(default="", alias="WEB_AUTH_TOKEN")
-    admin_token: str = Field(default="", alias="ADMIN_TOKEN")
-    viewer_token: str = Field(default="", alias="VIEWER_TOKEN")
-    public_share_mode: bool = Field(default=False, alias="PUBLIC_SHARE_MODE")
-    allow_query_token: bool = Field(default=False, alias="ALLOW_QUERY_TOKEN")
+    # Токенов доступа больше нет: веб-приложение удалено 2026-09-12, осталась
+    # только ручка /api/health на localhost. Права в боте решает bot_permissions.
 
     giveaway_action_account: str = Field(default="alga_kazakhst2n", alias="GIVEAWAY_ACTION_ACCOUNT")
     giveaway_review_mode: str = Field(default="manual", alias="GIVEAWAY_REVIEW_MODE")
@@ -100,6 +96,12 @@ class Settings(BaseSettings):
     obsidian_sync_write: bool = Field(default=False, alias="OBSIDIAN_SYNC_WRITE")
     obsidian_sync_poll_seconds: int = Field(default=30, alias="OBSIDIAN_SYNC_POLL_SECONDS")
 
+    # Книга «Учет розыгрышей»: из неё бот показывает парням их зарплату. Пустой
+    # путь выключает раздел целиком — ни кнопки, ни команды, ни фонового джоба.
+    # Бот только читает файл; отметка «выплачено» ставится в самом Excel.
+    salary_xlsx_path: str = Field(default="", alias="SALARY_XLSX_PATH")
+    salary_sync_poll_seconds: int = Field(default=60, alias="SALARY_SYNC_POLL_SECONDS")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     telethon_log_level: str = Field(default="WARNING", alias="TELETHON_LOG_LEVEL")
 
@@ -120,24 +122,6 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
 
-    # --- Telegram Mini App --------------------------------------------------
-    # The Mini App is served by a SECOND ASGI app on its own port, and only that
-    # port is published through the tunnel. A quick tunnel forwards a whole
-    # origin and cannot be narrowed to a path, so tunnelling the dashboard's
-    # port would put every /api/* route and the SSE stream on the internet.
-    miniapp_enabled: bool = Field(default=False, alias="MINIAPP_ENABLED")
-    miniapp_port: int = Field(default=8010, alias="MINIAPP_PORT")
-    # "tailscale", "ngrok" or "cloudflared". Tailscale Funnel is the default:
-    # its hostname is stable, it needs no domain purchase, and unlike ngrok it
-    # is not quarantined by Defender's PUA protection. A cloudflared quick
-    # tunnel needs no account but mints a new hostname per restart, and its
-    # control host is blocked on some networks.
-    tunnel_provider: str = Field(default="tailscale", alias="TUNNEL_PROVIDER")
-    tailscale_bin: str = Field(default="tailscale", alias="TAILSCALE_BIN")
-    cloudflared_bin: str = Field(default="cloudflared", alias="CLOUDFLARED_BIN")
-    ngrok_bin: str = Field(default="ngrok", alias="NGROK_BIN")
-    ngrok_domain: str = Field(default="", alias="NGROK_DOMAIN")
-
     @field_validator("telegram_api_id", "admin_id", mode="before")
     @classmethod
     def _empty_int_to_none(cls, value):
@@ -156,10 +140,6 @@ class Settings(BaseSettings):
     @property
     def bot_token(self) -> str:
         return self.telegram_bot_token
-
-    @property
-    def effective_admin_token(self) -> str:
-        return self.admin_token.strip() or self.web_auth_token.strip()
 
     @property
     def effective_log_dir(self) -> Path:

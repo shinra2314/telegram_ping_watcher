@@ -61,7 +61,6 @@ def _record(**overrides) -> dict:
         "text": "Розыгрыш! Условия простые.",
         "is_win": False,
         "is_giveaway": True,
-        "is_check": False,
     }
     base.update(overrides)
     return base

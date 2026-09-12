@@ -11,6 +11,7 @@ own membership lookup or schedule decision.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -40,6 +41,27 @@ def admin_chat_ids(admin_id: str, extra_chats: str) -> set[int]:
 def configured_admin_ids() -> set[int]:
     """`admin_chat_ids` fed from settings — the form callers normally want."""
     return admin_chat_ids(str(ADMIN_ID or ""), settings.bot_admin_chats or "")
+
+
+# How often `last_seen_at` is actually written back, per member.
+TOUCH_INTERVAL_SECONDS = 300.0
+# tg_id -> monotonic stamp of the last write.
+_touched: dict[int, float] = {}
+
+
+def _touch_due(sender_id: int, now: Optional[float] = None) -> bool:
+    """True when this member's `last_seen_at` is stale enough to rewrite."""
+    base = time.monotonic() if now is None else now
+    last = _touched.get(sender_id)
+    if last is not None and (base - last) < TOUCH_INTERVAL_SECONDS:
+        return False
+    _touched[sender_id] = base
+    return True
+
+
+def reset_touch_throttle() -> None:
+    """Forget the throttle state (tests)."""
+    _touched.clear()
 
 
 async def access_decision(sender_id: int, member: dict) -> tuple[bool, str, Optional[datetime]]:
@@ -91,7 +113,10 @@ async def resolve_member_access(
     member = await get_member(sender_id)
     if not member or member.get("blocked"):
         return None, full_permissions()
-    await touch(sender_id)
+    if _touch_due(sender_id):
+        # `last_seen_at` is display-only, but this was a write + commit on its
+        # own connection for every button press and every message.
+        await touch(sender_id)
     allowed, _reason, _until = await decide(sender_id, member)
     if not allowed:
         return None, full_permissions()

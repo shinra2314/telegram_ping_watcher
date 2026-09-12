@@ -4,9 +4,7 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 from telethon import Button
-from telethon.tl.types import KeyboardButtonWebView
 
-from ..app_ctx import state
 from ..bot_permissions import (
     ALL_FEATURES,
     ALL_NOTIFY,
@@ -20,10 +18,22 @@ from .views import (
     ALL_ACCOUNTS,
     ANALYTICS_TABS,
     EXPIRY_PRESETS,
+    FEED_TYPES,
     GIVEAWAY_SORTS,
+    FeedFilter,
     GiveawayFilter,
+    GIVEAWAY_STATUS_ORDER,
+    PING_STATUS_ORDER,
     account_label,
+    feed_filter_cb,
+    feed_filter_from_legacy,
+    feed_state_cb,
     format_expiry,
+    giveaway_status_label,
+    is_openable_link,
+    ping_action_cb,
+    ping_open_cb,
+    ping_status_label,
 )
 
 
@@ -39,27 +49,6 @@ def section_nav(refresh_cb: bytes) -> list[list[Button]]:
 def back_home() -> list[list[Button]]:
     """Footer for views with no refresh target (e.g. search results)."""
     return [[Button.inline("⬅️ Домой", b"menu_main")]]
-
-
-def webapp_row(label: str, path: str = "/app") -> list[Button]:
-    """A one-button row opening the Mini App, or an empty row when it is down.
-
-    The URL is read at send time rather than cached, because a quick tunnel
-    hands out a new hostname on every restart. With no tunnel the row is empty
-    and the caller's keyboard is simply one row shorter — the inline UI below it
-    stays fully usable, which is the whole point of the fallback.
-
-    Custom emoji and custom button shapes are impossible in a Telegram keyboard
-    (button text is a plain string with no entities), so this button is the only
-    way into a surface that has them.
-
-    Telethon 1.43 counts ``KeyboardButtonWebView`` among its inline button
-    types, so the raw TL object goes straight into ``buttons=``.
-    """
-    base = (state.public_url or "").rstrip("/")
-    if not base:
-        return []
-    return [KeyboardButtonWebView(text=label, url=f"{base}{path}")]
 
 
 # Converter shortcuts shown under the landing card, as (src, dst) pairs.
@@ -92,14 +81,6 @@ def conversion_keyboard(amount: float, src: str, dst: str) -> list[list[Button]]
     ]
 
 
-def market_keyboard() -> list[list[Button]]:
-    """Rates view footer — the converter is one tap from the prices."""
-    return [
-        [Button.inline("💱 Конвертер", b"cv")],
-        [Button.inline("⬅️ Домой", b"menu_main"), Button.inline("🔄 Обновить", b"menu_market")],
-    ]
-
-
 MON_FILTERS = [("all", "Все"), ("important", "Важные"), ("giveaway", "Розыгрыши"), ("win", "Победы")]
 
 
@@ -108,48 +89,200 @@ def _feed_cb(active: str, page: int) -> bytes:
     return (f"mon:feed:{active}" if page <= 1 else f"mon:feed:{active}:{page}").encode()
 
 
+def _as_feed_state(state, page: int) -> FeedFilter:
+    """Принять и новое состояние, и старую строку фильтра из кнопки в чате."""
+    if isinstance(state, FeedFilter):
+        return state
+    return feed_filter_from_legacy(str(state or "all"), page)
+
+
+# Четыре типа остаются прямо в ленте: это то, ради чего её открывают. Остальные
+# измерения выборки живут на экране фильтров, иначе клавиатура перестаёт читаться.
+FEED_QUICK_TYPES = ("a", "i", "g", "w")
+
+
 def feed_keyboard(
     items: list[tuple[int, str]],
-    active: str,
+    state=FeedFilter(),
     page: int = 1,
     has_more: bool = False,
+    is_admin: bool = False,
 ) -> list[list[Button]]:
-    """Monitoring feed: one row per ping, filters, optional pager, home/refresh."""
+    """Лента: строка на упоминание, быстрые типы, панель, пагинация, низ."""
+    state = _as_feed_state(state, page)
+    labels = {code: label for code, _db, label in FEED_TYPES}
     rows: list[list[Button]] = [
         [Button.inline(label, f"mon:open:{pid}".encode())] for pid, label in items
     ]
-    filt = [
-        Button.inline(f"▸{lbl}" if code == active else lbl, f"mon:feed:{code}".encode())
-        for code, lbl in MON_FILTERS
+    rows.append([
+        Button.inline(f"▸{labels[code]}" if code == state.type else labels[code],
+                      feed_filter_cb(state.with_(type=code)))
+        for code in FEED_QUICK_TYPES
+    ])
+    tools = [
+        Button.inline("⚙️ Фильтры", feed_state_cb("mon:ff", state)),
+        Button.inline("🔎 Поиск", b"mon:q"),
     ]
-    rows.append(filt)
-    if page > 1 or has_more:
+    if is_admin:
+        tools.append(Button.inline("✅ Прочитать", feed_state_cb("mon:ra", state)))
+    rows.append(tools)
+    if state.page > 1 or has_more:
         pager: list[Button] = []
-        if page > 1:
-            pager.append(Button.inline("◀️ Новее", _feed_cb(active, page - 1)))
-        pager.append(Button.inline(f"· {page} ·", b"noop"))
+        if state.page > 1:
+            pager.append(Button.inline("◀️ Новее", state.cb(state.page - 1)))
+        pager.append(Button.inline(f"· {state.page} ·", b"noop"))
         if has_more:
-            pager.append(Button.inline("Старее ▶️", _feed_cb(active, page + 1)))
+            pager.append(Button.inline("Старее ▶️", state.cb(state.page + 1)))
         rows.append(pager)
     rows.append([
         Button.inline("⬅️ Домой", b"menu_main"),
-        Button.inline("🔄 Обновить", _feed_cb(active, page)),
+        Button.inline("🔄 Обновить", state.cb()),
     ])
     return rows
 
 
-def ping_card_keyboard(ping_id: int, is_admin: bool) -> list[list[Button]]:
-    """Drilldown actions: owner gets ⭐/read; everyone gets back/refresh."""
+def feed_filters_keyboard(state: FeedFilter, is_admin: bool = False) -> list[list[Button]]:
+    """Экран выборки: по кнопке на измерение, плюс пресеты и выгрузка.
+
+    Статус и сортировка переключаются по кругу одной кнопкой — отдельная кнопка
+    на каждое из шести значений не влезает в читаемую клавиатуру, а цикл
+    показывает текущее значение прямо на себе.
+    """
+    labels = {code: label for code, _db, label in FEED_TYPES}
+    type_chips = [
+        Button.inline(f"▸{labels[code]}" if code == state.type else labels[code],
+                      feed_state_cb("mon:ff", state.with_(type=code)))
+        for code, _db, _label in FEED_TYPES
+    ]
+    rows = [type_chips[i:i + 4] for i in range(0, len(type_chips), 4)]
+    rows.append([
+        Button.inline(f"🏷 Статус: {state.status_label}", feed_state_cb("mon:cs", state)),
+        Button.inline(f"{'⭐' if state.favorite else '☆'} Избранное",
+                      feed_state_cb("mon:fv", state)),
+    ])
+    rows.append([
+        Button.inline(f"⇅ {state.sort_label}", feed_state_cb("mon:ss", state)),
+        Button.inline("↑ По возрастанию" if state.ascending else "↓ По убыванию",
+                      feed_state_cb("mon:so", state)),
+    ])
+    if state.query:
+        rows.append([Button.inline("✖️ Снять поиск", feed_state_cb("mon:qx", state))])
+    rows.append([
+        Button.inline("💾 Пресеты", b"mon:pr"),
+        Button.inline("♻️ Сбросить", feed_state_cb("mon:ff", FeedFilter())),
+    ])
+    if is_admin:
+        rows.append([
+            Button.inline("⬇️ CSV", feed_state_cb("mon:ex:c", state)),
+            Button.inline("⬇️ JSON", feed_state_cb("mon:ex:j", state)),
+        ])
+    rows.append([Button.inline("⬅️ К ленте", state.cb())])
+    return rows
+
+
+def feed_presets_keyboard(names: Sequence[str], state: FeedFilter,
+                          can_save: bool = True) -> list[list[Button]]:
+    """Сохранённые выборки: применить, удалить, сохранить текущую.
+
+    Пресет адресуется индексом — имя пресета кириллицей не влезает в 64 байта.
+    """
+    rows: list[list[Button]] = [
+        [Button.inline(f"▸ {name[:28]}", f"mon:ps:{i}".encode()),
+         Button.inline("🗑", f"mon:pd:{i}".encode())]
+        for i, name in enumerate(names)
+    ]
+    if not rows:
+        rows.append([Button.inline("📭 Пресетов нет", b"noop")])
+    if can_save:
+        rows.append([Button.inline("💾 Сохранить текущую", feed_state_cb("mon:pn", state))])
+    rows.append([Button.inline("⬅️ К фильтрам", feed_state_cb("mon:ff", state))])
+    return rows
+
+
+def ping_card_keyboard(ping, is_admin: bool = False,
+                       state: Optional[FeedFilter] = None) -> list[list[Button]]:
+    """Карточка записи: всё, что веб давал в модалке, плюс возврат в ту же ленту.
+
+    ``ping`` — строка из базы; целое число принимается ради кнопок из старых
+    сообщений, где кроме id ничего не было.
+    """
+    row = {"id": ping} if isinstance(ping, int) else dict(ping or {})
+    pid = int(row.get("id") or 0)
+    state = state or FeedFilter()
     rows: list[list[Button]] = []
     if is_admin:
         rows.append([
-            Button.inline("⭐ В избранное", f"ping:fav:{ping_id}".encode()),
-            Button.inline("✓ Прочитано", f"ping:read:{ping_id}".encode()),
+            Button.inline("⭐ В избранное" if not row.get("is_favorite") else "★ Убрать",
+                          f"ping:fav:{pid}".encode()),
+            Button.inline("✓ Прочитано", f"ping:read:{pid}".encode()),
         ])
+        rows.append([
+            Button.inline(f"🏷 Статус: {ping_status_label(row.get('status'))}",
+                          ping_action_cb("st", pid, state)),
+            Button.inline("📝 Заметка", ping_action_cb("nt", pid, state)),
+        ])
+        if row.get("is_giveaway") or row.get("is_win"):
+            rows.append([
+                Button.inline(f"🎁 Розыгрыш: {giveaway_status_label(row.get('giveaway_status'))}",
+                              ping_action_cb("gw", pid, state)),
+            ])
+            rows.append([Button.inline("🧾 История действий", ping_action_cb("hs", pid, state))])
+        rows.append([Button.inline("🏷 Теги", ping_action_cb("tg", pid, state))])
+    if is_openable_link(row.get("link")):
+        rows.append([Button.url("Открыть в Telegram", str(row["link"]))])
     rows.append([
-        Button.inline("⬅️ Назад", b"mon:feed:all"),
-        Button.inline("🔄 Обновить", f"mon:open:{ping_id}".encode()),
+        Button.inline("⬅️ Назад", state.cb()),
+        Button.inline("🔄 Обновить", ping_open_cb(pid, state)),
     ])
+    return rows
+
+
+def ping_status_keyboard(ping_id: int, current: Optional[str],
+                         state: Optional[FeedFilter] = None) -> list[list[Button]]:
+    """Выбор статуса записи — пять значений словаря `PING_STATUSES`."""
+    state = state or FeedFilter()
+    chips = [
+        Button.inline(f"▸{ping_status_label(code)}" if code == (current or "new")
+                      else ping_status_label(code),
+                      ping_action_cb("sts", ping_id, state, code))
+        for code in PING_STATUS_ORDER
+    ]
+    rows = [chips[i:i + 3] for i in range(0, len(chips), 3)]
+    rows.append([Button.inline("⬅️ К карточке", ping_open_cb(ping_id, state))])
+    return rows
+
+
+def ping_giveaway_keyboard(ping_id: int, current: Optional[str],
+                           state: Optional[FeedFilter] = None) -> list[list[Button]]:
+    """Исход розыгрыша: те же семь значений, что были сегментом в вебе."""
+    state = state or FeedFilter()
+    chips = [
+        Button.inline(f"▸{giveaway_status_label(code)}" if code == (current or "")
+                      else giveaway_status_label(code),
+                      ping_action_cb("gws", ping_id, state, code))
+        for code in GIVEAWAY_STATUS_ORDER
+    ]
+    rows = [chips[i:i + 2] for i in range(0, len(chips), 2)]
+    rows.append([Button.inline("⬅️ К карточке", ping_open_cb(ping_id, state))])
+    return rows
+
+
+def ping_tags_keyboard(ping_id: int, tags: Sequence[str],
+                       state: Optional[FeedFilter] = None) -> list[list[Button]]:
+    """Теги записи: снять по индексу, добавить текстом.
+
+    Индекс, а не сам тег: тег кириллицей съедает callback-бюджет, а список на
+    обеих сторонах один и тот же — он пришёл из этой же строки базы.
+    """
+    state = state or FeedFilter()
+    rows: list[list[Button]] = [
+        [Button.inline(f"🗑 {tag[:24]}", ping_action_cb("tgd", ping_id, state, str(i)))]
+        for i, tag in enumerate(tags)
+    ]
+    if not rows:
+        rows.append([Button.inline("📭 Тегов нет", b"noop")])
+    rows.append([Button.inline("➕ Добавить тег", ping_action_cb("tga", ping_id, state))])
+    rows.append([Button.inline("⬅️ К карточке", ping_open_cb(ping_id, state))])
     return rows
 
 
@@ -182,6 +315,7 @@ def giveaway_feed_keyboard(
     has_more: bool = False,
     state: Optional[GiveawayFilter] = None,
     accounts: Sequence[str] = (),
+    is_admin: bool = False,
 ) -> list[list[Button]]:
     """Giveaways section: candidates, sort/wins/account filters, pager, home/refresh."""
     state = (state or GiveawayFilter())._replace(page=max(1, page))
@@ -207,10 +341,12 @@ def giveaway_feed_keyboard(
         if has_more:
             pager.append(Button.inline("Старее ▶️", _giveaway_feed_cb(state, page + 1)))
         rows.append(pager)
-    rows.append([
-        Button.inline("⬅️ Домой", b"menu_main"),
-        Button.inline("🔄 Обновить", _giveaway_feed_cb(state)),
-    ])
+    footer = [Button.inline("⬅️ Домой", b"menu_main")]
+    if is_admin:
+        # Чистка каналов тратит запросы Telegram — только для владельца.
+        footer.append(Button.inline("🧹 Каналы", b"gw:cl:0"))
+    footer.append(Button.inline("🔄 Обновить", _giveaway_feed_cb(state)))
+    rows.append(footer)
     return rows
 
 
@@ -253,13 +389,83 @@ def giveaway_accounts_keyboard(
     return rows
 
 
-def giveaway_card_keyboard(ping_id: int, state: Optional[GiveawayFilter] = None) -> list[list[Button]]:
-    """Read-only candidate card: back to the list it came from + refresh."""
+def giveaway_card_keyboard(ping_id: int, state: Optional[GiveawayFilter] = None,
+                           is_admin: bool = False,
+                           link: Optional[str] = None) -> list[list[Button]]:
+    """Карточка розыгрыша: у владельца — те же действия, что были в вебе.
+
+    Разбор и профиль канала тратят запросы Telegram, поэтому кнопки видит
+    только владелец; гостю карточка остаётся только чтением.
+    """
     state = state or GiveawayFilter()
-    return [[
+    rows: list[list[Button]] = []
+    if is_admin:
+        rows.append([
+            Button.inline("🔍 Разобрать", f"gw:an:{ping_id}".encode()),
+            Button.inline("📡 Профиль канала", f"gw:pr:{ping_id}".encode()),
+        ])
+        rows.append([
+            Button.inline("✅ Забрал", f"gw:sv:{ping_id}:claimed".encode()),
+            Button.inline("⏭ Пропустить", f"gw:sk:{ping_id}".encode()),
+        ])
+        # Статус ставится своим колбэком, а не общим `pg:`: иначе с доски
+        # розыгрышей человек уезжает в ленту упоминаний и теряет список.
+        rows.append([Button.inline("🎁 Статус…", f"gw:ss:{ping_id}".encode())])
+    if is_openable_link(link):
+        rows.append([Button.url("Открыть в Telegram", str(link))])
+    rows.append([
         Button.inline("⬅️ Назад", _giveaway_feed_cb(state)),
         Button.inline("🔄 Обновить", _giveaway_open_cb(ping_id, state)),
-    ]]
+    ])
+    return rows
+
+
+def giveaway_status_keyboard(ping_id: int,
+                             current: Optional[str] = None) -> list[list[Button]]:
+    """Исход розыгрыша, не покидая доску: те же семь значений, что в ленте."""
+    chips = [
+        Button.inline(f"▸{giveaway_status_label(code)}" if code == (current or "")
+                      else giveaway_status_label(code),
+                      f"gw:sv:{ping_id}:{code}".encode())
+        for code in GIVEAWAY_STATUS_ORDER
+    ]
+    rows = [chips[i:i + 2] for i in range(0, len(chips), 2)]
+    rows.append([Button.inline("⬅️ К карточке", f"gw:open:{ping_id}".encode())])
+    return rows
+
+
+def cleanup_keyboard(candidates: Sequence[dict], page: int = 0,
+                     page_size: int = 6) -> list[list[Button]]:
+    """Мёртвые каналы: выход адресуется chat_id, он и так число.
+
+    Кнопка ведёт на подтверждение, а не на выход: назад в приватный канал без
+    новой ссылки не вернуться.
+    """
+    start = page * page_size
+    window = list(candidates)[start:start + page_size]
+    rows: list[list[Button]] = [
+        [Button.inline(f"🚪 {str(item.get('title') or item.get('chat_id'))[:36]}",
+                       f"gw:lv:{item.get('chat_id')}".encode())]
+        for item in window
+    ]
+    if not rows:
+        rows.append([Button.inline("📭 Пусто", b"noop")])
+    pager: list[Button] = []
+    if page > 0:
+        pager.append(Button.inline("◀️", f"gw:cl:{page - 1}".encode()))
+    if len(candidates) > start + page_size:
+        pager.append(Button.inline("▶️", f"gw:cl:{page + 1}".encode()))
+    if pager:
+        rows.append(pager)
+    rows.append([Button.inline("⬅️ Розыгрыши", b"menu_giveaways")])
+    return rows
+
+
+def leave_confirm_keyboard(chat_id: int) -> list[list[Button]]:
+    return [
+        [Button.inline("🚪 Да, выйти", f"gw:lvgo:{chat_id}".encode())],
+        [Button.inline("⬅️ Отмена", b"gw:cl:0")],
+    ]
 
 
 def analytics_keyboard(active: str) -> list[list[Button]]:
@@ -277,9 +483,13 @@ def analytics_keyboard(active: str) -> list[list[Button]]:
 
 
 def management_grid() -> list[list[Button]]:
+    """Панель владельца. Ровно те разделы, которые были админскими вкладками
+    веба: настройки, ключи, люди, доступ, аккаунты, сервисы, бэкапы, здоровье."""
     return [
         [Button.inline("⚙️ Настройки", b"st"), Button.inline("🔑 Ключи", b"menu_keys")],
         [Button.inline("👥 Люди", b"adm:members"), Button.inline("⏰ Доступ", b"adm:access")],
+        [Button.inline("🛰 Аккаунты", b"ac"), Button.inline("🧩 Сервисы", b"sv")],
+        [Button.inline("💾 Бэкапы", b"bk"), Button.inline("🩺 Здоровье", b"dg")],
         [Button.inline("🔄 Скан", b"menu_scan"), Button.inline("📜 Логи", b"menu_logs")],
         [Button.inline("🎰 Рулетка", b"rl"), Button.inline("♻️ Рестарт", b"menu_restart")],
         [Button.inline("⬅️ Домой", b"menu_main")],
@@ -305,8 +515,14 @@ def roulette_panel_keyboard(cfg: dict) -> list[list[Button]]:
 
 
 def members_list_keyboard(items: list[tuple[int, str]]) -> list[list[Button]]:
+    """Shortcut buttons for the members list.
+
+    Capped like every other list keyboard here: the card above names everyone,
+    and past Telegram's row limit an uncapped keyboard makes the whole reply
+    fail — which broke /members permanently once enough members had joined.
+    """
     rows: list[list[Button]] = [
-        [Button.inline(label, f"mem:open:{tg}".encode())] for tg, label in items
+        [Button.inline(label[:48], f"mem:open:{tg}".encode())] for tg, label in list(items)[:KEYS_LIST_LIMIT]
     ]
     rows.append([
         Button.inline("⬅️ Управление", b"adm:home"),
@@ -530,3 +746,110 @@ def restart_confirm_keyboard() -> list[list[Button]]:
 
 def logs_keyboard() -> list[list[Button]]:
     return [[Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_logs")]]
+
+
+# --- зарплаты ------------------------------------------------------------
+# Грамматика колбэков: `sal:<вид>:<месяц>[:<аргумент>]`. Месяц ("2026-09") ездит
+# в самом колбэке, поэтому любая кнопка воспроизводит свой экран без памяти о
+# предыдущем нажатии, а вся строка укладывается в 64 байта Telegram.
+SALARY_ACCOUNTS_PAGE = 8
+
+
+def _salary_cb(view: str, month: str, arg: str = "") -> bytes:
+    parts = ["sal", view, month] + ([arg] if arg else [])
+    return ":".join(parts).encode()
+
+
+def _salary_month_row(view: str, month: str, months: Sequence[str]) -> list[Button]:
+    """Стрелки по месяцам книги плюс подпись текущего.
+
+    Стрелка за границей книги не рисуется вовсе: неактивных кнопок в Telegram
+    нет, а кнопка, которая молча ничего не делает, читается как поломка.
+    """
+    from ..salary import month_label, shift_month
+
+    row: list[Button] = []
+    previous = shift_month(month, -1)
+    following = shift_month(month, 1)
+    if previous in months:
+        row.append(Button.inline("⬅️", _salary_cb(view, previous)))
+    row.append(Button.inline(month_label(month), b"noop"))
+    if following in months:
+        row.append(Button.inline("➡️", _salary_cb(view, following)))
+    return row
+
+
+def salary_keyboard(month: str, months: Sequence[str] = (), *, is_owner: bool = False) -> list[list[Button]]:
+    """Личная карточка зарплаты (у владельца — обзор по всем)."""
+    rows = [_salary_month_row("m", month, months)]
+    second = [Button.inline("🏆 Топ", _salary_cb("top", month)),
+              Button.inline("📈 Аналитика", _salary_cb("an", month))]
+    if is_owner:
+        second = [Button.inline("🏆 Топ", _salary_cb("top", month)),
+                  Button.inline("👥 По аккаунтам", _salary_cb("list", month))]
+    rows.append(second)
+    rows.append([Button.inline("⬅️ Домой", b"menu_main"), Button.inline("🔄 Обновить", _salary_cb("m", month))])
+    return rows
+
+
+def salary_top_keyboard(month: str, months: Sequence[str] = ()) -> list[list[Button]]:
+    return [
+        _salary_month_row("top", month, months),
+        [Button.inline("💵 Зарплата", _salary_cb("m", month)),
+         Button.inline("🔄 Обновить", _salary_cb("top", month))],
+        [Button.inline("⬅️ Домой", b"menu_main")],
+    ]
+
+
+def salary_analytics_keyboard(month: str, months: Sequence[str] = ()) -> list[list[Button]]:
+    return [
+        _salary_month_row("an", month, months),
+        [Button.inline("💵 Зарплата", _salary_cb("m", month)),
+         Button.inline("🏆 Топ", _salary_cb("top", month))],
+        [Button.inline("⬅️ Домой", b"menu_main")],
+    ]
+
+
+def salary_accounts_keyboard(month: str, accounts: Sequence[str], page: int = 0) -> list[list[Button]]:
+    """Владелец выбирает парня. Аккаунт адресуется индексом в списке книги —
+    имена кириллицей съели бы весь лимит колбэка."""
+    total = len(accounts)
+    pages = max(1, (total + SALARY_ACCOUNTS_PAGE - 1) // SALARY_ACCOUNTS_PAGE)
+    page = max(0, min(page, pages - 1))
+    start = page * SALARY_ACCOUNTS_PAGE
+    rows: list[list[Button]] = []
+    chunk = list(enumerate(accounts))[start:start + SALARY_ACCOUNTS_PAGE]
+    for index in range(0, len(chunk), 2):
+        rows.append([
+            Button.inline(name[:24], _salary_cb("who", month, str(idx)))
+            for idx, name in chunk[index:index + 2]
+        ])
+    if pages > 1:
+        pager = []
+        if page > 0:
+            pager.append(Button.inline("◀️", _salary_cb("list", month, str(page - 1))))
+        pager.append(Button.inline(f"{page + 1}/{pages}", b"noop"))
+        if page < pages - 1:
+            pager.append(Button.inline("▶️", _salary_cb("list", month, str(page + 1))))
+        rows.append(pager)
+    rows.append([Button.inline("⬅️ Назад", _salary_cb("m", month)),
+                 Button.inline("🏆 Топ", _salary_cb("top", month))])
+    return rows
+
+
+def salary_member_keyboard(month: str, index: int, *, analytics: bool = False) -> list[list[Button]]:
+    """Карточка одного парня глазами владельца.
+
+    ``analytics`` переворачивает первую кнопку: с разбора месяца возвращаться
+    надо к сумме, а не открывать разбор повторно.
+    """
+    first = (
+        Button.inline("💵 Зарплата", _salary_cb("who", month, str(index)))
+        if analytics
+        else Button.inline("📈 Аналитика", _salary_cb("wan", month, str(index)))
+    )
+    return [
+        [first, Button.inline("👥 Другие", _salary_cb("list", month))],
+        [Button.inline("⬅️ Назад", _salary_cb("m", month)),
+         Button.inline("🔄 Обновить", _salary_cb("wan" if analytics else "who", month, str(index)))],
+    ]

@@ -89,10 +89,38 @@ def normalize_usernames(raw_usernames: Iterable[str]) -> list[str]:
     return usernames
 
 
+# Channels often link a winner instead of writing @username: "t.me/Sanrayder",
+# "https://t.me/Sanrayder" or a hidden hyperlink whose url is one of those.
+TELEGRAM_HOST_PATTERN = r"(?:t|telegram)\.(?:me|dog)"
+TELEGRAM_LINK_PREFIX = rf"(?:https?://)?(?:www\.)?{TELEGRAM_HOST_PATTERN}/(?:@)?"
+TELEGRAM_URL_USERNAME_RE = re.compile(
+    rf"^{TELEGRAM_LINK_PREFIX}([A-Za-z0-9_]{{4,32}})(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+TELEGRAM_URL_USER_ID_RE = re.compile(r"^tg://user\?id=(\d+)", re.IGNORECASE)
+
+
+def telegram_url_target(url: str) -> tuple[str, str] | None:
+    """Profile target of a Telegram url: ("username", name) or ("user_id", id)."""
+    url = (url or "").strip()
+    if not url:
+        return None
+    match = TELEGRAM_URL_USERNAME_RE.match(url)
+    if match:
+        return "username", match.group(1)
+    match = TELEGRAM_URL_USER_ID_RE.match(url)
+    if match:
+        return "user_id", match.group(1)
+    return None
+
+
 def build_ping_regex(usernames: Iterable[str]) -> re.Pattern[str]:
     normalized = normalize_usernames(usernames)
     escaped = "|".join(re.escape(username) for username in normalized)
-    return re.compile(rf"(?<![A-Za-z0-9_@])@({escaped})(?![A-Za-z0-9_])", re.IGNORECASE)
+    return re.compile(
+        rf"(?<![A-Za-z0-9_@])(?:@|{TELEGRAM_LINK_PREFIX})({escaped})(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
 
 
 def display_name(entity) -> str:
@@ -142,25 +170,51 @@ def build_message_link(chat, message) -> str:
     return "нет публичной ссылки"
 
 
+def mentions_in_text(text: str, ping_regex: re.Pattern[str], usernames: Iterable[str]) -> list[str]:
+    """Tracked usernames mentioned in a plain string, with their canonical case.
+
+    Split out of extract_mentions for text that never came from a Message —
+    a post whose media Telethon could not decode is re-read from its public
+    t.me page, and only its rendered text is available.
+    """
+    normalized_lookup = {username.lower(): username for username in normalize_usernames(usernames)}
+    found = {
+        f"@{normalized_lookup.get(match.group(1).lower(), match.group(1))}"
+        for match in ping_regex.finditer(text or "")
+    }
+    return sorted(found, key=str.lower)
+
+
 def extract_mentions(
     message,
     ping_regex: re.Pattern[str],
     usernames: Iterable[str],
     tracked_ids: dict[int, str] | None = None,
 ) -> list[str]:
-    found: set[str] = set()
     text = getattr(message, "raw_text", "") or ""
     normalized_lookup = {username.lower(): username for username in normalize_usernames(usernames)}
-
-    for match in ping_regex.finditer(text):
-        username = normalized_lookup.get(match.group(1).lower(), match.group(1))
-        found.add(f"@{username}")
+    found: set[str] = set(mentions_in_text(text, ping_regex, usernames))
 
     if types and getattr(message, "entities", None):
         for ent in message.entities:
             if isinstance(ent, types.MessageEntityMention):
                 mention_text = text[ent.offset : ent.offset + ent.length].lstrip("@")
                 username = normalized_lookup.get(mention_text.lower())
+                if username:
+                    found.add(f"@{username}")
+            elif isinstance(ent, types.MessageEntityTextUrl):
+                # Winner names are often hyperlinked, so the t.me/... url never
+                # appears in raw_text — only in the entity.
+                target = telegram_url_target(getattr(ent, "url", "") or "")
+                if not target:
+                    continue
+                kind, value = target
+                if kind == "username":
+                    username = normalized_lookup.get(value.lower())
+                elif tracked_ids:
+                    username = tracked_ids.get(int(value))
+                else:
+                    username = None
                 if username:
                     found.add(f"@{username}")
             elif tracked_ids and MENTION_NAME_ENTITY_TYPES and isinstance(ent, MENTION_NAME_ENTITY_TYPES):

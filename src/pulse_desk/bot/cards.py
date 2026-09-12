@@ -5,6 +5,7 @@ unit-test without a running bot. Data fetching lives in service.py.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Optional
 
 from ..bot_permissions import (
@@ -17,8 +18,10 @@ from ..bot_permissions import (
     permission_delay_minutes,
     render_permissions_summary,
 )
+from .. import salary
+from ..roulette import next_fire_at
 from .chrome import bar, chip, empty, header, kv
-from .views import DIV, fmt_dt
+from .views import ANALYTICS_TABS, DIV, GiveawayFilter, fmt_dt, format_expiry, key_expired
 
 
 def home_card(
@@ -28,18 +31,16 @@ def home_card(
     urgent: int,
     accounts_online: int,
     accounts_total: int,
-    fresh_checks: int,
     last_scan: str,
 ) -> str:
     """Live dashboard shown on the home screen."""
     badge = "👑 владелец" if role == "admin" else "👁 просмотр"
     accounts = f"{accounts_online}/{accounts_total}"
-    urgent_cell = f"{kv('🎁', 'Срочных', urgent)}{' 🔥' if urgent else ''}"
+    urgent_cell = f"{kv('🎁', 'К действию', urgent)}{' 🔥' if urgent else ''}"
     return "\n".join([
         header("🛰", "Pulse Desk", badge),
         f"{kv('🆕', 'Новых пингов', new_pings)}   {urgent_cell}",
-        f"{kv('🛰', 'Аккаунты', accounts)} {bar(accounts_online, accounts_total)}"
-        f"   {kv('💸', 'Чеки', fresh_checks)}",
+        f"{kv('🛰', 'Аккаунты', accounts)} {bar(accounts_online, accounts_total)}",
         kv("🔄", "Скан", last_scan),
         DIV,
         "Выберите раздел 👇",
@@ -72,6 +73,151 @@ def summary_card(*, analytics: dict, market: Optional[dict], system: dict) -> st
     return "\n".join(lines)
 
 
+_ANALYTICS_TAB_LABELS = dict(ANALYTICS_TABS)
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def _pct(part: float, total: float) -> str:
+    return f"{round(100 * part / total)}%" if total else "—"
+
+
+def spark(values: list[float]) -> str:
+    """Inline block-character histogram; flat/empty input renders as a floor."""
+    if not values:
+        return ""
+    peak = max(values)
+    if peak <= 0:
+        return _SPARK_BLOCKS[0] * len(values)
+    return "".join(_SPARK_BLOCKS[min(len(_SPARK_BLOCKS) - 1, int(v / peak * (len(_SPARK_BLOCKS) - 1) + 0.5))] for v in values)
+
+
+def _rank_lines(rows: list[dict], *, title, value, meta=None, limit: int = 8) -> list[str]:
+    """Numbered `n. title  ▰▱ value` block with an optional second meta line."""
+    rows = list(rows or [])[:limit]
+    if not rows:
+        return [empty("Данных пока нет.")]
+    peak = max((float(value(r) or 0) for r in rows), default=0)
+    out: list[str] = []
+    for i, row in enumerate(rows, 1):
+        val = float(value(row) or 0)
+        name = str(title(row) or "неизвестно")[:28]
+        out.append(f"`{i}.` {bar(val, peak, 4)} **{name}** · `{_fmt_num(val)}`")
+        if meta:
+            hint = meta(row)
+            if hint:
+                out.append(f"      __{hint}__")
+    return out
+
+
+def _fmt_num(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def analytics_card(tab: str, *, analytics: dict, detailed: dict) -> str:
+    """One page of the analytics report. `tab` is a code from ANALYTICS_TABS."""
+    tab = tab if tab in _ANALYTICS_TAB_LABELS else "sum"
+    out = [header("📈", "Аналитика", f"Домой › Аналитика › {_ANALYTICS_TAB_LABELS[tab]}")]
+    total = int(analytics.get("total_pings") or 0)
+
+    if tab == "sum":
+        wins = int(analytics.get("wins") or 0)
+        giveaways = int(analytics.get("giveaways") or 0)
+        resolved = int(analytics.get("resolved") or 0)
+        out += [
+            f"{kv('📨', 'Записей', total)}   {kv('🆕', 'Новых', analytics.get('new_pings', 0))}",
+            f"{kv('🏆', 'Победы', f'{wins} · {_pct(wins, total)}')}   {kv('🎁', 'Розыгрыши', f'{giveaways} · {_pct(giveaways, total)}')}",
+            f"{kv('🔥', 'Важных', analytics.get('important', 0))}   {kv('✅', 'Решено', f'{resolved} · {_pct(resolved, total)}')}",
+            f"{kv('🕐', 'За 24ч', analytics.get('last_24h', 0))}   {kv('📅', 'За 7 дней', analytics.get('last_7d', 0))}",
+            f"{kv('🎯', 'Ср. приоритет', analytics.get('avg_priority', 0))}   {kv('🔇', 'Шум', analytics.get('noise', 0))}",
+            DIV,
+            f"📡 **Покрытие** · каналов `{analytics.get('total_channels', 0)}` · аккаунтов онлайн `{analytics.get('accounts_online', 0)}`",
+        ]
+        accounts = detailed.get("channels_by_account") or []
+        out += [
+            f"{'🟢' if a.get('status') == 'online' else '🔴'} {str(a.get('display') or a.get('session_name') or '?')[:22]} · `{a.get('channels', 0)}` каналов"
+            for a in accounts[:8]
+        ] or [empty("Каналы посчитаются после ближайшего скана.")]
+
+    elif tab == "src":
+        out += ["💎 **Ценные чаты** __(по среднему приоритету)__"]
+        out += _rank_lines(
+            detailed.get("chats"),
+            title=lambda r: r.get("chat"),
+            value=lambda r: r.get("avg_priority") or 0,
+            meta=lambda r: f"{r.get('count', 0)} упом · {r.get('wins', 0)} побед · {r.get('giveaways', 0)} розыгр",
+            limit=6,
+        )
+        out += [DIV, "🛰 **Репутация источников**"]
+        out += _rank_lines(
+            detailed.get("sources"),
+            title=lambda r: r.get("chat"),
+            value=lambda r: r.get("score") or 0,
+            meta=lambda r: f"{r.get('total_pings', 0)} всего · {r.get('wins', 0)} побед · {r.get('noise', 0)} шум",
+            limit=6,
+        )
+
+    elif tab == "who":
+        out += ["✍️ **Авторы** __(кто приносит победы)__"]
+        out += _rank_lines(
+            detailed.get("senders"),
+            title=lambda r: r.get("sender"),
+            value=lambda r: r.get("count") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед · {_pct(int(r.get('wins') or 0), int(r.get('count') or 0))} результативность",
+            limit=6,
+        )
+        out += [DIV, "🏷 **Трекинг юзернеймов**"]
+        out += _rank_lines(
+            detailed.get("top_mentions"),
+            title=lambda r: f"@{r.get('username') or '?'}",
+            value=lambda r: r.get("count") or 0,
+            limit=8,
+        )
+
+    elif tab == "time":
+        hourly = analytics.get("hourly") or {}
+        hours = [float(hourly.get(f"{h:02d}") or 0) for h in range(24)]
+        peak_hour = max(range(24), key=lambda h: hours[h]) if any(hours) else None
+        out += [
+            "🕓 **Активность по часам**",
+            f"`{spark(hours)}`",
+            "`00      06      12      18   `",
+        ]
+        if peak_hour is not None:
+            out.append(kv("⏰", "Пик", f"{peak_hour:02d}:00 · {int(hours[peak_hour])} записей"))
+        out += [DIV, "📅 **По дням**"]
+        out += _rank_lines(
+            analytics.get("daily"),
+            title=lambda r: r.get("day"),
+            value=lambda r: r.get("count") or 0,
+            limit=7,
+        )
+
+    else:  # flow
+        out += ["📈 **Качество по дням**"]
+        for row in (detailed.get("daily_quality") or [])[:7]:
+            out.append(
+                f"`{row.get('day')}` · всего `{row.get('total', 0)}` · 🏆 `{row.get('wins', 0)}` · "
+                f"🎁 `{row.get('giveaways', 0)}` · ✅ `{row.get('resolved', 0)}`"
+            )
+        if not (detailed.get("daily_quality") or []):
+            out.append(empty("История ещё не накопилась."))
+        out += [DIV, "🎚 **Приоритеты**"]
+        out += _rank_lines(
+            detailed.get("priorities"),
+            title=lambda r: r.get("priority_label") or "normal",
+            value=lambda r: r.get("count") or 0,
+            limit=5,
+        )
+        out += [DIV, "🔀 **Статусы обработки**"]
+        flow = (detailed.get("status_flow") or [])[:6]
+        out += [
+            f"• `{r.get('status') or 'unknown'}` → `{r.get('action_status') or 'new'}` · `{r.get('count', 0)}`"
+            for r in flow
+        ] or [empty("Статусов пока нет.")]
+
+    return "\n".join(out)
+
+
 _BADGES = {"critical": "🔥", "high": "⚡"}
 _PING_TEXT_CAP = 3500
 
@@ -95,8 +241,6 @@ def ping_card(ping: dict) -> str:
         tags.append(chip("🎁 розыгрыш"))
     if ping.get("is_win"):
         tags.append(chip("🏆 победа"))
-    if ping.get("is_check"):
-        tags.append(chip("💸 чек"))
     text = (ping.get("text") or "—")[:_PING_TEXT_CAP]
     lines = [
         header(badge, f"Пинг #{ping.get('id')}", crumb),
@@ -110,23 +254,44 @@ def ping_card(ping: dict) -> str:
     return "\n".join(lines)
 
 
-def giveaways_header(stats: dict, need_count: int) -> str:
+def giveaways_header(
+    stats: dict,
+    need_count: int,
+    state: Optional[GiveawayFilter] = None,
+    account: str = "Все",
+) -> str:
     out = header("🎁", "Розыгрыши", "Домой › Розыгрыши")
     line1 = f"{kv('🟢', 'К действию', need_count)}   {kv('🏆', 'Призы', stats.get('claim_prize', 0))}"
-    line2 = f"{kv('⏰', 'Просрочено', stats.get('overdue', 0))}   {kv('⏳', 'Ждут', stats.get('waiting_result', 0))}"
+    line2 = f"{kv('⏳', 'Ждут', stats.get('waiting_result', 0))}   {kv('✅', 'Закрыто', stats.get('done', 0))}"
     body = f"{line1}\n{line2}"
+    state = state or GiveawayFilter()
+    scope = "🏆 только победы" if state.wins else "🎁 все"
+    body += f"\n🔽 __Сортировка: {state.sort_label} · {scope} · 👤 {account}__"
     if need_count == 0:
-        body += "\n" + empty("Срочных нет — всё под контролем.")
+        hint = "Нет записей под этот фильтр." if (state.wins or account != "Все") else "Срочных нет — всё под контролем."
+        body += "\n" + empty(hint)
     return f"{out}\n{body}"
+
+
+def giveaway_accounts_card(counts: dict, accounts: list[str]) -> str:
+    """Picker screen: every tracked account with its open wins / giveaways."""
+    out = [header("👤", "По аккаунтам", "Домой › Розыгрыши › Аккаунты")]
+    if not accounts:
+        return out[0] + "\n" + empty("Отслеживаемых аккаунтов нет.")
+    out.append("Выберите аккаунт — покажу его записи 👇")
+    out.append(DIV)
+    for name in accounts:
+        row = counts.get(name.lower()) or {}
+        out.append(f"`@{name}` — 🏆 `{int(row.get('wins', 0))}`  ·  🎁 `{int(row.get('giveaways', 0))}`")
+    return "\n".join(out)
 
 
 def giveaway_card(ping: dict) -> str:
     badge = feed_badge(ping.get("priority_label"))
     crumb = f"Домой › Розыгрыши › #{ping.get('id')}"
-    deadline = ping.get("deadline_at")
     lines = [
         header(badge, f"Розыгрыш #{ping.get('id')}", crumb),
-        f"⏰ Дедлайн: `{fmt_dt(deadline) if deadline else '—'}`  ·  {ping.get('chat') or '?'}",
+        f"📅 `{fmt_dt(ping.get('date'))}`  ·  🕐 `{fmt_dt(ping.get('detected_at'))}`  ·  {ping.get('chat') or '?'}",
     ]
     if ping.get("deleted_at"):
         lines.append("🗑 __Пост удалён из канала__")
@@ -171,40 +336,88 @@ def restart_confirm_card() -> str:
     ])
 
 
+def key_state_badge(key: dict) -> str:
+    """Whether the invite still opens: revoked and expired both close it."""
+    if key.get("revoked"):
+        return "🚫 отозван"
+    if key_expired(key.get("expires_at")):
+        return "⌛ истёк"
+    return "🟢 активен"
+
+
 def keys_card(keys: list[dict]) -> str:
-    """Keys panel text; the revoke/delete buttons live in `keys_keyboard`."""
+    """Keys panel text; one button per key opens its panel in `keys_keyboard`."""
     out = [header("🔑", "Ключи доступа", "Домой › Управление › Ключи")]
     if not keys:
         out.append(empty("Ключей нет — создайте кнопкой ниже."))
         return "\n".join(out)
     for k in keys:
-        exp = fmt_dt(k.get("expires_at")) if k.get("expires_at") else "бессрочно"
         badge = "⚡ " if (k.get("role") or "viewer") == "premium" else ""
         perms = parse_permissions(k.get("permissions"))
         accounts = perms.get("accounts") or []
         scope = "все аккаунты" if not accounts else ", ".join(f"@{a}" for a in accounts)
         out.append(
-            f"`#{k['id']}` {badge}**{k.get('label') or '—'}** · 👥 {k.get('member_count', 0)} · ⏳ {exp}\n"
+            f"`#{k['id']}` {badge}**{k.get('label') or '—'}** · {key_state_badge(k)}\n"
+            f"   👥 {k.get('member_count', 0)} · ⏳ {format_expiry(k.get('expires_at'))}\n"
             f"   📂 {len(perms['features'])}/{len(ALL_FEATURES)} · 🔔 {len(perms['notify'])}/{len(ALL_NOTIFY)} · 👤 {scope}"
         )
-    out.append("\n🚫 — отозвать ссылку · 🗑 — удалить ключ\n__Вошедшие сохраняют доступ — отключить их можно в «Люди».__")
+    out.append("\n__Нажмите на ключ, чтобы открыть его панель: метка, срок, права, ссылка, удаление.__")
     return "\n".join(out)
 
 
 def key_panel_card(key: dict, perms: dict, accounts: list[str]) -> str:
     """Root of the key control panel: everything the grant decides, at a glance."""
-    exp = fmt_dt(key.get("expires_at")) if key.get("expires_at") else "бессрочно"
     badge = "⚡ премиум" if (key.get("role") or "viewer") == "premium" else "👁 просмотр"
     out = [
         header("🔑", f"Ключ #{key.get('id')}", "Домой › Управление › Ключи › Настройка"),
-        f"🏷 **{key.get('label') or 'без метки'}** · {badge}",
-        f"👥 Вошли: `{key.get('member_count', 0)}` · ⏳ {exp}",
+        f"🏷 **{key.get('label') or 'без метки'}** · {badge} · {key_state_badge(key)}",
+        f"👥 Вошли: `{key.get('member_count', 0)}` · ⏳ {format_expiry(key.get('expires_at'))}",
         DIV,
         render_permissions_summary(perms),
     ]
     if key.get("revoked"):
-        out.append("\n🚫 __Ссылка отозвана — новые люди войти не смогут.__")
+        out.append("\n🚫 __Ссылка отозвана — новые люди войти не смогут. Можно вернуть кнопкой ♻️.__")
+    elif key_expired(key.get("expires_at")):
+        out.append("\n⌛ __Срок истёк — ссылка больше не открывает доступ. Продлите его в «Срок».__")
     out.append("\n__Правки действуют на тех, кто войдёт позже; уже вошедшие — в «Люди».__")
+    return "\n".join(out)
+
+
+def key_expiry_card(key: dict) -> str:
+    return "\n".join([
+        header("⏳", "Срок ключа", "Ключи › Настройка › Срок"),
+        f"Сейчас: **{format_expiry(key.get('expires_at'))}**",
+        DIV,
+        "После этого момента ссылка перестаёт открывать доступ.",
+        "Уже вошедшие сохраняют доступ — отключить их можно в «Люди».",
+    ])
+
+
+def key_members_card(key: dict, members: list[dict]) -> str:
+    """Who came in through this key — the panel's 👥 screen."""
+    out = [header("👥", f"Вошли по ключу #{key.get('id')}", "Ключи › Настройка › Вошли")]
+    if not members:
+        out.append(empty("По этому ключу ещё никто не вошёл."))
+        return "\n".join(out)
+    for m in members:
+        uname = f"@{m['tg_username']}" if m.get("tg_username") else str(m.get("tg_id"))
+        dot = "🚫" if m.get("blocked") else "🟢"
+        out.append(f"{dot} **{m.get('name') or uname}** · {uname} · 🕐 {fmt_dt(m.get('joined_at'))}")
+    out.append("\n__Нажмите на человека, чтобы открыть его карточку.__")
+    return "\n".join(out)
+
+
+def key_delete_card(key: dict) -> str:
+    joined = int(key.get("member_count") or 0)
+    out = [
+        header("🗑", f"Удалить ключ #{key.get('id')}", "Ключи › Настройка › Удаление"),
+        f"🏷 **{key.get('label') or 'без метки'}**",
+        DIV,
+        "Ключ и его ссылка исчезнут навсегда.",
+    ]
+    if joined:
+        out.append(f"👥 Вошедшие (`{joined}`) сохранят доступ — отключить их можно в «Люди».")
+    out.append("\n__Нужно просто закрыть вход — отзовите ключ (🚫), тогда его можно вернуть.__")
     return "\n".join(out)
 
 
@@ -285,3 +498,194 @@ def member_card(member: dict, access_open: bool, engagement: dict | None = None)
         rate = f" · Claim Rate {round(100 * joined / total)}%" if total else ""
         lines.append(kv("🎯", "Розыгрыши", f"участвует {joined} · пропустил {skipped}{rate}"))
     return "\n".join(lines)
+
+
+# ---- roulette reminder (owner only) ----------------------------------------
+
+def _click_label(value: object) -> str:
+    """ISO click timestamp -> `DD.MM HH:MM`."""
+    if not value:
+        return "—"
+    try:
+        return datetime.fromisoformat(str(value)).strftime("%d.%m %H:%M")
+    except ValueError:
+        return fmt_dt(str(value))
+
+
+def _next_label(now: datetime, next_at: Optional[datetime]) -> str:
+    if next_at is None:
+        return "выключено"
+    if next_at <= now:
+        return "просрочено — придёт сейчас"
+    if next_at.date() == now.date():
+        return f"сегодня {next_at.strftime('%H:%M')}"
+    if next_at.date() == (now + timedelta(days=1)).date():
+        return f"завтра {next_at.strftime('%H:%M')}"
+    return next_at.strftime("%d.%m %H:%M")
+
+
+def roulette_card(cfg: dict, now: datetime) -> str:
+    """Owner panel for the daily yobo-roulette reminder."""
+    lines = [
+        header("🎰", "Рулетка йобо", "Домой › Управление › Рулетка"),
+        kv("🔔", "Напоминание", "вкл" if cfg.get("enabled") else "выкл"),
+        kv("⏰", "Время", cfg.get("time") or "—"),
+        kv("✅", "Последний клик", _click_label(cfg.get("last_click"))),
+        kv("📅", "Следующее", _next_label(now, next_fire_at(now, cfg))),
+    ]
+    if cfg.get("awaiting"):
+        lines += [DIV, "⏳ __Жду время проклика последнего аккаунта — кнопкой или текстом `21:47`.__"]
+    return "\n".join(lines)
+
+
+def roulette_reminder_card(cfg: dict, now: datetime) -> str:
+    """The daily nudge itself."""
+    return "\n".join([
+        header("🎰", "Рулетка йобо", now.strftime("%d.%m")),
+        "Пора прокликать рулетку со **всех** аккаунтов.",
+        kv("⏰", "Прошлый клик", _click_label(cfg.get("last_click"))),
+        DIV,
+        "__Закончишь — жми кнопку или пришли время последнего аккаунта:__ `21:47`",
+    ])
+
+
+# --- зарплаты из книги «Учет розыгрышей» ---------------------------------
+# Эмодзи здесь берутся только из пака Aperture (assets/bot/emoji): 💵 🪙 💎 💸
+# 🏆 ⏳ ✅ 📅 🧾 🧮 📈 ⭐ 🎁 ⚠️. Символа 💰 в паке нет — у Premium он выпал бы из
+# общего стиля карточки.
+
+def money(value: float) -> str:
+    """Суммы книги — всегда в долларах и всегда с двумя знаками."""
+    return f"{value:.2f}$"
+
+
+def _signed(value: float) -> str:
+    return f"{value:+.2f}$"
+
+
+def _day(value) -> str:
+    return value.strftime("%d.%m.%Y") if value else "—"
+
+
+def salary_status_label(row) -> str:
+    """Человеческий статус строки месяца — то самое «забрал или нет»."""
+    if row is None or row.status == salary.STATUS_NONE:
+        return "нет выигрышей"
+    if row.status == salary.STATUS_PAID:
+        return f"выплачено {_day(row.paid_at)}"
+    return "ожидает выплаты"
+
+
+def salary_status_icon(row) -> str:
+    if row is None or row.status == salary.STATUS_NONE:
+        return "▫️"
+    return "✅" if row.status == salary.STATUS_PAID else "⏳"
+
+
+def salary_card(data: dict) -> str:
+    """Личная карточка: сколько человеку причитается за месяц и забрал ли он."""
+    row = data.get("row")
+    label = salary.month_label(data["month"])
+    lines = [
+        header("💵", "Зарплата", f"{data['account']} · {label}"),
+        kv("💸", "К выплате", money(row.total if row else 0.0)),
+        f"{salary_status_icon(row)} Статус: `{salary_status_label(row)}`",
+    ]
+    if row is None:
+        return "\n".join(lines[:1] + [empty("За этот месяц в книге нет строки.")])
+    lines += [
+        DIV,
+        kv("🪙", "Крипта", f"{money(row.crypto)} → {money(row.pay_money)}"),
+        kv("💎", "Скины", f"{money(row.skins)} → {money(row.pay_skins)}"),
+        kv("🧮", "Доля", f"{row.share * 100:.0f}%"),
+        DIV,
+        kv("🏆", "Место", f"{data['rank']} из {data['of']}"),
+        kv("📈", "К прошлому месяцу", _signed(data["delta"])),
+    ]
+    return "\n".join(lines)
+
+
+def salary_analytics_card(data: dict) -> str:
+    """Разбор месяца: из чего сложилась сумма и что накопилось за всё время."""
+    label = salary.month_label(data["month"])
+    lines = [
+        header("📈", "Аналитика зарплаты", f"{data['account']} · {label}"),
+        f"{kv('🎁', 'Выигрышей', data['wins'])}   {kv('💵', 'Выиграно', money(data['won']))}",
+        kv("🧮", "Средний приз", money(data["avg"])),
+    ]
+    best = data.get("best")
+    if best is not None:
+        title = (best.title or best.kind or "приз")[:40]
+        lines.append(kv("⭐", "Лучший", f"{money(best.value)} — {title} ({best.day.strftime('%d.%m')})"))
+    by_kind = data.get("by_kind") or {}
+    if by_kind:
+        top = max(by_kind.values())
+        lines.append(DIV)
+        for kind, value in sorted(by_kind.items(), key=lambda item: -item[1]):
+            lines.append(f"{kind}: `{money(value)}` {bar(value, top)}")
+    lines += [
+        DIV,
+        "🧾 **За всё время**",
+        kv("💸", "Начислено", money(data["all_time"])),
+        kv("✅", "Получено", money(data["all_time_paid"])),
+        kv("⏳", "Ждёт выплаты", money(data["all_time_pending"])),
+        kv("🎁", "Выигрышей", data["wins_all_time"]),
+    ]
+    return "\n".join(lines)
+
+
+def salary_top_card(rows, month: str, mine: Optional[str] = None) -> str:
+    """Открытый топ месяца: имена, суммы, статус. Своя строка выделена."""
+    lines = [header("🏆", "Топ по зарплатам", salary.month_label(month))]
+    if not rows:
+        return "\n".join(lines + [empty("За этот месяц в книге нет строк.")])
+    width = max(len(row.account) for row in rows)
+    for place, row in enumerate(rows, start=1):
+        name = row.account.ljust(width)
+        line = f"`{place}.` `{name}` `{money(row.total)}` {salary_status_icon(row)}"
+        if mine and row.account.casefold() == mine.casefold():
+            line = f"{line} {chip('ты')}"
+        lines.append(line)
+    lines += [DIV, kv("💸", "Всего к выплате", money(sum(row.total for row in rows)))]
+    return "\n".join(lines)
+
+
+def salary_owner_card(data: dict) -> str:
+    """Обзор месяца для владельца: кому сколько и что ещё не отдано."""
+    lines = [
+        header("💵", "Зарплаты", f"{salary.month_label(data['month'])} · владелец"),
+        kv("💸", "К выплате", money(data["payout"])),
+        f"{kv('✅', 'Выплачено', money(data['paid']))}   {kv('⏳', 'Ждут', money(data['pending']))}",
+        DIV,
+        f"{kv('🎁', 'Выиграно', money(data['won']))}   {kv('🧾', 'Организатору', money(data['profit']))}",
+    ]
+    rows = data.get("rows") or []
+    if rows:
+        width = max(len(row.account) for row in rows)
+        lines.append(DIV)
+        for place, row in enumerate(rows, start=1):
+            lines.append(
+                f"`{place}.` `{row.account.ljust(width)}` `{money(row.total)}` {salary_status_icon(row)}"
+            )
+    else:
+        lines += [DIV, empty("За этот месяц в книге нет строк.")]
+    for issue in data.get("issues") or []:
+        lines.append(f"⚠️ __{issue}__")
+    return "\n".join(lines)
+
+
+def salary_paid_notice(row) -> str:
+    """Разовое уведомление: владелец проставил дату выплаты в книге."""
+    return "\n".join([
+        header("✅", "Зарплата выплачена", salary.month_label(row.month)),
+        kv("💸", "Сумма", money(row.total)),
+        kv("📅", "Дата выплаты", _day(row.paid_at)),
+    ])
+
+
+def salary_off_card() -> str:
+    """Книга не прочитана — раздел жив, но показывать нечего."""
+    return "\n".join([
+        header("💵", "Зарплата"),
+        empty("Книга учёта сейчас недоступна — попробуйте позже."),
+    ])

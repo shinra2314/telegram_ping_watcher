@@ -13,28 +13,23 @@ async def upsert_channel_profile(
     chat: str,
     username: str = "",
     description: str = "",
-    deadline_at: Optional[str] = None,
-    deadline_text: str = "",
     last_error: str = "",
 ) -> None:
     async with _connect() as db:
         await db.execute(
             """
             INSERT INTO channel_profiles (
-                chat_id, chat, username, description, deadline_at,
-                deadline_text, fetched_at, last_error
+                chat_id, chat, username, description, fetched_at, last_error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat = excluded.chat,
                 username = excluded.username,
                 description = excluded.description,
-                deadline_at = excluded.deadline_at,
-                deadline_text = excluded.deadline_text,
                 fetched_at = excluded.fetched_at,
                 last_error = excluded.last_error
             """,
-            (chat_id, chat, username, description, deadline_at, deadline_text, _now_iso(), last_error),
+            (chat_id, chat, username, description, _now_iso(), last_error),
         )
         await db.commit()
 
@@ -45,28 +40,6 @@ async def get_channel_profile(chat_id: int) -> Optional[dict[str, Any]]:
         async with db.execute("SELECT * FROM channel_profiles WHERE chat_id = ?", (chat_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
-
-
-async def update_channel_deadlines(chat_id: int, deadline_at: Optional[str], deadline_text: str = "") -> int:
-    if not deadline_at:
-        return 0
-    async with _connect() as db:
-        cursor = await db.execute(
-            """
-            UPDATE pings
-            SET deadline_at = ?,
-                deadline_source = 'channel_description',
-                deadline_text = ?
-            WHERE chat_id = ?
-              AND is_giveaway = 1
-              AND COALESCE(deadline_source, '') != 'manual'
-              AND (deadline_at IS NULL OR deadline_at = '')
-              AND COALESCE(action_status, 'new') NOT IN ('claimed', 'scam', 'missed', 'closed')
-            """,
-            (deadline_at, deadline_text, chat_id),
-        )
-        await db.commit()
-        return int(cursor.rowcount or 0)
 
 
 async def recalculate_source_scores() -> None:

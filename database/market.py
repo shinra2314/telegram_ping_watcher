@@ -20,13 +20,18 @@ async def save_market_snapshot(snapshot: dict[str, Any]) -> None:
         await db.commit()
 
 
-async def get_market_history(limit: int = 50) -> list[dict[str, Any]]:
+async def get_market_history(limit: int = 50, since_iso: str | None = None) -> list[dict[str, Any]]:
+    """Newest snapshots first; `since_iso` narrows the result to one time window."""
+    query = "SELECT fetched_at_iso, data FROM market_history"
+    params: list[Any] = []
+    if since_iso:
+        query += " WHERE fetched_at_iso >= ?"
+        params.append(since_iso)
+    query += " ORDER BY fetched_at_iso DESC LIMIT ?"
+    params.append(limit)
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT fetched_at_iso, data FROM market_history ORDER BY fetched_at_iso DESC LIMIT ?",
-            (limit,),
-        ) as cursor:
+        async with db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
             result: list[dict[str, Any]] = []
             for row in rows:

@@ -1,7 +1,6 @@
 """Per-key send delay: the durable queue and the broadcast split that fills it."""
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import tempfile

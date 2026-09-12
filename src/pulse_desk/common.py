@@ -29,6 +29,37 @@ def start_supervised(name: str, coro_factory, *, backoff_base: float = 5.0, back
     )
 
 
+def tail_lines(path, count: int = 20, *, block_bytes: int = 65536) -> list[str]:
+    """Last `count` lines of a file, without reading the whole thing.
+
+    Seeks backwards in blocks from the end. `app.log` is unbounded and already
+    several megabytes; reading and decoding all of it to show twenty lines
+    blocked the shared event loop on every /logs press. Synchronous by design —
+    call it through ``asyncio.to_thread``.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    want = max(1, int(count))
+    chunks: list[bytes] = []
+    read = 0
+    with open(path, "rb") as handle:
+        while read < size:
+            step = min(block_bytes, size - read)
+            read += step
+            handle.seek(size - read)
+            chunks.insert(0, handle.read(step))
+            # One extra line so a block boundary mid-line is never mistaken for
+            # the start of one.
+            if b"".join(chunks).count(b"\n") > want:
+                break
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    return text.splitlines()[-want:]
+
+
 def flood_wait_seconds(raw_seconds: int) -> int:
     """Bound a FloodWait duration so we still respect Telegram's limit but cap absurd values."""
     try:

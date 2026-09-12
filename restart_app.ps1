@@ -35,7 +35,9 @@ $ok = $false
 $deadline = (Get-Date).AddSeconds(40)
 do {
     Start-Sleep -Seconds 2
-    try { $ok = (Invoke-WebRequest "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch { $ok = $false }
+    # /api/health, not "/": the web UI was removed on 2026-09-12 and the root
+    # now 404s, which the old gate read as "the app never came up".
+    try { $ok = (Invoke-WebRequest "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch { $ok = $false }
 } until ($ok -or (Get-Date) -gt $deadline)
 
 if ($ok) {

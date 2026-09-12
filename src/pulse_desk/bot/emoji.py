@@ -44,22 +44,54 @@ def with_vs16_variants(emap: dict[str, int]) -> dict[str, int]:
     return out
 
 
-def build_entities(clean_text: str, emoji_map: dict[str, int]) -> list[MessageEntityCustomEmoji]:
+def compile_emoji_map(emoji_map: dict[str, int]) -> dict[str, list[str]]:
+    """Bucket the pack's keys by first character, longest first.
+
+    ``build_entities`` walks the text one character at a time and has to know
+    which key (if any) starts there. Scanning all ~170 keys per position made a
+    3 500-character card cost ~600 000 ``startswith`` calls on the event loop,
+    for every message the bot sends or edits. Bucketing by first character turns
+    that into a dict lookup plus a comparison against the handful of keys that
+    can possibly match, and the sort happens once instead of once per render.
+
+    Pure; the result is cached on ``state.custom_emoji_index`` at startup.
+    """
+    buckets: dict[str, list[str]] = {}
+    for key in emoji_map:
+        if key:
+            buckets.setdefault(key[0], []).append(key)
+    for keys in buckets.values():
+        # Longest first so multi-codepoint emoji (e.g. ⚙️) beat a shorter prefix.
+        keys.sort(key=len, reverse=True)
+    return buckets
+
+
+def build_entities(
+    clean_text: str,
+    emoji_map: dict[str, int],
+    index: Optional[dict[str, list[str]]] = None,
+) -> list[MessageEntityCustomEmoji]:
     """Custom-emoji entities for every mapped emoji occurrence in `clean_text`.
 
     Offsets/lengths are in UTF-16 units. Longest keys are matched first so
     multi-codepoint emoji (e.g. ⚙️) win over any single-codepoint prefix.
-    Pure — no I/O, unit-testable with fake document ids.
+    Pure — no I/O, unit-testable with fake document ids. `index` is the
+    precompiled bucket map from :func:`compile_emoji_map`; without one it is
+    built on the fly, which is correct but costs the sort per call.
     """
     if not emoji_map:
         return []
-    keys = sorted(emoji_map, key=len, reverse=True)
+    buckets = index if index is not None else compile_emoji_map(emoji_map)
     entities: list[MessageEntityCustomEmoji] = []
     offset = 0
     i = 0
     n = len(clean_text)
     while i < n:
-        match = next((k for k in keys if clean_text.startswith(k, i)), None)
+        match = None
+        for key in buckets.get(clean_text[i], ()):
+            if clean_text.startswith(key, i):
+                match = key
+                break
         if match:
             length = _utf16_len(match)
             entities.append(MessageEntityCustomEmoji(
@@ -72,17 +104,27 @@ def build_entities(clean_text: str, emoji_map: dict[str, int]) -> list[MessageEn
     return entities
 
 
-def enrich(text: str, emoji_map: dict[str, int]) -> tuple[str, Optional[list]]:
+def enrich(
+    text: str,
+    emoji_map: dict[str, int],
+    index: Optional[dict[str, list[str]]] = None,
+) -> tuple[str, Optional[list]]:
     """Parse Markdown `text` and inject custom-emoji entities.
 
     Returns ``(clean_text, entities)`` ready for ``formatting_entities=``, or
     ``(text, None)`` when there is nothing to inject (no pack, or no mapped
     emoji present) — callers then send the original text via normal Markdown.
     """
-    if not emoji_map or not any(k in text for k in emoji_map):
+    if not emoji_map:
+        return text, None
+    buckets = index if index is not None else compile_emoji_map(emoji_map)
+    # Cheap pre-check: a card with no mapped emoji at all is the common case for
+    # plain replies, and testing membership of the first characters beats the
+    # ~170 substring scans `any(k in text for k in emoji_map)` used to do.
+    if not any(ch in buckets for ch in text):
         return text, None
     clean, md_entities = markdown.parse(text)
-    custom = build_entities(clean, emoji_map)
+    custom = build_entities(clean, emoji_map, buckets)
     if not custom:
         return text, None
     merged = sorted(list(md_entities) + custom, key=lambda e: e.offset)

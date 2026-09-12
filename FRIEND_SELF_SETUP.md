@@ -1,5 +1,10 @@
 # Pulse Desk clean setup for a friend
 
+> **Outdated as of 2026-09-12.** The web UI was removed; the Telegram bot is the
+> whole interface now. Steps mentioning a browser or the access tokens no longer
+> apply — set `TELEGRAM_BOT_TOKEN` and `ADMIN_ID` instead and talk to the bot.
+
+
 This copy intentionally does not include the owner's `.env`, `*.session`,
 database, logs, backups or virtual environment. Create your own Telegram
 sessions on your own machine.

@@ -23,8 +23,6 @@ DEFAULT_MEMBER_PREFS = {
     "mentions": True,
     "giveaways": True,
     "wins": True,
-    "checks": True,
-    "deadlines": False,
     "digest": False,
     # Minimum giveaway candidate score a member wants to see (0 = everything).
     "min_score": 0,
@@ -34,7 +32,6 @@ DEFAULT_MEMBER_PREFS = {
 KEYWORD_SCOPES = {
     "w": ("win_keywords", "🏆 Победы"),
     "g": ("giveaway_keywords", "🎁 Розыгрыши"),
-    "c": ("check_keywords", "💸 Чеки"),
     "h": ("high_priority_keywords", "⚡ Приоритет"),
     "i": ("ignore_keywords", "🚫 Игнор"),
 }
@@ -145,6 +142,9 @@ def filter_broadcast_members(
     return result
 
 
+DEFAULT_DIGEST_TIME = "10:00"
+
+
 def parse_hhmm(text: str) -> Optional[str]:
     """Validate/normalize 'H:M' input to 'HH:MM'; None if invalid."""
     match = re.fullmatch(r"\s*(\d{1,2})[:.](\d{1,2})\s*", text or "")
@@ -157,8 +157,8 @@ def parse_hhmm(text: str) -> Optional[str]:
 
 
 def seconds_until_hhmm(now: datetime, hhmm: str) -> float:
-    """Seconds until the next occurrence of HH:MM; invalid input falls back to 09:00."""
-    normalized = parse_hhmm(hhmm) or "09:00"
+    """Seconds until the next occurrence of HH:MM; invalid input falls back to the digest default."""
+    normalized = parse_hhmm(hhmm) or DEFAULT_DIGEST_TIME
     hour, minute = int(normalized[:2]), int(normalized[3:])
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
@@ -271,7 +271,7 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
             f"Тихие часы: {quiet_state}{quiet_range}",
             f"Кулдаун: {int(settings.get('cooldown_seconds') or 0)} сек",
             "",
-            f"📰 Дайджест: {_onoff(digest_cfg.get('enabled', True))} в {digest_cfg.get('time', '09:00')}",
+            f"📰 Дайджест: {_onoff(digest_cfg.get('enabled', True))} в {digest_cfg.get('time', DEFAULT_DIGEST_TIME)}",
         ]
     )
 
@@ -280,8 +280,6 @@ MEMBER_PREF_LABELS = {
     "mentions": "Упоминания",
     "giveaways": "Розыгрыши",
     "wins": "Победы",
-    "checks": "Чеки",
-    "deadlines": "Дедлайны",
     "digest": "Ежедневный дайджест",
 }
 

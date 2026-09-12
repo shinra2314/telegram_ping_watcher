@@ -485,6 +485,25 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_sends_due ON bot_pending_sends(send_at, sent_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pending_sends_token ON bot_pending_sends(token)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_member_engagement_tg ON member_engagement(tg_id)")
+
+        # --- schema 22: indexes for the bot's hot paths ----------------------
+        # The giveaway board filters on `(is_giveaway = 1 OR is_win = 1)` and
+        # orders by detected_at, four buckets plus four uncapped COUNT(*) per
+        # render. Without this it was four full scans of `pings` joined to
+        # `giveaway_candidates` on every home screen.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pings_board ON pings(is_giveaway, is_win, detected_at DESC)"
+        )
+        # The board's `sort=posted` branch orders by COALESCE(date, detected_at).
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_date ON pings(date)")
+        # `GROUP BY chat` in both analytics builders.
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_chat ON pings(chat)")
+        # list_bot_keys counts members per key with a correlated subquery; without
+        # this it scanned all of bot_members once per key row.
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_key ON bot_members(key_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source_scores_score ON source_scores(score DESC, total_pings DESC)"
+        )
         await db.commit()
 
 

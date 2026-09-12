@@ -18,6 +18,13 @@ async def cleanup_old_data(
 ) -> dict[str, int]:
     """Remove old market history, app events, and (optionally) old pings.
 
+    Ping retention only ages out low-value rows: wins, giveaways and favourites
+    are kept forever, matching ``enforce_db_size_cap``.
+    Without that guard the sweep silently erased won prizes (and giveaway posts
+    soft-deleted by their channel) from the debts board once they crossed the
+    retention line. Volume is still bounded — the size cap evicts giveaways to
+    the archive DB when the file grows past ``DB_MAX_SIZE_MB``.
+
     Returns a small stats dict with deletion counts.
     """
     stats = {"market_history": 0, "app_events": 0, "pings": 0, "vacuumed": 0}
@@ -32,16 +39,24 @@ async def cleanup_old_data(
         stats["app_events"] = cur.rowcount or 0
         if pings_retention_days and pings_retention_days > 0:
             cutoff = (datetime.now() - timedelta(days=pings_retention_days)).replace(microsecond=0).isoformat()
-            # Delete in batches to keep WAL small
+            selector = "detected_at < ? AND is_win = 0 AND is_giveaway = 0 AND is_favorite = 0"
+            # Delete in batches to keep WAL small. ``pings_fts`` has no delete
+            # trigger, so its rows go first (mirrors ``database.delete_ping``).
             total = 0
             while True:
-                cur = await db.execute(
-                    "DELETE FROM pings WHERE id IN (SELECT id FROM pings WHERE detected_at < ? LIMIT 1000)",
-                    (cutoff,),
-                )
-                deleted = cur.rowcount or 0
-                total += deleted
-                if deleted < 1000:
+                ids = [
+                    int(row[0])
+                    for row in await (await db.execute(
+                        f"SELECT id FROM pings WHERE {selector} LIMIT 1000", (cutoff,)
+                    )).fetchall()
+                ]
+                if not ids:
+                    break
+                placeholders = ",".join("?" * len(ids))
+                await db.execute(f"DELETE FROM pings_fts WHERE rowid IN ({placeholders})", ids)
+                cur = await db.execute(f"DELETE FROM pings WHERE id IN ({placeholders})", ids)
+                total += cur.rowcount or 0
+                if len(ids) < 1000:
                     break
             stats["pings"] = total
         await db.commit()
@@ -52,27 +67,6 @@ async def cleanup_old_data(
             except Exception:
                 pass
     return stats
-
-
-async def purge_stale_checks(minutes: int = 60) -> int:
-    """Delete redeemable-check pings older than ``minutes``.
-
-    CryptoBot чеки are grabbed within minutes; a stale one is dead weight. Only
-    *pure* ephemeral checks are removed — checks the owner favourited or that
-    turned out to be wins are spared (they carry value beyond the check). The
-    ``pings_fts`` virtual table has no delete trigger, so its rows are removed
-    first, mirroring ``database.delete_ping``. Returns the number deleted.
-    """
-    cutoff = (datetime.now() - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
-    selector = "is_check = 1 AND is_favorite = 0 AND is_win = 0 AND detected_at < ?"
-    async with _connect() as db:
-        await db.execute(
-            f"DELETE FROM pings_fts WHERE rowid IN (SELECT id FROM pings WHERE {selector})",
-            (cutoff,),
-        )
-        cur = await db.execute(f"DELETE FROM pings WHERE {selector}", (cutoff,))
-        await db.commit()
-        return int(cur.rowcount or 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -109,14 +103,41 @@ async def _table_columns(db: aiosqlite.Connection, schema: str, table: str) -> l
     return cols
 
 
-async def cleanup_unbounded_tables(*, scan_runs_keep: int = 500, audit_days: int = 90) -> dict[str, int]:
-    """Trim the four tables that otherwise grow forever.
+# Newest history rows kept per settings key, on top of the age cap. An age cap
+# alone bounds nothing when a key is rewritten on a timer: `obsidian_sync` was
+# audited every 30 s and reached 141 666 rows / 111 MB — 82 % of the database —
+# while still sitting inside the 90-day window.
+SETTINGS_HISTORY_PER_KEY = 200
+
+# Checkpoints are keyed (session_name, username|channel:id), so the table is the
+# cross product of accounts x tracked usernames x channels and never shrinks on
+# its own — a third of the rows here were for channels last seen months ago.
+CHECKPOINT_STALE_DAYS = 90
+
+
+async def cleanup_unbounded_tables(
+    *,
+    scan_runs_keep: int = 500,
+    audit_days: int = 90,
+    history_per_key: int = SETTINGS_HISTORY_PER_KEY,
+    checkpoint_days: int = CHECKPOINT_STALE_DAYS,
+) -> dict[str, int]:
+    """Trim the tables that otherwise grow forever.
 
     ``scan_runs`` is capped by count (newest N kept) but rows still ``running``
     are always spared. ``settings_history``/``access_audit``/``giveaway_actions``
-    are capped by age. Returns per-table deletion counts.
+    are capped by age, and ``settings_history`` additionally by count per key.
+    ``scan_checkpoints`` drops rows for channels not seen in ``checkpoint_days``;
+    a dropped checkpoint only means that channel is re-read from its window on
+    the next sweep, never a missed message. Returns per-table deletion counts.
     """
-    stats = {"scan_runs": 0, "settings_history": 0, "access_audit": 0, "giveaway_actions": 0}
+    stats = {
+        "scan_runs": 0,
+        "settings_history": 0,
+        "access_audit": 0,
+        "giveaway_actions": 0,
+        "scan_checkpoints": 0,
+    }
     async with _connect() as db:
         if scan_runs_keep and scan_runs_keep > 0:
             cur = await db.execute(
@@ -136,6 +157,26 @@ async def cleanup_unbounded_tables(*, scan_runs_keep: int = 500, audit_days: int
             stats["access_audit"] = cur.rowcount or 0
             cur = await db.execute("DELETE FROM giveaway_actions WHERE created_at < ?", (cutoff,))
             stats["giveaway_actions"] = cur.rowcount or 0
+        if history_per_key and history_per_key > 0:
+            cur = await db.execute(
+                """
+                DELETE FROM settings_history
+                WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY key ORDER BY id DESC) AS rn
+                        FROM settings_history
+                    ) WHERE rn <= ?
+                )
+                """,
+                (history_per_key,),
+            )
+            stats["settings_history"] += cur.rowcount or 0
+        if checkpoint_days and checkpoint_days > 0:
+            stale = (datetime.now() - timedelta(days=checkpoint_days)).replace(microsecond=0).isoformat()
+            cur = await db.execute(
+                "DELETE FROM scan_checkpoints WHERE COALESCE(updated_at, '') < ?", (stale,)
+            )
+            stats["scan_checkpoints"] = cur.rowcount or 0
         await db.commit()
     return stats
 

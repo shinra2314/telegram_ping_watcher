@@ -1,7 +1,7 @@
 """Aggregated boards: tasks overview, giveaway board, debt board."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional, Sequence
 
 import aiosqlite
@@ -12,16 +12,10 @@ from .pings import get_pings
 
 
 async def get_task_overview(limit: int = 300) -> dict[str, list[dict[str, Any]]]:
-    rows = await get_pings(limit=limit, chat_type="giveaway", sort_by="deadline_at", sort_order="ASC")
-    now = datetime.now()
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
+    rows = await get_pings(limit=limit, chat_type="giveaway", sort_by="detected_at", sort_order="DESC")
     buckets: dict[str, list[dict[str, Any]]] = {
-        "overdue": [],
-        "today": [],
-        "tomorrow": [],
+        "claim_prize": [],
         "waiting_result": [],
-        "no_deadline": [],
         "all_open": [],
     }
     closed = {"claimed", "scam", "missed", "missed_unsubscribe", "missed_reply", "closed"}
@@ -31,17 +25,8 @@ async def get_task_overview(limit: int = 300) -> dict[str, list[dict[str, Any]]]
         buckets["all_open"].append(row)
         if row.get("action_status") == "waiting_result":
             buckets["waiting_result"].append(row)
-        deadline = _parse_iso_datetime(row.get("deadline_at"))
-        if not deadline:
-            if not row.get("is_win") and row.get("action_status") != "claim_prize":
-                buckets["no_deadline"].append(row)
-            continue
-        if deadline < now:
-            buckets["overdue"].append(row)
-        elif deadline.date() == today:
-            buckets["today"].append(row)
-        elif deadline.date() == tomorrow:
-            buckets["tomorrow"].append(row)
+        elif row.get("is_win") or row.get("action_status") == "claim_prize":
+            buckets["claim_prize"].append(row)
     return buckets
 
 
@@ -61,38 +46,14 @@ def _giveaway_board_row(row: aiosqlite.Row, now: Optional[datetime] = None) -> d
     candidate_status = item.get("candidate_status") or ""
     item["is_final"] = giveaway_status in {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"} or action_status in {"claimed", "missed", "scam", "closed"}
     item["is_claim"] = bool(item.get("is_win")) or action_status == "claim_prize"
-    deadline = _parse_iso_datetime(item.get("deadline_at"))
-    item["deadline_state"] = "missing"
-    item["deadline_seconds"] = None
-    item["deadline_badge_class"] = "bad"
-    if deadline:
-        seconds = int((deadline - now).total_seconds())
-        item["deadline_seconds"] = seconds
-        if seconds < 0:
-            item["deadline_state"] = "overdue"
-            item["deadline_badge_class"] = "bad"
-        elif deadline.date() == now.date():
-            item["deadline_state"] = "today"
-            item["deadline_badge_class"] = "warn"
-        elif deadline.date() == (now + timedelta(days=1)).date():
-            item["deadline_state"] = "tomorrow"
-            item["deadline_badge_class"] = "info"
-        else:
-            item["deadline_state"] = "upcoming"
-            item["deadline_badge_class"] = "good"
-    elif item["is_claim"]:
-        item["deadline_state"] = "claim_unknown"
-        item["deadline_badge_class"] = "warn"
     item["workflow_stage"] = _giveaway_workflow_stage(item)
     item["needs_decision"] = (
         not item["is_final"]
         and (
             action_status in {"new", "to_check", "claim_prize"}
             or candidate_status in {"recommended", "manual_required"}
-            or (not item.get("deadline_at") and not item["is_claim"])
         )
     )
-    item["deadline_label"] = item.get("deadline_at") or "deadline_missing"
     item["workflow_hint"] = _giveaway_workflow_hint(item)
     item["sort_rank"] = _giveaway_sort_rank(item)
     return item
@@ -101,63 +62,120 @@ def _giveaway_board_row(row: aiosqlite.Row, now: Optional[datetime] = None) -> d
 def _giveaway_workflow_stage(item: dict[str, Any]) -> str:
     if item.get("is_final"):
         return "done"
-    if item.get("blocked_reason") or item.get("external_requirements"):
-        return "manual"
+    # A claim outranks the join-time analysis: the prize is owed either way.
     if item.get("is_claim"):
         return "claim"
-    if not item.get("deadline_at"):
-        return "missing_deadline"
-    if item.get("deadline_state") == "overdue":
-        return "overdue"
-    if item.get("deadline_state") in {"today", "tomorrow"}:
-        return "soon"
+    if item.get("blocked_reason") or item.get("external_requirements"):
+        return "manual"
     return "waiting"
 
 
 def _giveaway_sort_rank(item: dict[str, Any]) -> int:
     if item.get("is_final"):
         return 90
+    if item.get("is_claim"):
+        return 1
     if item.get("blocked_reason") or item.get("external_requirements"):
         return 15
-    if item.get("is_claim"):
-        return 0 if item.get("deadline_state") == "overdue" else 1
-    if item.get("deadline_state") == "overdue":
-        return 5
-    if item.get("deadline_state") == "today":
-        return 10
     if item.get("candidate_status") == "recommended":
         return 12
-    if item.get("deadline_state") == "tomorrow":
-        return 20
-    if item.get("workflow_stage") == "missing_deadline":
-        return 40
     return 50
 
 
 def _giveaway_workflow_hint(item: dict[str, Any]) -> str:
     if item.get("is_final"):
         return "closed"
-    if item.get("blocked_reason") or item.get("external_requirements"):
-        return "manual_review"
     if item.get("is_claim"):
         return "claim_prize"
-    if not item.get("deadline_at"):
-        return "set_deadline"
+    if item.get("blocked_reason") or item.get("external_requirements"):
+        return "manual_review"
     if item.get("candidate_status") == "recommended":
         return "recommended"
     return "watch"
 
 
-async def get_giveaway_board(limit: int = 80) -> dict[str, Any]:
+# Bucket predicates, shared by the full board and the cheap counters below so
+# the two can never drift apart. `p` is the `pings` alias, `c` the LEFT JOINed
+# `giveaway_candidates` row.
+_BASE_WHERE = "(p.is_giveaway = 1 OR p.is_win = 1)"
+_STATS_BASE_WHERE = "(is_giveaway = 1 OR is_win = 1)"
+_ACTIVE_WHERE = (
+    f"{_BASE_WHERE} "
+    "AND COALESCE(p.giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') "
+    "AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')"
+)
+
+BUCKET_WHERE = {
+    # Manual-only requirements (captcha, comments) describe how to *enter* a
+    # giveaway, so they only ever divert candidates. A win is already won —
+    # gating it on them dropped owed prizes out of every bucket at once.
+    "need_action": (
+        _ACTIVE_WHERE
+        + " AND (p.is_win = 1"
+        + " OR COALESCE(p.action_status, 'new') IN ('claim_prize', 'to_check')"
+        + " OR COALESCE(c.status, '') = 'recommended')"
+        + " AND (p.is_win = 1"
+        + " OR (COALESCE(c.status, '') != 'manual_required'"
+        + " AND COALESCE(c.blocked_reason, '') = ''"
+        + " AND COALESCE(c.external_requirements, '[]') IN ('[]', '')))"
+    ),
+    "waiting_result": (
+        _ACTIVE_WHERE
+        + " AND p.is_win = 0"
+        + " AND COALESCE(p.action_status, 'new') = 'waiting_result'"
+    ),
+    "suspicious": (
+        _ACTIVE_WHERE
+        + " AND p.is_win = 0"
+        + " AND (COALESCE(c.status, '') = 'manual_required'"
+        + " OR COALESCE(c.blocked_reason, '') <> ''"
+        + " OR COALESCE(c.external_requirements, '[]') NOT IN ('[]', ''))"
+    ),
+    "done": (
+        _BASE_WHERE
+        + " AND (COALESCE(p.giveaway_status, '') IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed')"
+        + " OR COALESCE(p.action_status, '') IN ('claimed', 'missed', 'scam', 'closed'))"
+    ),
+}
+
+
+async def giveaway_bucket_total(bucket: str = "need_action") -> int:
+    """Rows in one board bucket, and nothing else.
+
+    The home screen needs a single number ("к действию"). Calling
+    ``get_giveaway_board`` for it cost ~17 queries — four bucket fetches, four
+    counts, board stats and the outbox — of which it used one.
+    """
+    where_sql = BUCKET_WHERE.get(bucket) or BUCKET_WHERE["need_action"]
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM pings p
+            LEFT JOIN giveaway_candidates c ON c.ping_id = p.id
+            WHERE {where_sql}
+            """
+        )).fetchone()
+    return int(row["total"] or 0)
+
+
+async def get_giveaway_board(
+    limit: int = 80, sort: str = "detected", include_outbox: bool = True
+) -> dict[str, Any]:
+    """Bucketed giveaway board.
+
+    ``sort`` picks the tiebreak inside every bucket: ``detected`` (when the scan
+    found the post, the default) or ``posted`` (the message's own date). Bucket
+    rank always wins — a claimable prize stays on top either way.
+
+    ``include_outbox`` adds the live-outbox stats block, which costs a second
+    connection and six queries. The bot never renders it, so it asks for False.
+    """
+    sort = "posted" if str(sort or "").lower() == "posted" else "detected"
     now = _now_iso()
     now_dt = _parse_iso_datetime(now) or datetime.now()
-    base_where = "(p.is_giveaway = 1 OR p.is_win = 1)"
-    stats_base_where = "(is_giveaway = 1 OR is_win = 1)"
-    active_where = (
-        f"{base_where} "
-        "AND COALESCE(p.giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') "
-        "AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')"
-    )
+    stats_base_where = _STATS_BASE_WHERE
     select_sql = """
         SELECT
             p.*,
@@ -175,65 +193,50 @@ async def get_giveaway_board(limit: int = 80) -> dict[str, Any]:
         LEFT JOIN giveaway_candidates c ON c.ping_id = p.id
     """
 
+    async def count_bucket(db: aiosqlite.Connection, where_sql: str) -> int:
+        """Rows matching a bucket, ignoring the page limit (header counters)."""
+        row = await (await db.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM pings p
+            LEFT JOIN giveaway_candidates c ON c.ping_id = p.id
+            WHERE {where_sql}
+            """
+        )).fetchone()
+        return int(row["total"] or 0)
+
+    order_sql = "COALESCE(p.date, p.detected_at) DESC" if sort == "posted" else "p.detected_at DESC"
+
     async def fetch_bucket(db: aiosqlite.Connection, where_sql: str) -> list[dict[str, Any]]:
         rows = await (await db.execute(
             f"""
             {select_sql}
             WHERE {where_sql}
             ORDER BY
-                CASE WHEN p.deadline_at IS NULL OR p.deadline_at = '' THEN 1 ELSE 0 END,
-                p.deadline_at ASC,
-                p.detected_at DESC
+                {order_sql}
             LIMIT ?
             """,
             (min(limit * 4, 500),),
         )).fetchall()
         items = [_giveaway_board_row(row, now_dt) for row in rows]
-        items.sort(key=lambda item: (int(item.get("sort_rank") or 99), item.get("deadline_at") or "9999-12-31", -int(item.get("id") or 0)))
+        # Two stable passes: newest first by the chosen date (id breaks ties),
+        # then bucket rank on top — a claimable prize never sinks below a
+        # fresher candidate.
+        if sort == "posted":
+            items.sort(key=lambda item: (str(item.get("date") or item.get("detected_at") or ""),
+                                         int(item.get("id") or 0)), reverse=True)
+        else:
+            items.sort(key=lambda item: (str(item.get("detected_at") or ""),
+                                         int(item.get("id") or 0)), reverse=True)
+        items.sort(key=lambda item: int(item.get("sort_rank") or 99))
         return items[:limit]
+
+    bucket_where = BUCKET_WHERE
 
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
-        buckets = {
-            "need_action": await fetch_bucket(
-                db,
-                active_where
-                + " AND (p.is_win = 1"
-                + " OR COALESCE(p.action_status, 'new') IN ('claim_prize', 'to_check')"
-                + " OR COALESCE(c.status, '') = 'recommended')"
-                + " AND COALESCE(c.status, '') != 'manual_required'"
-                + " AND COALESCE(c.blocked_reason, '') = ''"
-                + " AND COALESCE(c.external_requirements, '[]') IN ('[]', '')",
-            ),
-            "waiting_result": await fetch_bucket(
-                db,
-                active_where
-                + " AND p.is_win = 0"
-                + " AND COALESCE(p.action_status, 'new') = 'waiting_result'"
-                + " AND p.deadline_at IS NOT NULL AND p.deadline_at <> ''",
-            ),
-            "no_deadline": await fetch_bucket(
-                db,
-                active_where
-                + " AND p.is_win = 0"
-                + " AND COALESCE(p.action_status, 'new') != 'claim_prize'"
-                + " AND (p.deadline_at IS NULL OR p.deadline_at = '')",
-            ),
-            "suspicious": await fetch_bucket(
-                db,
-                active_where
-                + " AND p.is_win = 0"
-                + " AND (COALESCE(c.status, '') = 'manual_required'"
-                + " OR COALESCE(c.blocked_reason, '') <> ''"
-                + " OR COALESCE(c.external_requirements, '[]') NOT IN ('[]', ''))",
-            ),
-            "done": await fetch_bucket(
-                db,
-                base_where
-                + " AND (COALESCE(p.giveaway_status, '') IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed')"
-                + " OR COALESCE(p.action_status, '') IN ('claimed', 'missed', 'scam', 'closed'))",
-            ),
-        }
+        buckets = {key: await fetch_bucket(db, where) for key, where in bucket_where.items()}
+        bucket_totals = {key: await count_bucket(db, where) for key, where in bucket_where.items()}
         stats_row = await (await db.execute(
             f"""
             SELECT
@@ -241,14 +244,11 @@ async def get_giveaway_board(limit: int = 80) -> dict[str, Any]:
                 SUM(CASE WHEN COALESCE(giveaway_status, '') = 'pending' THEN 1 ELSE 0 END) AS pending,
                 SUM(CASE WHEN (COALESCE(action_status, 'new') = 'claim_prize' OR is_win = 1) AND COALESCE(giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') AND COALESCE(action_status, '') NOT IN ('claimed', 'missed', 'scam', 'closed') THEN 1 ELSE 0 END) AS claim_prize,
                 SUM(CASE WHEN is_win = 0 AND COALESCE(action_status, 'new') = 'waiting_result' AND COALESCE(giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') THEN 1 ELSE 0 END) AS waiting_result,
-                SUM(CASE WHEN is_win = 0 AND (deadline_at IS NULL OR deadline_at = '') AND COALESCE(giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') THEN 1 ELSE 0 END) AS no_deadline,
-                SUM(CASE WHEN deadline_at IS NOT NULL AND deadline_at <> '' AND deadline_at < ? AND COALESCE(giveaway_status, '') NOT IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') AND COALESCE(action_status, '') NOT IN ('claimed', 'missed', 'scam', 'closed') THEN 1 ELSE 0 END) AS overdue,
                 SUM(CASE WHEN COALESCE(giveaway_status, '') IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed') OR COALESCE(action_status, '') IN ('claimed', 'missed', 'scam', 'closed') THEN 1 ELSE 0 END) AS done,
                 SUM(CASE WHEN COALESCE(giveaway_status, '') = 'missed_reply' THEN 1 ELSE 0 END) AS missed_reply
             FROM pings
             WHERE {stats_base_where}
-            """,
-            (now,),
+            """
         )).fetchone()
         candidate_rows = await (await db.execute(
             """
@@ -269,13 +269,61 @@ async def get_giveaway_board(limit: int = 80) -> dict[str, Any]:
         )).fetchall()
         return {
             "generated_at": now,
+            "sort": sort,
             "stats": {key: int(stats_row[key] or 0) for key in stats_row.keys()},
             "candidate_statuses": [dict(row) for row in candidate_rows],
             "action_statuses": [dict(row) for row in action_rows],
-            "outbox": await get_outbox_stats(),
+            "outbox": await get_outbox_stats() if include_outbox else {},
             "buckets": buckets,
             "bucket_counts": {key: len(value) for key, value in buckets.items()},
+            # Uncapped per-bucket totals: `bucket_counts` stops at `limit`, so a
+            # paged view needs these to show how much is really queued.
+            "bucket_totals": bucket_totals,
         }
+
+
+async def giveaway_account_counts(open_only: bool = True) -> dict[str, dict[str, int]]:
+    """Per mentioned account: how many wins / giveaways sit on the board.
+
+    Grouped in SQL over ``ping_mentions`` — the normalised sidecar table that
+    ``_sync_ping_indexes`` keeps in step with the JSON ``mentions`` column, and
+    which carries an index on ``username``. Reading the JSON column instead
+    meant an unbounded ``SELECT`` plus a ``json.loads`` per row on the event
+    loop, every time the account picker was opened.
+
+    `open_only` drops rows already closed out (claimed, missed, scam, …).
+    """
+    where = "(p.is_giveaway = 1 OR p.is_win = 1)"
+    if open_only:
+        where += (
+            " AND COALESCE(p.giveaway_status, '') NOT IN "
+            "('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed')"
+            " AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')"
+        )
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            f"""
+            SELECT
+                LOWER(m.username) AS username,
+                SUM(CASE WHEN p.is_win = 1 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN p.is_win = 1 THEN 0 ELSE 1 END) AS giveaways,
+                COUNT(*) AS total
+            FROM ping_mentions m
+            JOIN pings p ON p.id = m.ping_id
+            WHERE {where}
+            GROUP BY LOWER(m.username)
+            """
+        )).fetchall()
+    return {
+        str(row["username"]): {
+            "wins": int(row["wins"] or 0),
+            "giveaways": int(row["giveaways"] or 0),
+            "total": int(row["total"] or 0),
+        }
+        for row in rows
+        if str(row["username"] or "").strip()
+    }
 
 
 async def get_debt_board(tracked_usernames: Sequence[str], limit: int = 160) -> dict[str, Any]:
@@ -298,7 +346,10 @@ async def get_debt_board(tracked_usernames: Sequence[str], limit: int = 160) -> 
         FROM pings p
         LEFT JOIN giveaway_candidates c ON c.ping_id = p.id
         WHERE (p.is_win = 1 OR COALESCE(p.action_status, '') = 'claim_prize')
-          AND COALESCE(p.chat_type, '') = 'channel'
+          -- Channels and group chats both announce real results. Private chats
+          -- are excluded: they only ever hold forwarded copies of a post that is
+          -- already tracked at its source.
+          AND COALESCE(p.chat_type, '') IN ('channel', 'group')
           AND COALESCE(NULLIF(p.giveaway_status, ''), 'pending') = 'pending'
           AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')
         ORDER BY

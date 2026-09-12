@@ -23,7 +23,7 @@ from .app_ctx import (
     settings,
     state,
 )
-from .common import now_iso, record_app_event, start_background_task
+from .common import flood_wait_seconds, now_iso, record_app_event, start_background_task
 from .telegram_errors import AUTH_KEY_DUPLICATED_STATUS, auth_key_duplicated_message, is_auth_key_duplicated
 from .telegram_reconnect import reconnect_delay_seconds as calculate_reconnect_delay_seconds
 
@@ -280,8 +280,11 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
         start_background_task(f"telegram-watch:{clean_name}", monitor_client_disconnect(client, clean_name))
         logger.info("Account connected: %s", account.get("display", clean_name))
     except FloodWaitError as exc:
+        # Capped like every other flood wait: a raw FLOOD_WAIT_86400 here parked
+        # the account start for a day with nothing to show for it.
+        wait = flood_wait_seconds(exc.seconds)
         account.update({"status": "rate_limited", "last_error": f"Flood wait {exc.seconds}s"})
-        await asyncio.sleep(exc.seconds)
+        await asyncio.sleep(wait)
         await start_client(session_name, retry_count + 1)
     except Exception as exc:
         if is_auth_key_duplicated(exc):

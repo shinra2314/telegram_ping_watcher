@@ -15,11 +15,19 @@ dependencies = [
     "click==8.3.3",
     "colorama==0.4.6",
     "croniter==6.2.2",
+    # Native AES-IGE for Telethon. Without it Telethon falls back to pyaes,
+    # which decrypts every MTProto packet in pure Python ON the event loop —
+    # with 8+ clients that burned ~50% of the loop thread and froze the bot,
+    # the HTTP server and every awaited DB call for tens of seconds at a time.
+    "cryptg==0.6.0",
     "fastapi==0.136.1",
     "h11==0.16.0",
     "httpcore==1.0.9",
     "httpx==0.28.1",
     "idna==3.15",
+    # Renders the daily digest's two treemap cards (src/pulse_desk/digest_cards.py).
+    # Optional at runtime: without it the digest falls back to its text form.
+    "pillow==12.2.0",
     "pyaes==1.6.1",
     "pyasn1==0.6.3",
     "pydantic==2.13.4",

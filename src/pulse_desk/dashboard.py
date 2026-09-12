@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any
 
 
@@ -32,6 +34,31 @@ def _attention_item(kind: str, title: str, text: str, value: int | str, icon: st
     }
 
 
+async def collect_dashboard(include_problems: bool = True) -> dict[str, Any]:
+    """Собрать сводку пульта: пять запросов и одна чистая сборка.
+
+    Раньше сборка жила в роутере, то есть была доступна только вебу; бот считал
+    похожие числа своим способом и они расходились. Теперь обе поверхности
+    зовут это, а роутер добавляет сверху только свой кэш.
+    """
+    from database import get_giveaway_board, get_recent_problem_events, get_task_overview
+
+    from .analytics import build_analytics
+    from .health_report import system_status
+
+    status_payload, analytics = await asyncio.gather(system_status(), build_analytics())
+    tasks = await get_task_overview(limit=120)
+    giveaway_board = await get_giveaway_board(limit=120)
+    problem_events = await get_recent_problem_events(limit=5) if include_problems else []
+    return build_dashboard_summary(
+        status=status_payload,
+        analytics=analytics,
+        tasks=tasks,
+        giveaway_board=giveaway_board,
+        problem_events=problem_events,
+    )
+
+
 def build_dashboard_summary(
     *,
     status: dict[str, Any],
@@ -62,17 +89,12 @@ def build_dashboard_summary(
     channel_memberships_total = _as_int(analytics.get("channel_memberships_total"))
     analytics_total_channels = _as_int(analytics.get("total_channels")) or channel_memberships_total or channel_chats_total
 
-    overdue = _bucket_count(tasks, "overdue")
-    today = _bucket_count(tasks, "today")
-    tomorrow = _bucket_count(tasks, "tomorrow")
-    no_deadline_tasks = _bucket_count(tasks, "no_deadline")
+    claim_tasks = _bucket_count(tasks, "claim_prize")
     open_tasks = _bucket_count(tasks, "all_open")
 
     need_action = _as_int(board_counts.get("need_action"), _as_int(board_stats.get("claim_prize")))
     waiting_result = _as_int(board_counts.get("waiting_result"), _as_int(board_stats.get("waiting_result")))
     suspicious = _as_int(board_counts.get("suspicious"))
-    no_deadline = _as_int(board_counts.get("no_deadline"), _as_int(board_stats.get("no_deadline")))
-    giveaway_overdue = _as_int(board_stats.get("overdue"))
 
     scan_accounts_done = _as_int(scan.get("processed_accounts"))
     scan_accounts_total = _as_int(scan.get("total_accounts"))
@@ -90,14 +112,8 @@ def build_dashboard_summary(
         attention.append(_attention_item("new", "Новые упоминания", "Свежие сообщения еще не разобраны.", new_pings, "sparkles", "warn"))
     if important:
         attention.append(_attention_item("important", "Важные сигналы", "Высокий приоритет или ручная отметка important.", important, "flame", "bad"))
-    if overdue or giveaway_overdue:
-        attention.append(_attention_item("overdue", "Просроченные дедлайны", "Проверьте задачи и розыгрыши с истекшим сроком.", overdue + giveaway_overdue, "triangle-alert", "bad"))
-    if today:
-        attention.append(_attention_item("today", "Дедлайны сегодня", "Лучше закрыть до следующего фонового скана.", today, "calendar-days", "warn"))
     if need_action:
         attention.append(_attention_item("giveaway-action", "Забрать или проверить", "Есть розыгрыши, где требуется ручное решение.", need_action, "mouse-pointer-click", "warn"))
-    if no_deadline:
-        attention.append(_attention_item("no-deadline", "Нет дедлайна", "Нужно обновить профиль канала или поставить срок вручную.", no_deadline, "calendar-x", "bad"))
     if suspicious:
         attention.append(_attention_item("manual", "Ручная проверка", "Найдены внешние условия, captcha или подозрительные требования.", suspicious, "shield-alert", "bad"))
     if accounts_total and accounts_online < accounts_total:
@@ -186,15 +202,10 @@ def build_dashboard_summary(
             "channel_chats_total": channel_chats_total,
             "channel_memberships_total": channel_memberships_total,
             "open_tasks": open_tasks,
-            "overdue_tasks": overdue,
-            "today_tasks": today,
-            "tomorrow_tasks": tomorrow,
-            "no_deadline_tasks": no_deadline_tasks,
+            "claim_tasks": claim_tasks,
             "giveaway_need_action": need_action,
             "giveaway_waiting_result": waiting_result,
-            "giveaway_no_deadline": no_deadline,
             "giveaway_suspicious": suspicious,
-            "giveaway_overdue": giveaway_overdue,
         },
         "generated_at": giveaway_board.get("generated_at") or status.get("time") or "",
     }

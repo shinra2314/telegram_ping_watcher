@@ -37,7 +37,6 @@ import database  # noqa: E402
 database.DB_PATH = TEST_DB_PATH
 
 from pulse_desk.jobs import runtime_health, start_supervised_task  # noqa: E402
-from pulse_desk.live_hub import LiveHub  # noqa: E402
 from pulse_desk.runtime import AppState  # noqa: E402
 
 
@@ -174,37 +173,6 @@ class RuntimeHealthTests(unittest.TestCase):
         self.assertIsNotNone(state.job_last_error.get("flaky"))
 
 
-class LiveHubTests(unittest.TestCase):
-    def test_fanout_to_multiple_subscribers(self):
-        async def _drive():
-            hub = LiveHub()
-            sub_a = await hub.subscribe()
-            sub_b = await hub.subscribe()
-            self.assertEqual(hub.subscriber_count(), 2)
-            hub.publish("ping", {"id": 1, "chat": "x"}, event_id=42)
-            ev_a = await asyncio.wait_for(sub_a.queue.get(), timeout=1.0)
-            ev_b = await asyncio.wait_for(sub_b.queue.get(), timeout=1.0)
-            self.assertEqual(ev_a["event_type"], "ping")
-            self.assertEqual(ev_a["id"], 42)
-            self.assertEqual(ev_a["payload"]["id"], 1)
-            self.assertEqual(ev_b["payload"]["chat"], "x")
-            await hub.unsubscribe(sub_a)
-            await hub.unsubscribe(sub_b)
-            self.assertEqual(hub.subscriber_count(), 0)
-
-        asyncio.run(_drive())
-
-    def test_lagged_flag_on_queue_full(self):
-        async def _drive():
-            hub = LiveHub()
-            sub = await hub.subscribe(maxsize=2)
-            for i in range(5):
-                hub.publish("ping", {"i": i})
-            # Should have at most 2 events, lagged flag set
-            self.assertEqual(sub.queue.qsize(), 2)
-            self.assertTrue(sub._lagged)
-
-        asyncio.run(_drive())
 
 
 if __name__ == "__main__":

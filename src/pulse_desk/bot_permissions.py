@@ -25,11 +25,11 @@ from typing import Any, Optional
 # feature code -> (label, hint shown in the web UI)
 FEATURES: dict[str, tuple[str, str]] = {
     "stats": ("📊 Сводка", "Статистика: сколько записей, новых, избранных"),
+    "analytics": ("📈 Аналитика", "Отчёт: источники, авторы, часы, качество по дням"),
     "recent": ("🕐 Последние", "Лента упоминаний и карточки записей"),
-    "checks": ("💸 Чеки", "Лента найденных чеков"),
     "search": ("🔎 Поиск", "Поиск по всей базе упоминаний"),
-    "giveaways": ("🎁 Розыгрыши", "Доска розыгрышей и срочные дедлайны"),
-    "market": ("💹 Курсы", "Курсы криптовалют"),
+    "giveaways": ("🎁 Розыгрыши", "Доска розыгрышей"),
+    "market": ("💹 Курсы", "Курсы криптовалют и конвертер валют"),
     "status": ("🛰 Статус", "Состояние аккаунтов, аптайм, размер базы"),
 }
 
@@ -38,8 +38,6 @@ NOTIFY_TYPES: dict[str, tuple[str, str]] = {
     "mentions": ("🔔 Упоминания", "Любое совпадение по отслеживаемым юзернеймам"),
     "giveaways": ("🎁 Розыгрыши", "Найден новый розыгрыш"),
     "wins": ("🏆 Победы", "Похоже на победу в розыгрыше"),
-    "checks": ("💸 Чеки", "Найден чек / раздача с деньгами"),
-    "deadlines": ("⏰ Дедлайны", "Напоминания о дедлайнах"),
     "digest": ("📰 Дайджест", "Ежедневная сводка"),
 }
 
@@ -48,8 +46,6 @@ NOTIFY_TYPE_ALIASES: dict[str, str] = {
     "mention": "mentions",
     "giveaway": "giveaways",
     "win": "wins",
-    "check": "checks",
-    "deadline": "deadlines",
     "digest": "digest",
 }
 
@@ -244,6 +240,12 @@ def _mention_names(mentions: Any) -> set[str]:
     if not isinstance(mentions, (list, tuple, set)):
         return set()
     return {str(item).strip().lstrip("@").lower() for item in mentions if str(item).strip()}
+
+
+def account_mentioned(mentions: Any, name: str) -> bool:
+    """True when `name` (with or without a leading '@') is one of `mentions`."""
+    wanted = str(name or "").strip().lstrip("@").lower()
+    return bool(wanted) and wanted in _mention_names(mentions)
 
 
 def accounts_allowed(perms: dict, mentions: Any) -> bool:

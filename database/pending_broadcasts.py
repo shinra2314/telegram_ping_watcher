@@ -65,6 +65,23 @@ async def claim_pending_broadcast(pb_id: int, status: str, decided_by: Optional[
     return dict(row) if row else None
 
 
+async def release_pending_broadcast(pb_id: int) -> bool:
+    """Undo a claim so a failed send can be retried.
+
+    ``claim_pending_broadcast`` is a one-shot ``UPDATE ... WHERE status='pending'``
+    and both callers claim *before* sending. Without this, any error during the
+    send left the row marked decided and the broadcast was never delivered and
+    could never be retried.
+    """
+    async with _connect() as db:
+        cursor = await db.execute(
+            "UPDATE pending_broadcasts SET status = 'pending', decided_by = NULL, decided_at = NULL WHERE id = ?",
+            (int(pb_id),),
+        )
+        await db.commit()
+        return bool(cursor.rowcount)
+
+
 async def get_due_pending_broadcasts(now_iso: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
     now_iso = now_iso or _now_iso()
     async with _connect() as db:

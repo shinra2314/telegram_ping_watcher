@@ -34,7 +34,7 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, is_win, action_status, giveaway_status, priority_score, deadline_source, mentions
+            SELECT id, text, is_win, action_status, giveaway_status, priority_score, mentions
             FROM pings
             WHERE is_giveaway = 1
             ORDER BY id DESC
@@ -67,25 +67,11 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
                     END,
                     action_status = ?,
                     priority_score = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 90 ELSE priority_score END,
-                    priority_label = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 'critical' ELSE priority_label END,
-                    deadline_at = CASE
-                        WHEN COALESCE(deadline_source, '') IN ('', 'channel_description_missing') THEN NULL
-                        ELSE deadline_at
-                    END,
-                    deadline_source = CASE
-                        WHEN COALESCE(deadline_source, '') IN ('', 'channel_description_missing') THEN ''
-                        ELSE deadline_source
-                    END,
-                    deadline_text = CASE
-                        WHEN COALESCE(deadline_source, '') IN ('', 'channel_description_missing') THEN ''
-                        ELSE deadline_text
-                    END
+                    priority_label = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 'critical' ELSE priority_label END
                 WHERE id = ?
                 """,
                 (next_giveaway_status, next_giveaway_status, next_action, int(row["id"])),
             )
-            if (row["deadline_source"] or "") in {"", "channel_description_missing"}:
-                await db.execute("DELETE FROM reminders WHERE ping_id = ? AND sent_at IS NULL", (int(row["id"]),))
             await db.commit()
         marked += 1
     return {"marked": marked}
@@ -181,14 +167,12 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
     enabled = 0
     disabled = 0
     enable_updates: list[tuple[Any, ...]] = []
-    disable_keep_deadline: list[tuple[Any, ...]] = []
-    disable_clear_deadline: list[tuple[Any, ...]] = []
-    delete_reminders_for: list[tuple[int]] = []
+    disable_updates: list[tuple[Any, ...]] = []
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, chat_type, is_giveaway, is_win, priority_score, action_status, deadline_source, mentions
+            SELECT id, text, chat_type, is_giveaway, is_win, priority_score, action_status, mentions
             FROM pings
             ORDER BY id DESC
             LIMIT ?
@@ -215,12 +199,7 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
                 next_action = "to_check" if int(row["priority_score"] or 0) >= 60 else "new"
             else:
                 next_action = current_action
-            keep_manual_deadline = (row["deadline_source"] or "") == "manual"
-            if keep_manual_deadline:
-                disable_keep_deadline.append((next_action, ping_id))
-            else:
-                disable_clear_deadline.append((next_action, ping_id))
-                delete_reminders_for.append((ping_id,))
+            disable_updates.append((next_action, ping_id))
             disabled += 1
 
         if enable_updates:
@@ -237,7 +216,7 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
                 """,
                 enable_updates,
             )
-        if disable_keep_deadline:
+        if disable_updates:
             await db.executemany(
                 """
                 UPDATE pings
@@ -246,28 +225,7 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
                     action_status = ?
                 WHERE id = ?
                 """,
-                disable_keep_deadline,
-            )
-        if disable_clear_deadline:
-            await db.executemany(
-                """
-                UPDATE pings
-                SET is_giveaway = 0,
-                    giveaway_status = '',
-                    action_status = ?,
-                    deadline_at = NULL,
-                    deadline_source = '',
-                    deadline_text = '',
-                    reminder_at = NULL,
-                    reminder_sent_at = NULL
-                WHERE id = ?
-                """,
-                disable_clear_deadline,
-            )
-        if delete_reminders_for:
-            await db.executemany(
-                "DELETE FROM reminders WHERE ping_id = ? AND sent_at IS NULL",
-                delete_reminders_for,
+                disable_updates,
             )
         await db.commit()
     return {"enabled": enabled, "disabled": disabled}
@@ -346,7 +304,7 @@ async def get_giveaway_candidate(ping_id: int) -> Optional[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             """
-            SELECT c.*, p.chat, p.chat_id, p.message_id, p.link, p.text, p.deadline_at,
+            SELECT c.*, p.chat, p.chat_id, p.message_id, p.link, p.text,
                    p.giveaway_status, p.action_status, p.mentions
             FROM giveaway_candidates c
             JOIN pings p ON p.id = c.ping_id
@@ -371,7 +329,7 @@ async def get_giveaway_candidates(
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             f"""
-            SELECT c.*, p.chat, p.chat_id, p.message_id, p.link, p.text, p.deadline_at,
+            SELECT c.*, p.chat, p.chat_id, p.message_id, p.link, p.text,
                    p.giveaway_status, p.action_status, p.mentions
             FROM giveaway_candidates c
             JOIN pings p ON p.id = c.ping_id

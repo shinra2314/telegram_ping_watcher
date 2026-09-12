@@ -19,6 +19,67 @@ def channel_sweep_start_id(checkpoints: Mapping[str, int]) -> int | None:
     return min(values)
 
 
+EDIT_SWEEP_IDLE_INTERVAL_SECONDS = 3600.0
+MIN_SCAN_GAP_SECONDS = 30.0
+
+
+def channel_has_new_messages(latest_message_id: object, sweep_start_id: object) -> bool:
+    """True when a channel posted something past its sweep checkpoint.
+
+    The dialog list already carries every channel's newest message id, so an
+    idle channel can be skipped without spending a history request on it.
+    Missing or zero ids never skip — on unknown data we scan.
+    """
+
+    try:
+        latest = int(latest_message_id or 0)
+        start = int(sweep_start_id or 0)
+    except (TypeError, ValueError):
+        return True
+    if latest <= 0 or start <= 0:
+        return True
+    return latest > start
+
+
+def edit_sweep_due(
+    last_run_at: float | None,
+    now: float,
+    interval: float = EDIT_SWEEP_IDLE_INTERVAL_SECONDS,
+) -> bool:
+    """Whether an idle channel is due for its recent-window (edit) pass.
+
+    Edits leave the channel's top message id untouched, so idle channels still
+    need re-reading — just far less often than every sweep.
+    """
+
+    if last_run_at is None:
+        return True
+    try:
+        return (float(now) - float(last_run_at)) >= float(interval)
+    except (TypeError, ValueError):
+        return True
+
+
+def next_scan_delay(
+    interval_seconds: object,
+    elapsed_seconds: object,
+    minimum: float = MIN_SCAN_GAP_SECONDS,
+) -> float:
+    """Sleep only what is left of the scan cycle.
+
+    Sleeping the full interval *after* the sweep made the real gap between
+    sweeps ``interval + sweep duration`` — a 20-minute sweep on a 15-minute
+    interval meant a new message could sit unseen for over half an hour.
+    """
+
+    try:
+        interval = float(interval_seconds)
+        elapsed = max(0.0, float(elapsed_seconds))
+    except (TypeError, ValueError):
+        return float(minimum)
+    return max(float(minimum), interval - elapsed)
+
+
 def clamp_runtime_int(value: object, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)

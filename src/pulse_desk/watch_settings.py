@@ -16,7 +16,7 @@ from telegram_ping_watcher import DEFAULT_USERNAMES, build_ping_regex, normalize
 
 from . import app_ctx
 from .app_ctx import settings, state
-from .bot_prefs import parse_hhmm
+from .bot_prefs import DEFAULT_DIGEST_TIME, parse_hhmm
 from .scan import normalize_recent_edit_scan_limit, normalize_scan_history_limit
 
 HIGH_PRIORITY_KEYWORDS_DEFAULT = ["срочно", "важно", "winner", "победитель", "итоги", "приз", "claim", "airdrop", "ton"]
@@ -49,7 +49,6 @@ def bootstrap_state() -> None:
     state.ping_regex = build_ping_regex(state.ping_usernames)
     state.win_keywords = [item.strip() for item in settings.win_keywords.split(",") if item.strip()]
     state.giveaway_keywords = [item.strip() for item in settings.giveaway_keywords.split(",") if item.strip()]
-    state.check_keywords = [item.strip() for item in settings.check_keywords.split(",") if item.strip()]
     state.high_priority_keywords = list(HIGH_PRIORITY_KEYWORDS_DEFAULT)
     state.ignore_keywords = []
     state.join_button_keywords = [item.strip() for item in settings.join_button_keywords.split(",") if item.strip()]
@@ -167,7 +166,6 @@ def default_keyword_settings() -> dict[str, list[str]]:
     return {
         "win_keywords": state.win_keywords,
         "giveaway_keywords": state.giveaway_keywords,
-        "check_keywords": state.check_keywords,
         "high_priority_keywords": state.high_priority_keywords,
         "ignore_keywords": state.ignore_keywords,
     }
@@ -189,7 +187,6 @@ async def load_keyword_settings() -> dict[str, list[str]]:
 def apply_keyword_settings(values: dict[str, list[str]]) -> None:
     state.win_keywords = values.get("win_keywords") or state.win_keywords
     state.giveaway_keywords = values.get("giveaway_keywords") or state.giveaway_keywords
-    state.check_keywords = values.get("check_keywords") or state.check_keywords
     state.high_priority_keywords = values.get("high_priority_keywords") or state.high_priority_keywords
     state.ignore_keywords = values.get("ignore_keywords") or []
 
@@ -343,12 +340,25 @@ async def load_digest_settings() -> dict:
     from database import get_setting
 
     saved = await get_setting("digest", None)
-    cfg = {"enabled": True, "time": "09:00"}
+    cfg = {"enabled": True, "time": DEFAULT_DIGEST_TIME}
     if isinstance(saved, dict):
         cfg.update(saved)
-    cfg["time"] = parse_hhmm(str(cfg.get("time") or "")) or "09:00"
+    cfg["time"] = parse_hhmm(str(cfg.get("time") or "")) or DEFAULT_DIGEST_TIME
     cfg["enabled"] = bool(cfg.get("enabled", True))
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Roulette reminder settings
+# ---------------------------------------------------------------------------
+
+
+async def load_roulette_settings() -> dict:
+    from database import get_setting
+
+    from .roulette import normalize_roulette_cfg
+
+    return normalize_roulette_cfg(await get_setting("roulette", None))
 
 
 bootstrap_state()

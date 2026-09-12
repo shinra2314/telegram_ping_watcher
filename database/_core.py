@@ -7,9 +7,12 @@ monkeypatch ``database.DB_PATH``; everything here reads it dynamically via
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
+import time
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -24,17 +27,12 @@ if str(SRC_DIR) not in sys.path:
 
 try:
     from pulse_desk.config import get_settings
-    from pulse_desk.deadlines import iso_or_none, parse_claim_deadline, parse_deadline, parse_participation_deadline
     from pulse_desk.giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule
 
     _settings = get_settings()
     DEFAULT_DB_PATH = _settings.db_path
     DEFAULT_BACKUP_DIR = _settings.backup_dir
 except Exception:  # pragma: no cover - keeps parser tests independent from optional config deps.
-    parse_deadline = None
-    parse_claim_deadline = None
-    parse_participation_deadline = None
-    iso_or_none = lambda value: value.replace(microsecond=0).isoformat() if value else None
     is_giveaway_outcome_text = lambda text: False
     is_win_text = lambda text, keywords: False
     giveaway_outcome_resolution = lambda text: "pending"
@@ -42,7 +40,7 @@ except Exception:  # pragma: no cover - keeps parser tests independent from opti
     DEFAULT_DB_PATH = Path(os.getenv("PULSE_DB_PATH", BASE_DIR / "pulse_desk.db"))
     DEFAULT_BACKUP_DIR = DEFAULT_DB_PATH.parent / "backups"
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 def db_path() -> Path:
@@ -62,13 +60,26 @@ def _now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+_SLOW_HOLD_SECONDS = float(os.getenv("PULSE_DB_TRACE_SECONDS", "2.0"))
+
+
 @asynccontextmanager
 async def _connect():
+    started = time.perf_counter()
     async with aiosqlite.connect(db_path()) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("PRAGMA foreign_keys=ON")
-        yield db
+        try:
+            yield db
+        finally:
+            held = time.perf_counter() - started
+            if held >= _SLOW_HOLD_SECONDS:
+                logging.getLogger("pulse_desk").warning(
+                    "DB connection held %.1fs by:\n%s",
+                    held,
+                    "".join(traceback.format_stack(limit=12)[:-1]),
+                )
 
 
 async def _columns(db: aiosqlite.Connection, table: str) -> set[str]:

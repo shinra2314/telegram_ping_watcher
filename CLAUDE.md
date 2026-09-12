@@ -36,8 +36,7 @@ uv sync --extra dev
 **Syntax validation (no linter configured):**
 ```powershell
 .\.venv\Scripts\python.exe -m py_compile main.py telegram_ping_watcher.py
-.\.venv\Scripts\python.exe -c "import main"   # imports every module + registers all routers
-node --check static/js/app-core.js   # requires Node.js; repeat per changed JS file
+.\.venv\Scripts\python.exe -c "import main"   # imports every module
 ```
 
 **Docker:**
@@ -47,7 +46,26 @@ docker compose up --build
 
 ## Architecture
 
-**Pulse Desk** is a Telegram channel monitoring app. It watches configured channels for mentions of tracked usernames, detects giveaway opportunities, tracks tasks/debts, and shows everything in a web dashboard with live updates.
+**Pulse Desk** is a Telegram channel monitoring app. It watches configured channels for
+mentions of tracked usernames, detects giveaway opportunities, tracks debts, and shows
+everything **in its Telegram bot**.
+
+The web dashboard was removed on 2026-09-12 — every screen it had now lives in the bot
+(feed with filters and search, ping cards with statuses/notes/tags, debts + the Obsidian
+note, the giveaway board with analyse/leave, a drawn dashboard and market heatmap, all
+settings, keys, people, accounts, services, backups, diagnostics). Gone with it:
+`static/`, every router but `routers/health.py`, the SSE hub and outbox fan-out
+(`live.py`, `live_hub.py`), web push (`push.py`, VAPID), `api_models.py` and the access
+tokens (`ADMIN_TOKEN`, `VIEWER_TOKEN`, `WEB_AUTH_TOKEN`, `PUBLIC_SHARE_MODE`,
+`ALLOW_QUERY_TOKEN`). The `push_subscriptions` and `outbox` tables stay in the schema,
+unused, by the same convention that keeps `deadline_*`. Two things did not move and were
+dropped on purpose: the printable HTML report (its job is done by CSV/JSON export and the
+digest cards) and the "Друзьям" share guide (a friend now gets a bot access key, not a
+token). **Do not reintroduce an HTTP UI.**
+
+uvicorn is still the process host and serves exactly one endpoint, `/api/health`:
+`scripts/pulse_watchdog.ps1` and `scripts/start_dashboard.ps1` poll it, so replacing the
+entry point would mean rewriting both Task Scheduler jobs for nothing.
 
 Deadline tracking and redeemable-check (чеки) detection were removed in 2026-07 — the
 owner works from the bot only, and both features cost a Telegram `GetFullChannel`
@@ -66,18 +84,12 @@ survives because the dashboard tiles read it.
 ### Layer breakdown
 
 ```
-main.py (~160 lines)
-  Entry point only: builds the FastAPI app, registers routers, runs the
-  startup/shutdown lifespan (DB init, settings load, bot + background jobs).
-  No business logic and no endpoints live here anymore.
+main.py (~134 lines)
+  Entry point only: the startup/shutdown lifespan (DB init, settings load, bot +
+  background jobs) and a FastAPI app that serves `/api/health`. No business logic.
 
-routers/                   — ALL HTTP endpoints. One module per area:
-  access (scheduled access), analytics, auth, backups, boards, bot_access,
-  export, giveaways, launcher, live (SSE), lookups, market, obsidian, pings,
-  push, scan, settings, system.
-  Registered in main.py via app.include_router(). They import singletons from
-  src/pulse_desk/app_ctx.py — NEVER from main (avoids circular imports).
-  New endpoint groups go here, not in main.py.
+routers/                   — what is left of HTTP: `health.py` and nothing else.
+  A new screen belongs in `src/pulse_desk/bot/sections/`, never here.
 
 src/pulse_desk/
   app_ctx.py        — Shared context: settings/state/logger singletons,
@@ -130,7 +142,12 @@ src/pulse_desk/
                       client is still caught), reconnects with capped backoff,
                       and records the outage in `state.bot_offline_since` →
                       `/api/health` (`bot_connected`, `bot_offline_seconds`;
-                      degraded past 10 min offline)
+                      degraded past 10 min offline). It is **supervised**, and
+                      calls `on_alive` each pass — the loop never returns, so
+                      that callback is the only thing that can tell the watchdog
+                      the supervisor itself is alive. It was fire-and-forget and
+                      absent from both monitoring lists, so if it died the bot
+                      went deaf while `/api/health` still said ok
   bot_permissions.py — Per-key grants (pure, unit tested): which bot sections a
                       guest may open, which notification types reach them, an
                       optional whitelist of tracked accounts, and `delay_minutes`
@@ -144,10 +161,63 @@ src/pulse_desk/
                       link (`key:link`), revoke/restore (`key:rm` / `key:on`) and
                       a confirmed delete (`key:del` → `key:delgo`). The keys list
                       shows revoked keys too — the panel is where they come back
-  bot_service.py    — init_bot: inline menus, slash commands, access keys,
-                      /access scheduled-access management
-  bot/views.py      — `GiveawayFilter` carries the whole giveaways-feed state in
-                      one callback (`gw:f:<sort>:<wins>:<account>:<page>`, ≤64 B):
+  bot_service.py    — back-compat shim re-exporting `bot/service.py:init_bot`
+  bot/service.py    — init_bot only: start the client, build the callback router,
+                      register sections, own the slash commands, the free-text
+                      catch-all and the `/access` text CLI. It used to be 2822
+                      lines with every screen as a closure inside one function
+                      and a ~600-line if-chain for callbacks; a section could not
+                      be tested, reused or moved. Screens now live in
+                      `bot/sections/*`
+  bot/router.py     — `CallbackRouter`: exact match → `:`-family → `_`-family,
+                      with the `feature=`/`admin=` gate declared at registration
+                      so the denial wording cannot drift between sections. A
+                      button nothing claims still gets the "кнопка устарела"
+                      answer, never a silent spinner. `Click` carries the press
+                      (data, segments, role, grants)
+  bot/sections/     — one module per area (feed, giveaways, home, analytics,
+                      market, converter, salary, keys, members, settings, prefs,
+                      scan, system, broadcast, roulette, legacy). Each exposes
+                      `register(router)` plus its own renderers, so the slash
+                      command and the button can never render different screens.
+                      `legacy.py` answers the underscore callbacks still sitting
+                      on old messages in the chat (`fav_`, `read_`, `gconfirm_`)
+  bot/pending.py    — free-text capture (Telethon has no ConversationHandler):
+                      one armed entry per sender in `state.bot_pending_inputs`,
+                      300 s TTL, swept on every new prompt. A section declares
+                      its input kind *with its consumer* (`register_prompt`), so
+                      adding "type a value here" is a local change; `admin=True`
+                      is enforced in `consume`
+  bot/persist.py    — every settings write: save → apply to the live
+                      `watch_settings` → audit → publish. A value saved but not
+                      applied leaves the running scanner on the old rules
+  bot/reply.py      — `safe_edit` / `respond_rich` / `tell` + the Telethon error
+                      shims. Split out so sections can answer without importing
+                      service.py back
+  bot/media.py      — `show_screen`: Telegram cannot edit a text message into a
+                      media one (or back), so a screen that changes kind is
+                      deleted and re-sent; same kind is a normal edit. Also the
+                      card cache — a Pillow render costs hundreds of ms and the
+                      callback query expires in ~15 s, so the same screen is
+                      drawn once (`render_cached`, always in `asyncio.to_thread`)
+  bot/render/canvas.py — the Aperture drawing vocabulary (grid canvas, header,
+                      stat row, treemap tile, fonts, save, prune), lifted out of
+                      `digest_cards` so every rendered screen looks identical.
+                      Pillow is imported inside the functions: without it the
+                      module still imports and the caller falls back to text
+  bot/settings_schema.py — editable settings as data (key, label, kind, bounds,
+                      unit, presets). Menus, validation and error wording are
+                      generated from it, so a new tunable is one table row
+                      instead of a hand-written branch that drifts
+  bot/views.py      — `FeedFilter` carries the whole mentions-feed state in one
+                      callback (`mon:f:<type>:<status>:<fav>:<sort>:<order>:<q>:<page>`,
+                      19 B): type, status, favourites, sort and direction. The
+                      search *text* does not fit 64 B, so the button carries only
+                      a flag and the string lives in `state.bot_feed_queries`
+                      (1 h TTL) — after a restart the feed honestly shows no
+                      search instead of someone else's. `GiveawayFilter` carries
+                      the giveaways-feed state in one callback
+                      (`gw:f:<sort>:<wins>:<account>:<page>`, ≤64 B):
                       sort by detection or by the message's own date, wins-only,
                       and one tracked account addressed **by index** into the
                       list `giveaway_accounts(perms)` rebuilds identically on
@@ -185,6 +255,20 @@ src/pulse_desk/
                       tested) + atomic write w/ dated backup. Note wins on
                       conflict; only the "done = claimed" bit is synced. Gated
                       by OBSIDIAN_SYNC_* env vars (see config.py)
+  health_report.py  — system status / diagnostics / setup checks as data. These
+                      lived inside routers/system.py, so they existed only while
+                      the web did, and the bot counted its own slightly different
+                      numbers. Now both surfaces read the same facts
+  dashboard.py      — `collect_dashboard` (the five queries + the pure assembly)
+                      and `build_dashboard_summary`. The bot's 🛰 Пульт and the
+                      web's /api/dashboard/summary call the same collector; the
+                      router only adds its 5 s cache on top
+  bot/render/screens.py — the drawn screens: the dashboard card (counters, daily
+                      sparkline, scan progress, the "what to deal with" list) and
+                      the market heatmap. The heatmap is the digest's own card —
+                      one implementation, because two copies had already drifted
+                      (one read `snapshots[0]` as "a day ago" when the query
+                      returns newest first, and printed every rise as a fall)
   analytics.py      — build_analytics (dashboard tiles + bot home/summary) /
                       build_detailed_analytics (bot 📈 Аналитика) / channel_account_stats
   jobs.py           — Task supervision primitives (start_tracked/supervised_task)
@@ -231,6 +315,26 @@ src/pulse_desk/
                       next tick (unlike the digest, which sleeps through a missed
                       slot). Bot surface: `/roulette [HH:MM]`, `rl:*` callbacks, the
                       🎰 button on the management grid; owner-only, no guest grant
+  salary.py         — The salary workbook (`SALARY_XLSX_PATH`), read-only and
+                      dependency-free: a `.xlsx` is a zip of XML, so `zipfile` +
+                      `ElementTree` parse it and openpyxl stays out of the
+                      requirements. Reads the *cached* `<v>` of every formula —
+                      Excel stores its last computed value, so the bot never
+                      evaluates a formula. Sheets are found **by name**
+                      (`sheet_targets` walks workbook.xml → rels), never by
+                      `sheetN.xml`, because that numbering is creation order.
+                      Dates are 1900-system serials (`serial_to_date`). Everything
+                      is pure except `read_book`; the parsed `SalaryBook` snapshot
+                      lives on `state.salary_book`.
+                      Who sees what is decided by the **key label**, not by a
+                      grant code: a label matching an account on the «Настройки»
+                      sheet (case- and space-insensitive) opens the section for
+                      that one account, and a key without a matching label has no
+                      button, no `/salary`, no callback — an unknown grant code
+                      would have meant "allow" for every legacy key instead.
+                      `collect_issues` warns the owner about money the workbook
+                      itself drops (a row with no account, an unknown reward type,
+                      a type the monthly formulas forgot to sum)
   converter.py      — Bot currency/crypto converter (pure): free-text query
                       parsing (`100 usd в грн`, `1 btc uah`, RU stems and
                       symbols), cross rates and card rendering. Reads only the
@@ -245,44 +349,10 @@ src/pulse_desk/
                       the Курсы view; gated by the existing `market` grant
   bot_membership.py — Telegram user -> (role, grants). Lifted out of
                       bot/service.py, where it was a closure inside init_bot and
-                      so unreachable from a router, so the Mini App resolves
-                      access through the same rules instead of a second copy.
+                      so unreachable from a router. Kept as a module so the
+                      rules live in one place instead of a closure.
                       Its collaborators (member lookup, schedule decision) are
                       arguments, so the decision logic unit-tests with no DB
-  miniapp_auth.py   — Telegram Mini App initData validation (pure): drop `hash`,
-                      join the rest as sorted `k=v` lines, HMAC-SHA256 under
-                      HMAC(b"WebAppData", bot_token), reject anything older than
-                      24 h. Verified on every request — there is no session
-  miniapp_server.py — The Mini App's own ASGI app + uvicorn task, on
-                      MINIAPP_PORT. Separate from the dashboard because a quick
-                      tunnel forwards a whole origin: whatever shares that port
-                      is on the internet. OpenAPI/docs are off there
-  tunnel.py         — Runs a tunnel agent as a child process and owns
-                      `state.public_url` (`tunnel` job). Provider is
-                      `TUNNEL_PROVIDER`, and each one is just an argv builder
-                      plus a pure line-extractor (both unit tested) around a
-                      shared supervisor:
-                      · `tailscale` (default) — `tailscale funnel <port>` in the
-                        foreground prints the address and holds the tunnel open.
-                        Stable `<machine>.<tailnet>.ts.net`, no domain to buy.
-                        Needs `tailscale up` once and Funnel enabled for the
-                        tailnet.
-                      · `ngrok` — reserved `NGROK_DOMAIN` is stable too, but
-                        Defender's PUA protection quarantined the binary on this
-                        machine (2026-09-07), which is why it is not the default.
-                      · `cloudflared` — quick tunnel, no account, new hostname
-                        per start.
-                      A missing binary or a dead tunnel just empties
-                      `public_url`, the buttons vanish and the bot falls back to
-                      its inline keyboards.
-                      NOTE: on this machine (verified 2026-09-07) only
-                      `api.trycloudflare.com:443` is blocked — `api.cloudflare.com`,
-                      `region1/2.v2.argotunnel.com:7844`, the ngrok agent host
-                      and the Tailscale control plane all connect. So quick
-                      tunnels cannot work here, but Tailscale, ngrok and a
-                      *named* Cloudflare tunnel can, with no VPN. When an agent
-                      dies without printing an address its last output lines go
-                      into app.log, because that is what the cause looks like
   security.py       — HMAC constant-time token validation
   telegram_reconnect.py — Exponential backoff reconnect logic
   process_supervisor.py — Launcher: spawn/supervise EXTERNAL runtimes (Discord
@@ -297,7 +367,7 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 21)
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 22)
   schema.py   — init_db + migrations   backups.py  — file backups
   pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
   giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards
@@ -312,14 +382,6 @@ database/                  — SQLite layer (aiosqlite), split per area.
 telegram_ping_watcher.py   — Telethon client helpers and message parsing utilities
 auth_accounts.py           — Console tool for Telegram account authentication
 
-static/                    — Vanilla JS frontend (no build step). PWA with service worker.
-  index.html loads classic scripts in a fixed order; the former app.js is split
-  into static/js/app-{core,pings,dashboard,settings,main}.js which share one
-  global scope — keep the load order from index.html when adding files, and
-  bump CACHE_NAME in static/sw.js when shell assets change.
-  static/app/ is the Telegram Mini App — its own shell, CSS, inline-SVG icon set
-  and script, served by miniapp_server.py on a different port. It shares nothing
-  with the dashboard's app-*.js global scope and has no service worker.
 sessions/                  — Telethon .session credential files (never commit these)
 scripts/                   — One-off tools: generate_bot_assets.py (bot branding
                              PNGs, needs Pillow), generate_bot_emoji.py (the 85
@@ -332,25 +394,30 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
                              Consolas only for the unit code),
                              upload_emoji_pack.py (drives @Stickers from a
                              Premium session — stop the app first, ~10 min for
-                             the full set), set_bot_profile.py (upload avatar)
+                             the full set), set_bot_profile.py (upload avatar),
+                             fix_salary_yobo_formulas.py (adds the missing
+                             «йобо» term to the salary workbook's monthly
+                             formulas — the reward type existed in Настройки but
+                             no sheet summed it, so such wins reached nobody's
+                             salary; makes a dated backup, needs the book closed,
+                             `--dry-run` reports what it would change)
 ```
 
 ### Background jobs (always running)
 
 | Job | Purpose | Key env var |
 |-----|---------|-------------|
-| `auto-scan` | Sweeps channels for new messages every `SCAN_INTERVAL_SECONDS` **measured from the start of the cycle** (the sleep is the remainder of the interval, so sweep time no longer stacks on top of it; minimum 30 s gap); also runs retention each sweep: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`), a size cap that evicts oldest non-favorite/non-win pings (archived to `pulse_desk_archive.db` first) + VACUUM, and archive-record pruning (the archive *file* is kept, but its rows older than `ARCHIVE_RETENTION_DAYS` are aged out) | `SCAN_INTERVAL_SECONDS` (default 900 s), `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS` |
+| `auto-scan` | Sweeps channels for new messages every `SCAN_INTERVAL_SECONDS` **measured from the start of the cycle** (the sleep is the remainder of the interval, so sweep time no longer stacks on top of it; minimum 30 s gap); also runs retention each sweep: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`/`scan_checkpoints`; `settings_history` is capped **per key** as well as by age, and `scan_checkpoints` drops channels unseen for 90 days), a size cap that evicts oldest non-favorite/non-win pings (archived to `pulse_desk_archive.db` first) + VACUUM, and archive-record pruning (the archive *file* is kept, but its rows older than `ARCHIVE_RETENTION_DAYS` are aged out) | `SCAN_INTERVAL_SECONDS` (default 900 s), `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS` |
 | `daily-digest` | Sends the daily digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 10:00) as a two-image album: a ping treemap (24 h, wins/giveaways/mentions per chat, today-vs-yesterday counter) and a crypto heatmap (all 8 tracked coins, area by market cap, day delta from our own `market_history` snapshots, leader/laggard, UAH line). The caption carries only the win links; if Pillow can't render, the old text digest goes out instead | — |
 | `roulette-reminder` | Daily nudge to spin the yobo-bot roulette from every account. The alarm time *is* the previous day's last-click time, reported back by the owner (button, `/roulette 21:47`, or a bare `21:47` in the bot chat). Ticks every 30 s instead of sleeping to the target, so a time reported mid-day applies at once and a slot missed while the PC was off still fires once on the next tick | settings key `roulette` |
 | `bot-connection` | Reconnects the bot client after Telethon gives up, so incoming updates never stall (started only when the bot is configured) | — |
-| `pending-sends` | Drains `bot_pending_sends`: delivers member copies whose per-key `delay_minutes` elapsed (20 s poll, drops rows older than 24 h) | — |
+| `pending-sends` | Drains `bot_pending_sends`: delivers member copies whose per-key `delay_minutes` elapsed (20 s poll, drops rows older than 24 h). One batch is `loops.drain_pending_sends`, split out so the failure handling is testable. A non-delivery is classified, not counted blindly: `BotOffline` spends no attempt and stops the batch (a minute of downtime used to burn all three attempts and drop every due copy), a FloodWait idles the loop instead of sleeping inside the batch, and `RecipientUnreachable` cancels the row at once | — |
 | `source-scores` | Recalculates channel reliability scores | — |
 | `access-scheduler` | Warms the scheduled-access cache and notifies members when their access window opens/closes (not the source of truth — `bot_role` recomputes on demand) | — |
 | `obsidian-sync` | Reconciles the Debts board with the Obsidian `Долги.md` note (note wins; syncs the claimed/done bit, appends newly detected wins) | `OBSIDIAN_DEBTS_PATH`, `OBSIDIAN_SYNC_ENABLED`, `OBSIDIAN_SYNC_WRITE`, `OBSIDIAN_SYNC_POLL_SECONDS` |
+| `salary-sync` | Rereads the salary workbook when its mtime/size change (Excel rewrites the file whole on every save, so that pair is enough) and refreshes `state.salary_book`; the parse runs in `asyncio.to_thread`. Newly ticked payout dates are announced to the account's key holders — the set of already-paid `месяц\|аккаунт` pairs lives in the `salary_sync` settings key (`audit=False`), so a restart between two saves neither loses the notice nor repeats it. Started only when `SALARY_XLSX_PATH` is set, and left out of the watchdog for the same reason as the other feature-gated loops | `SALARY_XLSX_PATH`, `SALARY_SYNC_POLL_SECONDS` |
 | `market-monitor` | Fetches crypto prices (+ fiat cross-rates for the bot converter), alerts on volatility | `MARKET_POLL_SECONDS` |
 | `bot-service` | Telegram bot for notifications + inline menus | `TELEGRAM_BOT_TOKEN` (optional) |
-| `miniapp-server` | Serves the Telegram Mini App on `MINIAPP_PORT`, alone on that port (started only when enabled) | `MINIAPP_ENABLED`, `MINIAPP_PORT` |
-| `tunnel` | Keeps the tunnel agent up and `state.public_url` current, so WebApp buttons have an HTTPS origin | `MINIAPP_ENABLED`, `TUNNEL_PROVIDER`, `TAILSCALE_BIN`, `NGROK_DOMAIN`, `NGROK_BIN`, `CLOUDFLARED_BIN` |
 
 ### Data flow for a "ping"
 
@@ -366,9 +433,11 @@ Copy `.env.example` → `.env`. Required vars:
 ```env
 TELEGRAM_API_ID=...        # from my.telegram.org
 TELEGRAM_API_HASH=...
-ADMIN_TOKEN=...            # must be ≥16 chars, not the placeholder
-VIEWER_TOKEN=...
+TELEGRAM_BOT_TOKEN=...     # the bot is the whole UI now
+ADMIN_ID=...               # your Telegram id — the owner
 ```
+
+Guests get an access key from the bot (`/newkey`), not a token.
 
 Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./sessions` are used automatically.
 
@@ -377,14 +446,57 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
 ## Key conventions
 
 - **All DB access is async** via `aiosqlite`; never use synchronous sqlite3 in new code.
-- **Routers import from `app_ctx`, never from `main`** — `src/pulse_desk/app_ctx.py` holds the settings/state/logger singletons and auth dependencies precisely so router modules avoid circular imports with `main.py`.
+- **Everything imports singletons from `app_ctx`, never from `main`** — `src/pulse_desk/app_ctx.py` holds the settings/state/logger singletons, so modules avoid circular imports with `main.py`. It no longer holds auth dependencies: with the web gone there is nothing to authenticate.
 - **Schema changes** require bumping `SCHEMA_VERSION` in `database/_core.py` and adding a migration branch in `database/schema.py` (`init_db`).
+- **`set_setting` audits every change into `settings_history`.** Pass
+  `audit=False` for keys that carry pure runtime bookkeeping rewritten on a
+  timer (a last-run timestamp, a file hash). `obsidian_sync` is written every
+  30 s and its audit trail had reached 141 666 rows / **111 MB — 82 % of the
+  whole database**, while still sitting inside the 90-day age cap. An age cap
+  bounds nothing when a key is rewritten on a timer, so `cleanup_unbounded_tables`
+  also caps history **per key** (`SETTINGS_HISTORY_PER_KEY`).
+- **Anything blocking goes through `asyncio.to_thread`.** The bot's Telethon
+  handlers and uvicorn share one event loop (`init_bot` runs inside the FastAPI
+  lifespan), so a synchronous read or a Pillow render freezes the API *and* every
+  bot button. Current users: the digest card render and the `/logs` tail
+  (`common.tail_lines`, which seeks from the end instead of reading the file).
+- **Bot handler errors are visible.** `safe()` wraps every handler: it times it
+  (`SLOW_HANDLER_SECONDS`, the early warning for callback-query expiry), counts
+  calls/errors/slow runs onto `state`, records an `ERROR` app event, and reports
+  through `_tell()` — which falls back to `respond` when the query is already
+  answered, because Telethon answers it on the first `edit`/`respond` and a later
+  `answer(alert=True)` is then a silent no-op.
 - **Session files are secrets** — treat `.session` files like passwords; they are excluded from git via `.gitignore`.
+- **The salary workbook is read-only for the app.** It is the owner's accounting
+  file, edited in Excel by a human; Pulse Desk only ever opens it for reading, and
+  a payout is "taken" when the owner types a date into the «Дата выплаты» column —
+  there is no button in the bot that writes back. Anything that needs to change the
+  book is a one-off script under `scripts/`, run by hand with the book closed.
 - **Bot keyboards cannot carry custom emoji or custom shapes, ever.** Button text
   is a plain string with no `entities` in both MTProto and the Bot API, so the
-  Aperture pack renders in card *text* only. Custom icons and custom button
-  shapes live in the Mini App (`static/app/`), which is HTML. Do not try to
-  solve this in `keyboards.py` again.
+  Aperture pack renders in card *text* only. Do not try to solve this in
+  `keyboards.py` again.
+- **A new bot screen is a section, not a branch.** Add a module under
+  `src/pulse_desk/bot/sections/`, list it in that package's `SECTIONS`, and
+  declare its callbacks in `register(router)` with the gate as `feature=` or
+  `admin=`. `tests/test_bot_routes.py` asserts every advertised button resolves
+  to a section with the gate it was meant to have — a screen nobody registered
+  is otherwise indistinguishable from a stale button.
+- **Editing a ping goes through `ping_actions.apply_ping_meta`.** It validates the
+  status against `statuses.py`, writes, publishes the live event and mirrors a
+  "claimed" into the Obsidian note. When that logic lived in `routers/pings.py`,
+  the same action taken from the bot silently skipped the note.
+- **Owner-only sections gate on `role == "admin"`, never on a grant code.** An
+  empty `permissions` column means "grant everything" for legacy keys, so a new
+  feature code would open the admin section for every key issued before it
+  existed. Grant codes are for guest-visible sections only.
+- **The Telegram Mini App and its tunnel were removed (2026-09-08)** — the
+  WebApp panel crashed the owner's Telegram client. Gone: `routers/miniapp.py`,
+  `miniapp_server.py`, `miniapp_auth.py`, `tunnel.py`, `static/app/`,
+  `webapp_row`, `state.public_url` and the `MINIAPP_*` / `TUNNEL_*` /
+  `TAILSCALE_*` / `NGROK_*` / `CLOUDFLARED_*` settings. The bot is inline
+  keyboards only. Do not reintroduce a WebApp button.
 - **`cryptg` must stay installed.** Without it Telethon decrypts every MTProto packet with `pyaes`, in pure Python, on the event loop thread. With 8 accounts plus the bot that took ~50 % of the loop and starved everything else: bot callbacks expired (`QueryIdInvalidError`), awaited SQLite calls blew their 5 s busy timeout (`database is locked` storms), and the HTTP server went unreachable long enough for the watchdog to restart the app. If the bot ever "hangs" again, check `import cryptg` first.
 - **Profiling the running app:** `py-spy record --pid <pid of :8000 listener> --duration 120 --format speedscope --threads`. `database/_core.py` also logs a stack for any DB connection held ≥ `PULSE_DB_TRACE_SECONDS` (default 2 s).
-- The frontend is plain classic scripts in `/static` sharing one global scope — no npm, no bundler, no TypeScript. The `app-*.js` load order in index.html matters.
+- **There is no frontend.** Node, npm and `node --check` are no longer part of this
+  project's toolchain; the only UI is Telegram inline keyboards.

@@ -1,18 +1,20 @@
-"""Long-running background loops: market, reminders, digest, scores, auto-scan."""
+"""Long-running background loops: market, digest, scores, auto-scan."""
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
 
 import httpx
-from telethon import Button
 
+from . import salary
 from . import watch_settings as ws
 from .app_ctx import (
-    ADMIN_ID,
     ARCHIVE_RETENTION_DAYS,
+    BASE_DIR,
     AUDIT_RETENTION_DAYS,
-    CHECK_FRESH_MINUTES,
     DB_ARCHIVE_ENABLED,
     DB_MAX_SIZE_MB,
     FLOOD_WAIT_MAX_SECONDS,
@@ -30,20 +32,55 @@ from .bot_notify import (
     edit_pending_admin_card,
     execute_pending_broadcast,
     send_admin_bot_message,
+    send_member_bot_message,
 )
 from .common import flood_wait_seconds, now_iso, record_app_event, start_supervised
-from .digest import format_digest
-from .live import publish_live_event
+from .converter import BRIDGE_IDS, FIAT_CODES, fiat_block
+from .digest import format_digest, format_digest_caption
+from .digest_cards import build_digest_cards
+from .scan import next_scan_delay
 from .scan_engine import full_history_scan
 from .watchdog import JobHealth, classify_job, default_thresholds, diff_health, format_age
+
+
+COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+
+async def fetch_fiat_rates(http_client: httpx.AsyncClient) -> dict[str, float]:
+    """Fiat units per USD for the bot converter — best effort, never raises.
+
+    A second, small request on purpose: asking the main call for a dozen
+    `vs_currencies` would multiply every stored snapshot (prices *and* their
+    24 h changes, on all eight coins) for data only the converter reads. Here
+    only two bridge coins are quoted and the result collapses to one float per
+    currency. On failure the converter falls back to the usd/uah quotes the
+    snapshot already carries.
+    """
+    try:
+        resp = await http_client.get(COINGECKO_PRICE_URL, params={
+            "ids": ",".join(BRIDGE_IDS),
+            "vs_currencies": ",".join(code.lower() for code in FIAT_CODES),
+        })
+        resp.raise_for_status()
+        return fiat_block(resp.json())
+    except Exception:
+        logger.debug("Fiat rate fetch failed", exc_info=True)
+        return {}
 
 
 async def fetch_market_data() -> None:
     from database import save_market_snapshot
 
     ids = "tether,the-open-network,bitcoin,ethereum,solana,binancecoin,notcoin,dogs-2"
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": ids, "vs_currencies": "usd,uah", "include_24hr_change": "true"}
+    url = COINGECKO_PRICE_URL
+    # Market cap rides along on the same request (no extra call): it sizes the
+    # tiles of the digest's crypto treemap.
+    params = {
+        "ids": ids,
+        "vs_currencies": "usd,uah",
+        "include_24hr_change": "true",
+        "include_market_cap": "true",
+    }
 
     while True:
         try:
@@ -55,6 +92,7 @@ async def fetch_market_data() -> None:
                         resp.raise_for_status()
                         data = resp.json()
                         data["fetched_at_iso"] = now_iso()
+                        data["_fiat"] = await fetch_fiat_rates(http_client)
                         await save_market_snapshot(data)
                         break  # Success
                 except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
@@ -100,42 +138,9 @@ async def monitor_market_volatility() -> None:
         await asyncio.sleep(3600)
 
 
-async def reminder_loop() -> None:
-    from database import get_due_reminders, mark_reminder_sent
-
-    while True:
-        try:
-            for reminder in await get_due_reminders(limit=25):
-                ping_id = reminder.get("ping_id")
-                deadline_at = reminder.get("deadline_at")
-                chat = reminder.get("chat") or "чат"
-                text = (reminder.get("text") or "").strip().replace("\n", " ")
-                message = (
-                    f"Напоминание Pulse Desk\n\n"
-                    f"Дедлайн: {deadline_at or 'не указан'}\n"
-                    f"Источник: {chat}\n"
-                    f"{text[:300]}"
-                )
-                if state.bot_client and ADMIN_ID:
-                    buttons = []
-                    if reminder.get("link"):
-                        buttons.append([Button.url("Открыть в Telegram", reminder["link"])])
-                    await send_admin_bot_message(message, buttons=buttons or None)
-                    await broadcast_member_notification(
-                        message, buttons or None, notif_type="deadline", mentions=reminder.get("mentions")
-                    )
-                await mark_reminder_sent(int(reminder["id"]))
-                await record_app_event("WARNING", "reminder", "Deadline reminder sent", {"ping_id": ping_id, "deadline_at": deadline_at})
-                await publish_live_event("reminder", {"ping_id": ping_id, "chat": chat, "deadline_at": deadline_at})
-            state.heartbeat("reminders")
-        except Exception:
-            logger.exception("Reminder loop failed")
-        await asyncio.sleep(60)
-
-
 async def process_due_broadcasts() -> int:
     """Single pass of the moderation queue: auto-send pending rows past expires_at."""
-    from database import claim_pending_broadcast, get_due_pending_broadcasts
+    from database import claim_pending_broadcast, get_due_pending_broadcasts, release_pending_broadcast
 
     if not state.bot_client:
         # Bot is down: leave rows pending, retry next tick.
@@ -145,8 +150,20 @@ async def process_due_broadcasts() -> int:
         claimed = await claim_pending_broadcast(int(row["id"]), "auto_sent")
         if not claimed:
             continue
-        count, token = await execute_pending_broadcast(claimed)
-        await edit_pending_admin_card(claimed, f"📤 Отправлено автоматически ({count})", token=token, delivered_count=count)
+        # The claim is consumed before the send, so a failure here would leave the
+        # row marked sent and never delivered. Put it back and let the next tick
+        # retry — and keep one bad row from aborting the rest of the batch.
+        try:
+            count, token = await execute_pending_broadcast(claimed)
+            await edit_pending_admin_card(claimed, f"📤 Отправлено автоматически ({count})", token=token, delivered_count=count)
+        except Exception as exc:
+            await release_pending_broadcast(int(row["id"]))
+            logger.exception("Pending broadcast %s failed to auto-send", row["id"])
+            await record_app_event(
+                "ERROR", "broadcast", "Pending broadcast auto-send failed, returned to queue",
+                {"id": row["id"], "error": str(exc)},
+            )
+            continue
         await record_app_event("INFO", "broadcast", "Pending broadcast auto-sent", {"id": row["id"], "delivered": count})
         handled += 1
     return handled
@@ -162,6 +179,45 @@ async def broadcast_approval_loop() -> None:
         await asyncio.sleep(20)
 
 
+async def collect_digest_market(hours: int = 24) -> list[dict]:
+    """Market snapshots for the digest window; never fails the digest itself."""
+    from database import get_market_history
+
+    try:
+        since = (datetime.now() - timedelta(hours=hours + 1)).isoformat()
+        return await get_market_history(limit=1000, since_iso=since)
+    except Exception:
+        logger.exception("Digest market history failed")
+        return []
+
+
+DIGEST_CARD_DIR = BASE_DIR / "data" / "digest"
+
+
+async def render_digest(
+    pings: list[dict],
+    prev_pings: list[dict] | None,
+    market: list[dict] | None,
+    period_label: str = "за последние 24 ч",
+) -> tuple[str, list[str]]:
+    """The digest as (message, card paths).
+
+    Normally two Aperture cards — pings and crypto — with a short caption that
+    carries only the win links a picture cannot. If rendering is unavailable
+    (no Pillow, unwritable dir), this degrades to the old plain-text digest.
+    """
+    # Pillow work — gradients, blurs, a LANCZOS downscale — runs off the loop
+    # the bot shares with the API, which it used to freeze for the whole render.
+    cards = await asyncio.to_thread(
+        build_digest_cards,
+        pings, DIGEST_CARD_DIR, period_label=period_label,
+        prev_pings=prev_pings, market=market,
+    )
+    if cards:
+        return format_digest_caption(pings, period_label=period_label, prev_pings=prev_pings), cards
+    return format_digest(pings, period_label=period_label, prev_pings=prev_pings, market=market), []
+
+
 async def digest_loop() -> None:
     from database import get_pings
 
@@ -175,16 +231,55 @@ async def digest_loop() -> None:
             if not cfg["enabled"]:
                 await asyncio.sleep(61)
                 continue
-            since = (datetime.now() - timedelta(hours=24)).isoformat()
+            now = datetime.now()
+            since = (now - timedelta(hours=24)).isoformat()
             pings = await get_pings(limit=200, date_from=since)
-            text = format_digest(pings, period_label="за последние 24 ч")
-            await send_admin_bot_message(text)
-            await broadcast_member_notification(text, None, notif_type="digest")
-            await record_app_event("INFO", "digest", "Daily digest sent", {"pings": len(pings)})
+            prev_pings = await get_pings(
+                limit=200,
+                date_from=(now - timedelta(hours=48)).isoformat(),
+                date_to=since,
+            )
+            market = await collect_digest_market(24)
+            message, cards = await render_digest(pings, prev_pings, market)
+            await send_admin_bot_message(message, file=cards or None)
+            await broadcast_member_notification(message, None, file=cards or None, notif_type="digest")
+            await record_app_event("INFO", "digest", "Daily digest sent",
+                                   {"pings": len(pings), "cards": len(cards)})
         except Exception:
             logger.exception("Digest loop failed")
         # Guard against double-fire within the same minute.
         await asyncio.sleep(61)
+
+
+async def roulette_loop() -> None:
+    """Daily nudge to spin the yobo roulette from every account.
+
+    Ticks instead of sleeping to the target: a time reported mid-day applies at
+    once, and a slot missed while the PC was off still fires on the next tick.
+    """
+    from database import get_setting, set_setting
+
+    from .bot.cards import roulette_reminder_card
+    from .bot.keyboards import roulette_reminder_keyboard
+    from .roulette import ROULETTE_POLL_SECONDS, mark_sent, roulette_due, seed_cfg
+
+    if await get_setting("roulette", None) is None:
+        await set_setting("roulette", seed_cfg())
+
+    while True:
+        try:
+            cfg = await ws.load_roulette_settings()
+            now = datetime.now()
+            # The day is only closed once the nudge actually left, so a bot that
+            # was still connecting retries on the next tick instead of losing it.
+            if roulette_due(now, cfg) and await send_admin_bot_message(
+                roulette_reminder_card(cfg, now), buttons=roulette_reminder_keyboard()
+            ):
+                await set_setting("roulette", mark_sent(cfg, now))
+                await record_app_event("INFO", "roulette", "Roulette reminder sent", {"time": cfg["time"]})
+        except Exception:
+            logger.exception("Roulette loop failed")
+        await asyncio.sleep(ROULETTE_POLL_SECONDS)
 
 
 PENDING_SEND_POLL_SECONDS = 20
@@ -194,57 +289,87 @@ PENDING_SEND_STALE_HOURS = 24
 
 async def pending_send_loop() -> None:
     """Drain ``bot_pending_sends``: deliver copies whose per-key delay elapsed."""
+    # Monotonic deadline set by a FloodWait: until it passes the loop idles
+    # instead of sleeping inside a batch, where one throttled recipient used to
+    # stall every other queued copy for up to half an hour.
+    flood_until = 0.0
+
+    while True:
+        try:
+            state.heartbeat("pending-sends")
+            if time.monotonic() >= flood_until:
+                flood_until = await drain_pending_sends()
+        except Exception:
+            logger.exception("Pending send loop failed")
+        await asyncio.sleep(PENDING_SEND_POLL_SECONDS)
+
+
+async def drain_pending_sends() -> float:
+    """One batch of the outbox. Returns a monotonic deadline to idle until.
+
+    Split out of the loop so the failure handling — which decides whether a
+    delayed notification is retried, dropped or left untouched — is reachable
+    from a test without a clock or a running bot.
+    """
     from database import cancel_pending_send, get_due_pending_sends, mark_pending_send_result, save_broadcast_messages
 
-    from .bot_notify import deliver_pending_send
+    from .bot_notify import BotOffline, RecipientUnreachable, deliver_pending_send
 
     try:
         from telethon.errors import FloodWaitError
     except ImportError:  # pragma: no cover
         FloodWaitError = Exception  # type: ignore[assignment, misc]
 
-    while True:
+    for row in await get_due_pending_sends(limit=25):
+        row_id = int(row["id"])
+        # A long outage must not dump a backlog of stale wins on members.
+        created_at = str(row.get("created_at") or "")
+        stale_before = (datetime.now() - timedelta(hours=PENDING_SEND_STALE_HOURS)).isoformat()
+        if created_at and created_at < stale_before:
+            await cancel_pending_send(row_id)
+            await record_app_event(
+                "WARNING", "notifications", "Delayed notification dropped as stale",
+                {"tg_id": row.get("tg_id"), "created_at": created_at},
+            )
+            continue
+        if int(row.get("attempts") or 0) >= PENDING_SEND_MAX_ATTEMPTS:
+            await cancel_pending_send(row_id)
+            await record_app_event(
+                "ERROR", "notifications", "Delayed notification gave up after retries",
+                {"tg_id": row.get("tg_id"), "attempts": row.get("attempts")},
+            )
+            continue
         try:
-            for row in await get_due_pending_sends(limit=25):
-                row_id = int(row["id"])
-                # A long outage must not dump a backlog of stale wins on members.
-                created_at = str(row.get("created_at") or "")
-                stale_before = (datetime.now() - timedelta(hours=PENDING_SEND_STALE_HOURS)).isoformat()
-                if created_at and created_at < stale_before:
-                    await cancel_pending_send(row_id)
-                    await record_app_event(
-                        "WARNING", "notifications", "Delayed notification dropped as stale",
-                        {"tg_id": row.get("tg_id"), "created_at": created_at},
-                    )
-                    continue
-                if int(row.get("attempts") or 0) >= PENDING_SEND_MAX_ATTEMPTS:
-                    await cancel_pending_send(row_id)
-                    await record_app_event(
-                        "ERROR", "notifications", "Delayed notification gave up after retries",
-                        {"tg_id": row.get("tg_id"), "attempts": row.get("attempts")},
-                    )
-                    continue
-                try:
-                    message_id = await deliver_pending_send(row)
-                except FloodWaitError as exc:
-                    await mark_pending_send_result(row_id, sent=False)
-                    await asyncio.sleep(flood_wait_seconds(exc.seconds))
-                    continue
-                except Exception as exc:
-                    logger.warning("Delayed notification to %s failed: %s", row.get("tg_id"), exc)
-                    await mark_pending_send_result(row_id, sent=False)
-                    continue
-                if message_id is None:
-                    await mark_pending_send_result(row_id, sent=False)
-                    continue
-                await mark_pending_send_result(row_id, sent=True)
-                token = str(row.get("token") or "")
-                if token:
-                    # Same token as the immediate copies, so "hide" still reaches it.
-                    await save_broadcast_messages(token, [(int(row["tg_id"]), message_id)])
-        except Exception:
-            logger.exception("Pending send loop failed")
-        await asyncio.sleep(PENDING_SEND_POLL_SECONDS)
+            message_id = await deliver_pending_send(row)
+        except BotOffline:
+            # Nothing was attempted, so nothing is owed to this row. A minute of
+            # downtime used to burn all three attempts and drop every due copy
+            # for good.
+            break
+        except FloodWaitError as exc:
+            # Our throttle, not this recipient's fault — no attempt spent.
+            return time.monotonic() + flood_wait_seconds(exc.seconds)
+        except RecipientUnreachable as exc:
+            # Blocked the bot / never pressed start: retries cannot help.
+            await cancel_pending_send(row_id)
+            await record_app_event(
+                "ERROR", "notifications", "Delayed notification dropped, recipient unreachable",
+                {"tg_id": row.get("tg_id"), "error": str(exc)},
+            )
+            continue
+        except Exception as exc:
+            logger.warning("Delayed notification to %s failed: %s", row.get("tg_id"), exc)
+            await mark_pending_send_result(row_id, sent=False)
+            continue
+        if message_id is None:
+            await mark_pending_send_result(row_id, sent=False)
+            continue
+        await mark_pending_send_result(row_id, sent=True)
+        token = str(row.get("token") or "")
+        if token:
+            # Same token as the immediate copies, so "hide" still reaches it.
+            await save_broadcast_messages(token, [(int(row["tg_id"]), message_id)])
+    return 0.0
 
 
 async def _notify_access_flip(tg_id: int, allowed: bool, until) -> None:
@@ -300,11 +425,14 @@ async def access_scheduler_loop() -> None:
                         "INFO", "access", "Scheduled access flipped",
                         {"tg_id": tg, "allowed": decision.allowed, "reason": decision.reason},
                     )
-                    await publish_live_event("access-changed", {"tg_id": tg, "allowed": decision.allowed})
                 last_state[tg] = decision.allowed
-            # Drop state for members that disappeared so they don't leak.
+            # Drop state for members that disappeared so they don't leak. The
+            # shared cache needs the same treatment — pruning only the local dict
+            # left deleted members cached in state.access_cache forever.
             for gone in set(last_state) - seen:
                 last_state.pop(gone, None)
+            for gone in set(state.access_cache) - seen:
+                state.access_cache.pop(gone, None)
             state.heartbeat("access-scheduler")
         except Exception:
             logger.exception("Access scheduler loop failed")
@@ -322,6 +450,96 @@ async def obsidian_sync_loop() -> None:
                 await sync_once(state, settings)
         except Exception:
             logger.exception("Obsidian sync loop failed")
+        await asyncio.sleep(interval)
+
+
+SALARY_SETTINGS_KEY = "salary_sync"
+
+
+def salary_path() -> Optional[Path]:
+    """Путь к книге зарплат, или None когда раздел выключен."""
+    raw = (settings.salary_xlsx_path or "").strip()
+    return Path(raw) if raw else None
+
+
+async def sync_salary_once(*, force: bool = False) -> bool:
+    """Один проход синхронизации книги. True — снимок обновился.
+
+    Книга перечитывается только когда изменились mtime или размер: Excel
+    переписывает файл целиком при каждом сохранении, так что этой пары хватает,
+    а разбор ~110 КБ XML уходит в поток (правило про блокирующие вызовы —
+    handlers бота и uvicorn делят один event loop).
+    """
+    from database import get_setting, set_setting
+
+    path = salary_path()
+    if path is None:
+        return False
+    signature = salary.file_signature(path)
+    if signature is None:
+        state.salary_meta = {"path": str(path), "reason": "missing_file", "checked_at": now_iso()}
+        return False
+    stored = list(signature)
+    if not force and state.salary_book is not None and state.salary_meta.get("signature") == stored:
+        return False
+
+    book = await asyncio.to_thread(salary.read_book, path)
+    state.salary_book = book
+    state.salary_meta = {
+        "path": str(path),
+        "signature": stored,
+        "synced_at": now_iso(),
+        "accounts": len(book.accounts),
+        "months": len(book.months),
+        "journal": len(book.journal),
+        "issues": list(book.issues),
+    }
+
+    # Что уже выплачено — в настройках, а не в памяти: иначе перезапуск между
+    # двумя сохранениями книги либо потеряет уведомление, либо пошлёт его снова.
+    meta = await get_setting(SALARY_SETTINGS_KEY, None) or {}
+    known = set(meta.get("paid") or [])
+    pairs = salary.paid_pairs(book)
+    fresh = [pair for pair in pairs if pair not in known] if meta.get("paid") is not None else []
+    for pair in fresh:
+        month, _, account = pair.partition("|")
+        row = salary.salary_for(book, account, month)
+        if row is None or row.total <= 0:
+            continue
+        await notify_salary_paid(row)
+    await set_setting(SALARY_SETTINGS_KEY, {"paid": pairs, "synced_at": now_iso()}, audit=False)
+    return True
+
+
+async def notify_salary_paid(row) -> None:
+    """Сказать человеку, что его зарплата за месяц отмечена выплаченной."""
+    from database import list_bot_members
+
+    from .bot.cards import salary_paid_notice
+
+    text = salary_paid_notice(row)
+    for member in await list_bot_members():
+        if member.get("blocked"):
+            continue
+        if (member.get("key_label") or "").strip().casefold() != row.account.casefold():
+            continue
+        await send_member_bot_message(int(member["tg_id"]), text)
+    await record_app_event(
+        "INFO", "salary", "Salary marked paid",
+        {"account": row.account, "month": row.month, "total": round(row.total, 2)},
+    )
+
+
+async def salary_sync_loop() -> None:
+    """Держать снимок книги зарплат свежим — по одному опросу файла на тик."""
+    interval = max(10, int(settings.salary_sync_poll_seconds or 60))
+    while True:
+        try:
+            if salary_path() is not None:
+                await sync_salary_once()
+            state.heartbeat("salary-sync")
+        except Exception:
+            logger.exception("Salary sync loop failed")
         await asyncio.sleep(interval)
 
 
@@ -344,7 +562,6 @@ async def auto_scan_loop() -> None:
         cleanup_old_data,
         cleanup_unbounded_tables,
         enforce_db_size_cap,
-        purge_stale_checks,
     )
 
     start_supervised("market-volatility", monitor_market_volatility, backoff_base=60.0, backoff_max=1800.0)
@@ -356,6 +573,7 @@ async def auto_scan_loop() -> None:
         waited += 1
     last_vacuum = datetime.now()
     while True:
+        cycle_started = time.monotonic()
         try:
             if state.clients:
                 await full_history_scan()
@@ -369,9 +587,6 @@ async def auto_scan_loop() -> None:
             )
             if vacuum_due:
                 last_vacuum = datetime.now()
-            stale_checks = await purge_stale_checks(minutes=CHECK_FRESH_MINUTES)
-            if stale_checks:
-                stats["stale_checks"] = stale_checks
             unbounded = await cleanup_unbounded_tables(
                 scan_runs_keep=SCAN_RUNS_RETENTION, audit_days=AUDIT_RETENTION_DAYS
             )
@@ -382,14 +597,17 @@ async def auto_scan_loop() -> None:
             archive = await cleanup_archive_db(ARCHIVE_RETENTION_DAYS, vacuum=vacuum_due)
             if archive.get("archive_pings"):
                 stats["archive_pings"] = archive["archive_pings"]
-            if any(stats.get(key) for key in ("pings", "market_history", "vacuumed")) or stale_checks \
+            if any(stats.get(key) for key in ("pings", "market_history", "vacuumed")) \
                     or any(unbounded.values()) or cap.get("pings_deleted") or archive.get("archive_pings"):
                 await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
             state.heartbeat("auto-scan")
         except Exception:
             logger.exception("Automatic scan loop failed")
             state.last_scan_status = "error"
-        await asyncio.sleep(ws.SCAN_INTERVAL_SECONDS)
+        # Sleep the remainder of the cycle, not a full interval on top of the
+        # sweep: otherwise a 20-minute sweep on a 15-minute interval left a
+        # 35-minute blind spot between passes.
+        await asyncio.sleep(next_scan_delay(ws.SCAN_INTERVAL_SECONDS, time.monotonic() - cycle_started))
 
 
 def _collect_job_health() -> list[JobHealth]:
@@ -398,6 +616,7 @@ def _collect_job_health() -> list[JobHealth]:
         scan_interval_seconds=ws.SCAN_INTERVAL_SECONDS,
         market_poll_seconds=ws.MARKET_POLL_SECONDS,
         flood_wait_max_seconds=FLOOD_WAIT_MAX_SECONDS,
+        bot_configured=state.bot_client is not None,
     )
     now = datetime.now()
     healths: list[JobHealth] = []
@@ -429,16 +648,11 @@ async def _alert_job_unhealthy(health: JobHealth) -> None:
         level, "watchdog", f"Background job unhealthy: {health.name}",
         {"reason": health.reason, "age_seconds": health.age_seconds},
     )
-    await publish_live_event(
-        "job-unhealthy",
-        {"job": health.name, "reason": health.reason, "age_seconds": health.age_seconds},
-    )
 
 
 async def _alert_job_recovered(health: JobHealth) -> None:
     await send_admin_bot_message(f"✅ **Задача восстановилась**: `{health.name}` снова отвечает.")
     await record_app_event("INFO", "watchdog", f"Background job recovered: {health.name}", None)
-    await publish_live_event("job-recovered", {"job": health.name})
 
 
 async def watchdog_loop() -> None:
@@ -468,7 +682,6 @@ async def watchdog_loop() -> None:
 
 async def startup_maintenance() -> None:
     from database import (
-        backfill_deadlines_from_text,
         cleanup_outbox,
         prune_broadcast_messages,
         prune_pending_broadcasts,
@@ -501,9 +714,6 @@ async def startup_maintenance() -> None:
         pruned_sends = await prune_pending_sends(days=7)
         if pruned_sends:
             await record_app_event("INFO", "maintenance", "Pruned settled delayed notifications", {"count": pruned_sends})
-        backfilled_deadlines = await backfill_deadlines_from_text()
-        if backfilled_deadlines:
-            await record_app_event("INFO", "deadline", "Backfilled deadlines from giveaway text", {"count": backfilled_deadlines})
     except Exception as exc:
         logger.exception("Startup maintenance failed")
         await record_app_event("ERROR", "app", "Startup maintenance failed", {"error": str(exc)})

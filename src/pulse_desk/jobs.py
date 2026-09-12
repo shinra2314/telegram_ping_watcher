@@ -10,6 +10,35 @@ from typing import Any
 from .runtime import AppState
 
 
+# Jobs that must be running for the app to be considered healthy. Kept in sync
+# with ``watchdog.default_thresholds`` — the two lists used to disagree, so a
+# job could be watched for staleness but not for existence, or vice versa.
+# Only unconditionally started jobs belong here; feature-gated ones
+# (obsidian-sync, salary-sync) would otherwise page about being turned off.
+EXPECTED_JOBS = frozenset({
+    "auto-scan",
+    "broadcast-approval",
+    "access-scheduler",
+    "daily-digest",
+    "source-scores",
+    "market-fetch",
+    "pending-sends",
+})
+
+
+def expected_jobs(*, bot_configured: bool) -> set[str]:
+    """Jobs that must be alive given what this install actually runs.
+
+    ``bot-connection`` is the only thing keeping *incoming* bot updates flowing,
+    so it is required whenever a bot is configured — but demanding it on an
+    install with no bot token would report a permanent false outage.
+    """
+    expected = set(EXPECTED_JOBS)
+    if bot_configured:
+        expected.add("bot-connection")
+    return expected
+
+
 def start_tracked_task(state: AppState, logger: logging.Logger, name: str, coro: Awaitable[Any]) -> asyncio.Task:
     previous = state.background_tasks.get(name)
     if previous and not previous.done():
@@ -83,7 +112,7 @@ def runtime_health(
     accounts_configured: int,
     expected_tasks: set[str] | None = None,
 ) -> dict[str, Any]:
-    expected = expected_tasks or {"auto-scan", "reminders", "daily-digest", "source-scores", "market-fetch", "pending-sends"}
+    expected = expected_tasks or EXPECTED_JOBS
     running_tasks = sorted(name for name, task in state.background_tasks.items() if not task.done())
     missing_tasks = sorted(expected - set(running_tasks))
     now = datetime.now()

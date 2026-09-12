@@ -8,7 +8,6 @@ from typing import Any, Optional
 
 from telethon import TelegramClient
 
-from .live_hub import LiveHub
 
 
 @dataclass
@@ -18,20 +17,41 @@ class AppState:
     bot_client: Optional[TelegramClient] = None
     bot_id: Optional[int] = None
     bot_username: Optional[str] = None
-    # Public HTTPS origin of the Mini App, published by the ``tunnel`` job.
-    # None whenever the tunnel is disabled, starting or down — WebApp buttons
-    # are then simply not rendered and the bot falls back to inline keyboards.
-    public_url: Optional[str] = None
     # Bot connection health, maintained by the ``bot-connection`` supervisor
     # (see bot_connection.py). While the client is down it receives no updates,
     # so an outage here means every command/button the owner sends is queued on
     # Telegram's side until we reconnect.
     bot_offline_since: Optional[datetime] = None
+    # True when init_bot raised before finishing handler registration. The client
+    # may still be connected, so `bot_connected` alone would report a bot that
+    # answers nothing as healthy.
+    bot_init_failed: bool = False
+    # Set by every handler that runs. `bot_connected` only proves the socket is
+    # up; a client that is connected but no longer receiving updates ("connected
+    # but deaf") is invisible without this.
+    bot_last_update_at: Optional[datetime] = None
+    # Rolling handler counters for /api/health. Reset only on restart.
+    bot_handler_calls: int = 0
+    bot_handler_errors: int = 0
+    bot_handler_slow: int = 0
     # Pending free-text inputs for the bot settings menus: sender_id -> {kind, scope, armed_at}.
     bot_pending_inputs: dict[int, dict] = field(default_factory=dict)
+    # Поисковый запрос ленты: sender_id -> (текст, когда задан). В 64 байта
+    # callback-данных строка не влезает, поэтому кнопка несёт только флаг, а
+    # текст лежит здесь. Живёт до перезапуска — после него лента честно
+    # показывается без поиска, а не с чужим запросом.
+    bot_feed_queries: dict[int, tuple[str, datetime]] = field(default_factory=dict)
+    # Отмеченные строки на доске долгов: sender_id -> {ping_id}. Массовое
+    # «забрал» в вебе было галочками в DOM; в боте отметка живёт здесь, потому
+    # что в кнопку список из десятка id не влезает. Теряется при перезапуске —
+    # это выбор пользователя на один заход, а не данные.
+    bot_debt_marks: dict[int, set[int]] = field(default_factory=dict)
     # Resolved custom-emoji pack: standard-emoji char -> document_id. Empty when
     # BOT_CUSTOM_EMOJI_SET is unset or the pack can't be resolved (plain fallback).
     custom_emoji_map: dict[str, int] = field(default_factory=dict)
+    # Precompiled first-character buckets over custom_emoji_map, built once at
+    # startup so the entity scan is not O(text x pack size) per rendered card.
+    custom_emoji_index: dict[str, list[str]] = field(default_factory=dict)
     # Scheduled-access cache: tg_id -> (allowed, valid_until_utc, reason). Computed
     # in bot_role, refreshed by access_scheduler_loop, invalidated on rule edits.
     access_cache: dict[int, tuple[bool, datetime, str]] = field(default_factory=dict)
@@ -51,15 +71,17 @@ class AppState:
     last_scan_finished_at: Optional[datetime] = None
     last_scan_status: Optional[str] = None
     account_cooldown_until: dict[str, datetime] = field(default_factory=dict)
-    live_hub: LiveHub = field(default_factory=LiveHub)
     shutting_down: bool = False
-    vapid_private_pem: str = ""
     last_giveaway_action_at: Optional[datetime] = None
     notification_seen: dict = field(default_factory=dict)
     # Obsidian "Долги" note sync: last parsed snapshot, sync meta, write lock.
     obsidian_debts: Optional[dict] = None
     obsidian_sync_meta: Optional[dict] = None
     obsidian_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Книга зарплат: разобранный снимок (salary.SalaryBook) и метаданные чтения.
+    # Снимок держится в памяти, чтобы карточка не разбирала .xlsx на каждый клик.
+    salary_book: Any = None
+    salary_meta: dict = field(default_factory=dict)
     ping_usernames: list = field(default_factory=list)
     ping_regex: object = None  # compiled regex or None
     ping_user_ids: dict[int, str] = field(default_factory=dict)  # resolved user_id -> tracked username

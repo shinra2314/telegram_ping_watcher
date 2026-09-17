@@ -326,6 +326,29 @@ class GiveawayKeyboardTests(unittest.TestCase):
         rows = giveaway_feed_keyboard([(50, "gw")], state=state, accounts=["muver"])
         self.assertIn("@muver", rows[2][1].text)
 
+    def test_owner_gets_tidy_mode_keeping_the_filter(self):
+        state = GiveawayFilter(sort="p", wins=True, account=1, page=2)
+        datas = [b.data for row in giveaway_feed_keyboard([(50, "gw")], page=2, state=state, is_admin=True)
+                 for b in row]
+        self.assertIn(b"gw:x:p:1:1:2", datas)
+        guest = [b.data for row in giveaway_feed_keyboard([(50, "gw")], page=2, state=state) for b in row]
+        self.assertNotIn(b"gw:x:p:1:1:2", guest)
+
+    def test_no_tidy_mode_for_an_empty_queue(self):
+        datas = [b.data for row in giveaway_feed_keyboard([], is_admin=True) for b in row]
+        self.assertFalse(any(d.startswith(b"gw:x:") for d in datas))
+
+    def test_tidy_mode_rows_remove_and_pager_stays_in_mode(self):
+        state = GiveawayFilter(wins=True, page=2)
+        rows = giveaway_feed_keyboard([(50, "🔥 09-16 NK Chat")], page=2, has_more=True,
+                                      state=state, is_admin=True, removing=True)
+        self.assertEqual(rows[0][0].data, b"gw:rm:50:d:1:-1:2")
+        self.assertTrue(rows[0][0].text.startswith("✖ "))
+        self.assertEqual([b.data for b in rows[1]], [b"gw:x:d:1:-1:1", b"noop", b"gw:x:d:1:-1:3"])
+        # «Готово» leaves the mode on the same filtered page.
+        self.assertEqual([(b.text, b.data) for b in rows[-1]], [("✅ Готово", b"gw:f:d:1:-1:2")])
+        self.assertEqual(len(rows), 3)  # no filters or footer while tidying
+
     def test_accounts_picker_rows_select_account(self):
         counts = {"muver": {"wins": 2, "giveaways": 5}}
         rows = giveaway_accounts_keyboard(["muver", "other"], counts, state=GiveawayFilter(wins=True))

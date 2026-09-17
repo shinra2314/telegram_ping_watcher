@@ -173,6 +173,8 @@ h2.title {
 .item .end { text-align: right; flex: none; font-variant-numeric: tabular-nums; }
 .item .end .d { text-align: right; }
 .item .chev { color: var(--faint); }
+.gw-end { display: flex; align-items: center; gap: 10px; }
+.gw-x { width: 32px; height: 32px; border-radius: 10px; margin-right: -4px; }
 .item.selected { background: var(--accent-soft); }
 .item.selected .lead { background: var(--accent); color: var(--accent-ink); }
 
@@ -337,6 +339,11 @@ h2.title {
   box-shadow: 0 10px 30px rgba(0, 0, 0, .4); animation: toast .2s ease both;
 }
 .toast.bad { border-color: rgba(255, 107, 107, .4); }
+.toast.with-act { display: flex; align-items: center; gap: 16px; }
+.toast-act {
+  flex: none; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--accent); font: inherit; font-weight: 650;
+}
 @keyframes toast { from { opacity: 0; transform: translate(-50%, 8px); } }
 
 .text-block {

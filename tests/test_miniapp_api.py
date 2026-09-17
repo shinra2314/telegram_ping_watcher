@@ -125,6 +125,22 @@ class MiniAppApiTests(unittest.TestCase):
         res = self.client.get("/api/app/convert", params={"q": "привет"}, headers=headers(OWNER))
         self.assertEqual(res.status_code, 422)
 
+    def test_status_derives_the_action_unless_one_is_given(self):
+        # ✕ in the list sends only «closed»; «Вернуть» sends the row's old pair back.
+        with patch("routers.miniapp.giveaways.database.get_ping_by_id", AsyncMock(return_value={"id": 5})), \
+                patch("routers.miniapp.giveaways.apply_ping_meta", AsyncMock()) as apply:
+            closed = self.client.post("/api/app/pings/5/status", headers=headers(OWNER), json={"status": "closed"})
+            back = self.client.post("/api/app/pings/5/status", headers=headers(OWNER),
+                                    json={"status": "", "action": "claim_prize"})
+        self.assertEqual((closed.status_code, back.status_code), (200, 200))
+        self.assertEqual(apply.await_args_list[0].kwargs["action_status"], "closed")
+        self.assertEqual(apply.await_args_list[1].kwargs,
+                         {"giveaway_status": "", "action_status": "claim_prize"})
+
+    def test_guest_cannot_remove_from_the_queue(self):
+        res = self.client.post("/api/app/pings/5/status", headers=headers(GUEST), json={"status": "closed"})
+        self.assertEqual(res.status_code, 403)
+
     def test_claim_applies_each_id_once(self):
         with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()) as apply:
             res = self.client.post("/api/app/debts/claim", headers=headers(OWNER),

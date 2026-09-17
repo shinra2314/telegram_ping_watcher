@@ -369,7 +369,13 @@ src/pulse_desk/
                       by `database.giveaway_account_counts`) shows open wins and
                       giveaways per account; `gw:open:<id>:<state>` carries the
                       list state so ⬅️ from a card lands back on the same filter.
-                      An unfiltered page 1 still encodes as plain `menu_giveaways`
+                      An unfiltered page 1 still encodes as plain `menu_giveaways`.
+                      Owner's «✖ Убрать из очереди…» (`gw:x:<state>`) is the same
+                      feed in removal mode: a row tap (`gw:rm:<id>:<state>`) sets
+                      `closed`/`closed` and redraws the page with «↩️ Отменить».
+                      A mode, not a ✖ per row: Telegram splits a row evenly and
+                      the chat name would be cut in half. The panel has ✕ per
+                      row instead; its «Вернуть» posts the old `status`+`action`
   bot/stickers.py   — Aperture sticker registry + best-effort sender (gated by
                       BOT_STICKERS_ENABLED). .webp set lives in
                       assets/bot/stickers/. NOT auto-fired anywhere (sticker

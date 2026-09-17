@@ -43,7 +43,14 @@ App.register('giveaways', {
       lead: icon(r.is_win ? 'trophy' : 'gift', 17), leadCls: r.is_win ? 'on' : '',
       title: esc(r.chat),
       desc: (r.deleted ? 'удалён · ' : '') + esc(priorityLabel(r.priority)),
-      end: '<div class="d num">' + esc(fmtTime(GW.sort === 'p' ? r.date : r.detected_at)) + '</div>',
+      end: '<div class="gw-end"><div class="d num">' + esc(fmtTime(GW.sort === 'p' ? r.date : r.detected_at)) + '</div>'
+        + (last.can_edit
+          ? '<button class="icon-btn gw-x" data-act="dismiss" data-id="' + r.id + '" data-status="' + esc(r.status || '')
+            + '" data-action="' + esc(r.action || '') + '" aria-label="Убрать из очереди">' + icon('x', 16) + '</button>'
+          : '')
+        + '</div>',
+      // ✕ takes the chevron's place: the row still opens the card on tap.
+      chev: !last.can_edit,
     })).join('') + '</div>';
     if (last.has_more) {
       html += '<div style="margin-top:12px"><button class="btn ghost" data-act="more">Показать ещё</button></div>';
@@ -55,6 +62,23 @@ App.register('giveaways', {
     kind: (el) => { GW.wins = el.dataset.v === 'wins'; GW.pages = 1; return App.render({ quiet: true }); },
     sort: () => { GW.sort = GW.sort === 'd' ? 'p' : 'd'; GW.pages = 1; return App.render({ quiet: true }); },
     more: () => { GW.pages += 1; return App.render({ quiet: true }); },
+    // Убрать из очереди = статус «Закрыт»; «Вернуть» кладёт прежние значения обратно.
+    dismiss: async (el) => {
+      const path = '/api/app/pings/' + el.dataset.id + '/status';
+      const prev = { status: el.dataset.status || '', action: el.dataset.action || 'new' };
+      const row = el.closest('.item');
+      if (row) row.remove();
+      const refresh = () => (App.current().name === 'giveaways' ? App.render({ quiet: true }) : null);
+      try {
+        await api(path, { status: 'closed' });
+      } finally {
+        refresh();
+      }
+      toast('Убрано из очереди', false, {
+        label: 'Вернуть',
+        run: async () => { await api(path, prev); toast('Вернули в очередь'); return refresh(); },
+      });
+    },
     open: (el) => App.go('giveaway', { id: el.dataset.id }),
     account: async () => {
       const data = await api('/api/app/giveaways?sort=' + GW.sort + '&page=1');

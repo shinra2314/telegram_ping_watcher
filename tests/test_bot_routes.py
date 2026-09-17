@@ -54,6 +54,8 @@ VIEWER_ROUTES = {
     # семейство остаётся гостевым — иначе гость не откроет и сам список.
     "gw:an:42": "giveaways",
     "gw:sv:42:claimed": "giveaways",
+    "gw:x:d:0:-1:1": "giveaways",
+    "gw:rm:42:d:0:-1:1": "giveaways",
     "gw:cl:0": "giveaways",
     "gw:lvgo:-100123": "giveaways",
     "cv": "market",

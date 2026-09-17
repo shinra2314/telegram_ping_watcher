@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -67,6 +67,7 @@ def feed_row(row: dict) -> dict:
         "deleted": bool(row.get("deleted_at")),
         "priority": row.get("priority_label"),
         "status": row.get("giveaway_status"),
+        "action": row.get("action_status"),
         "link": row.get("link"),
     }
 
@@ -122,15 +123,18 @@ async def giveaway_card(ping_id: int, caller: Caller = Depends(current_caller)) 
 
 class StatusBody(BaseModel):
     status: str
+    # Без него действие выводится из статуса. «Вернуть» после ✕ в списке шлёт
+    # прежнее: пустой статус сам по себе запись в очередь не возвращает.
+    action: Optional[str] = None
 
 
 @router.post("/api/app/pings/{ping_id}/status")
 async def set_status(ping_id: int, body: StatusBody, caller: Caller = Depends(fresh_admin)) -> dict:
     if await database.get_ping_by_id(ping_id) is None:
         raise HTTPException(status_code=404, detail="Запись не найдена")
+    action = body.action if body.action is not None else action_for_giveaway(body.status)
     try:
-        await apply_ping_meta(ping_id, giveaway_status=body.status,
-                              action_status=action_for_giveaway(body.status))
+        await apply_ping_meta(ping_id, giveaway_status=body.status, action_status=action)
     except UnknownStatus as exc:
         raise HTTPException(status_code=422, detail="Неизвестный статус") from exc
     return {"ok": True, "id": ping_id, "status": body.status}

@@ -24,7 +24,7 @@ from ...ping_actions import UnknownStatus, action_for_giveaway, apply_ping_meta
 from ..cards import feed_badge, giveaway_accounts_card, giveaway_card, giveaways_header
 from ..keyboards import (
     cleanup_keyboard, giveaway_accounts_keyboard, giveaway_card_keyboard,
-    giveaway_feed_keyboard, giveaway_status_keyboard, leave_confirm_keyboard,
+    giveaway_feed_keyboard, giveaway_status_keyboard, giveaway_tidy_cb, leave_confirm_keyboard,
 )
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
@@ -47,7 +47,7 @@ def visible_accounts(perms: dict) -> list[str]:
 
 
 async def render_feed(filt: Optional[GiveawayFilter] = None, perms: Optional[dict] = None,
-                      is_admin: bool = False):
+                      is_admin: bool = False, removing: bool = False):
     perms = perms or full_permissions()
     filt = filt or GiveawayFilter()
     page = max(1, filt.page)
@@ -69,6 +69,10 @@ async def render_feed(filt: Optional[GiveawayFilter] = None, perms: Optional[dic
     if account is not None:
         need = [r for r in need if account_mentioned(r.get("mentions"), account)]
     rows, has_more = paginate(need, page, PAGE_SIZE)
+    if not rows and page > 1:
+        # The last row of the last page was just removed — show the one before.
+        page -= 1
+        rows, has_more = paginate(need, page, PAGE_SIZE)
     items = []
     for r in rows:
         when = fmt_dt(r.get("date") if filt.sort == "p" else r.get("detected_at"))
@@ -80,10 +84,14 @@ async def render_feed(filt: Optional[GiveawayFilter] = None, perms: Optional[dic
         len(need) if narrowed
         else int((board.get("bucket_totals") or {}).get("need_action") or len(need))
     )
+    text = giveaways_header(stats, total, filt, account_label(accounts, filt.account))
+    if removing:
+        text += ("\n\n✖ **Уборка:** нажмите запись — она уйдёт из очереди в «Закрыто». "
+                 "Ошиблись — «↩️ Отменить» 30 с.")
     return (
-        giveaways_header(stats, total, filt, account_label(accounts, filt.account)),
+        text,
         giveaway_feed_keyboard(items, page, has_more, state=filt, accounts=accounts,
-                               is_admin=is_admin),
+                               is_admin=is_admin, removing=removing),
     )
 
 
@@ -149,14 +157,14 @@ async def handle(click: Click) -> None:
             return
         await _show(click, res)
         return
-    if view in ("an", "pr", "sk", "cl", "lv", "lvgo", "ss", "sv"):
+    if view in ("an", "pr", "sk", "cl", "lv", "lvgo", "ss", "sv", "x", "rm"):
         await _handle_action(click, view)
         return
     await handle_menu(click)
 
 
 async def _handle_action(click: Click, view: str) -> None:
-    """Действия владельца: разбор, профиль канала, отказ, выход из канала."""
+    """Действия владельца: разбор, профиль канала, отказ, уборка очереди, выход из канала."""
     if click.role != "admin":
         await click.event.answer("Только владелец", alert=True)
         return
@@ -164,9 +172,16 @@ async def _handle_action(click: Click, view: str) -> None:
     if view == "cl":
         await _show_cleanup(click, click.int_arg(2) or 0)
         return
+    if view == "x":
+        await _show(click, await render_feed(parse_giveaway_filter(click.seg[2:]), perms=click.perms,
+                                             is_admin=True, removing=True))
+        return
     target = click.int_arg(2)
     if target is None:
         await event.answer("Некорректная команда", alert=True)
+        return
+    if view == "rm":
+        await _remove(click, target, parse_giveaway_filter(click.seg[3:]))
         return
     if view == "ss":
         ping = await get_ping_by_id(target)
@@ -223,6 +238,19 @@ async def _handle_action(click: Click, view: str) -> None:
     res = await open_card(target, click.perms, GiveawayFilter(), is_admin=True)
     if res is not None:
         await _show(click, res)
+
+
+async def _remove(click: Click, target: int, filt: GiveawayFilter) -> None:
+    """Тап в режиме уборки: закрыть запись и перерисовать ту же страницу с отменой."""
+    before = await snapshot([target])
+    if not before:
+        await click.event.answer("Розыгрыш не найден", alert=True)
+        return
+    await apply_ping_meta(target, giveaway_status="closed", action_status="closed")
+    token = remember(click.sender_id, before, "убрано", giveaway_tidy_cb(filt).decode())
+    await click.event.answer("Убрано из очереди")
+    text, kb = await render_feed(filt, perms=click.perms, is_admin=True, removing=True)
+    await _show(click, (text, undo_row(token, "убрано") + kb))
 
 
 def leave_confirm_text(chat_id: int, item: Optional[dict] = None) -> str:

@@ -210,15 +210,27 @@ function haptic(kind) {
 }
 
 let toastTimer = null;
-function toast(message, bad) {
+// `action` ({ label, run }) adds a button — «Вернуть» after a removal — and
+// keeps the toast up longer so there is time to reach it.
+function toast(message, bad, action) {
   const old = document.querySelector('.toast');
   if (old) old.remove();
   const el = document.createElement('div');
-  el.className = 'toast' + (bad ? ' bad' : '');
+  el.className = 'toast' + (bad ? ' bad' : '') + (action ? ' with-act' : '');
   el.textContent = message;
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'toast-act';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => {
+      el.remove();
+      Promise.resolve(action.run()).catch((err) => toast(err.message || 'Ошибка', true));
+    });
+    el.appendChild(btn);
+  }
   document.body.appendChild(el);
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.remove(), 2600);
+  toastTimer = setTimeout(() => el.remove(), action ? 5000 : 2600);
   haptic(bad ? 'error' : 'ok');
 }
 

@@ -326,10 +326,25 @@ def _giveaway_accounts_cb(state: GiveawayFilter, page: int = 0) -> bytes:
     return f"gw:a:{state.sort}:{1 if state.wins else 0}:{state.account}:{max(0, page)}".encode()
 
 
+def _giveaway_tail(state: GiveawayFilter) -> str:
+    """`:<sort>:<wins>:<acct>:<page>` — the list state every feed callback carries."""
+    return f":{state.sort}:{1 if state.wins else 0}:{state.account}:{max(1, state.page)}"
+
+
 def _giveaway_open_cb(ping_id: int, state: GiveawayFilter) -> bytes:
     """`gw:open:<id>[:<sort>:<wins>:<acct>:<page>]` — the card remembers the list."""
-    tail = f":{state.sort}:{1 if state.wins else 0}:{state.account}:{max(1, state.page)}"
-    return f"gw:open:{ping_id}{tail}".encode()
+    return f"gw:open:{ping_id}{_giveaway_tail(state)}".encode()
+
+
+def giveaway_tidy_cb(state: GiveawayFilter, page: Optional[int] = None) -> bytes:
+    """`gw:x:<sort>:<wins>:<acct>:<page>` — the same feed in «убрать» mode."""
+    state = state if page is None else state._replace(page=page)
+    return f"gw:x{_giveaway_tail(state)}".encode()
+
+
+def _giveaway_remove_cb(ping_id: int, state: GiveawayFilter) -> bytes:
+    """`gw:rm:<id>:<sort>:<wins>:<acct>:<page>` — close one row, stay on the page."""
+    return f"gw:rm:{ping_id}{_giveaway_tail(state)}".encode()
 
 
 def giveaway_feed_keyboard(
@@ -339,31 +354,46 @@ def giveaway_feed_keyboard(
     state: Optional[GiveawayFilter] = None,
     accounts: Sequence[str] = (),
     is_admin: bool = False,
+    removing: bool = False,
 ) -> list[list[Button]]:
-    """Giveaways section: candidates, sort/wins/account filters, pager, home/refresh."""
+    """Giveaways section: candidates, sort/wins/account filters, pager, home/refresh.
+
+    ``removing`` is the owner's «убрать» mode: a tap closes the row instead of
+    opening its card. A mode and not a ✖ beside every row, because Telegram
+    splits a keyboard row evenly and the chat name would be cut in half.
+    """
     state = (state or GiveawayFilter())._replace(page=max(1, page))
+    row_cb = _giveaway_remove_cb if removing else _giveaway_open_cb
+    page_cb = giveaway_tidy_cb if removing else _giveaway_feed_cb
     rows: list[list[Button]] = [
-        [Button.inline(label, _giveaway_open_cb(pid, state))] for pid, label in items
+        [Button.inline(f"✖ {label}" if removing else label, row_cb(pid, state))]
+        for pid, label in items
     ]
-    rows.append([
-        Button.inline(f"▸{label}" if code == state.sort else label, state.with_(sort=code).cb())
-        for code, _db, label in GIVEAWAY_SORTS
-    ])
-    rows.append([
-        Button.inline(
-            ("▸🏆 Победы" if state.wins else "🏆 Победы"),
-            state.with_(wins=not state.wins).cb(),
-        ),
-        Button.inline(f"👤 {account_label(accounts, state.account)}"[:28], _giveaway_accounts_cb(state)),
-    ])
+    if not removing:
+        rows.append([
+            Button.inline(f"▸{label}" if code == state.sort else label, state.with_(sort=code).cb())
+            for code, _db, label in GIVEAWAY_SORTS
+        ])
+        rows.append([
+            Button.inline(
+                ("▸🏆 Победы" if state.wins else "🏆 Победы"),
+                state.with_(wins=not state.wins).cb(),
+            ),
+            Button.inline(f"👤 {account_label(accounts, state.account)}"[:28], _giveaway_accounts_cb(state)),
+        ])
+        if is_admin and items:
+            rows.append([Button.inline("✖ Убрать из очереди…", giveaway_tidy_cb(state))])
     if page > 1 or has_more:
         pager: list[Button] = []
         if page > 1:
-            pager.append(Button.inline("◀️ Новее", _giveaway_feed_cb(state, page - 1)))
+            pager.append(Button.inline("◀️ Новее", page_cb(state, page - 1)))
         pager.append(Button.inline(f"· {page} ·", b"noop"))
         if has_more:
-            pager.append(Button.inline("Старее ▶️", _giveaway_feed_cb(state, page + 1)))
+            pager.append(Button.inline("Старее ▶️", page_cb(state, page + 1)))
         rows.append(pager)
+    if removing:
+        rows.append([Button.inline("✅ Готово", _giveaway_feed_cb(state))])
+        return rows
     footer = [Button.inline("⬅️ Домой", b"menu_main")]
     if is_admin:
         # Чистка каналов тратит запросы Telegram — только для владельца.

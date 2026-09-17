@@ -8,6 +8,8 @@ App.register('more', {
   render() {
     const s = App.sections;
     const rows = [];
+    if (s.analytics) rows.push(item({ act: 'go', data: { to: 'analytics' }, lead: icon('chart', 17), leadCls: 'on', title: 'Статистика', desc: 'Дни, часы, чаты и скорость' }));
+    if (s.prefs) rows.push(item({ act: 'go', data: { to: 'prefs' }, lead: icon('bell', 17), leadCls: 'on', title: 'Уведомления', desc: 'Что присылать и когда удалять' }));
     if (s.accounts) rows.push(item({ act: 'go', data: { to: 'accounts' }, lead: icon('users', 17), leadCls: 'on', title: 'Аккаунты', desc: 'Статус сессий, подключение по номеру' }));
     if (s.debts) rows.push(item({ act: 'go', data: { to: 'debts' }, lead: icon('wallet', 17), leadCls: 'on', title: 'Долги', desc: 'Выигранное, но не забранное' }));
     if (s.salary) rows.push(item({ act: 'go', data: { to: 'salary' }, lead: icon('cash', 17), leadCls: 'on', title: 'Зарплата', desc: 'Книга «Учет розыгрышей»' }));

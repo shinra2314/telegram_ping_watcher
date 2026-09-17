@@ -31,6 +31,8 @@ from routers.miniapp.market import rate_table
 TOKEN = "123456:AAHtesttokenvaluethatisnotreal"
 OWNER = 1
 GUEST = 2
+READER = 3      # recent only: the feed, but not search, not stats
+SCOPED = 4      # recent + search + stats, one account
 
 SNAPSHOT = {
     "bitcoin": {"usd": 60000.0, "usd_24h_change": 1.5},
@@ -57,6 +59,11 @@ async def fake_access(tg_id: int):
         return "admin", full_permissions()
     if tg_id == GUEST:
         return "viewer", {**full_permissions(), "features": ["giveaways"]}
+    if tg_id == READER:
+        return "viewer", {**full_permissions(), "features": ["recent"], "notify": ["mentions", "wins"]}
+    if tg_id == SCOPED:
+        return "premium", {**full_permissions(), "features": ["recent", "search", "stats"],
+                           "accounts": ["muver"]}
     return None, {}
 
 
@@ -163,6 +170,131 @@ class MiniAppApiTests(unittest.TestCase):
         with patch("routers.miniapp.salary.visible", AsyncMock(return_value=False)):
             res = self.client.get("/api/app/salary", headers=headers(GUEST))
         self.assertEqual(res.status_code, 404)
+
+    # --- guest screens: feed ----------------------------------------------
+    def test_feed_needs_the_recent_grant(self):
+        self.assertEqual(self.client.get("/api/app/feed", headers=headers(GUEST)).status_code, 403)
+
+    def test_search_needs_its_own_grant(self):
+        with patch("routers.miniapp.feed.fetch", AsyncMock(return_value=([], False))) as fetch:
+            plain = self.client.get("/api/app/feed", headers=headers(READER))
+            searched = self.client.get("/api/app/feed", params={"q": "гив"}, headers=headers(READER))
+        self.assertEqual((plain.status_code, searched.status_code), (200, 403))
+        self.assertFalse(plain.json()["can_search"])
+        self.assertEqual(fetch.await_count, 1)
+
+    def test_feed_is_cut_to_the_keys_accounts(self):
+        row = {"id": 9, "chat": "Chan", "text": "  hello\n  @muver ", "mentions": '["muver"]'}
+        with patch("routers.miniapp.feed.fetch", AsyncMock(return_value=([row], True))) as fetch:
+            res = self.client.get("/api/app/feed", params={"q": "hello", "type": "w", "page": 2},
+                                  headers=headers(SCOPED))
+        self.assertEqual(res.status_code, 200)
+        filt, perms, query = fetch.await_args.args
+        self.assertEqual((filt.type, filt.query, filt.page, query), ("w", True, 2, "hello"))
+        self.assertEqual(perms["accounts"], ["muver"])
+        self.assertEqual(fetch.await_args.kwargs["page_size"], 20)
+        item = res.json()["items"][0]
+        self.assertEqual((item["snippet"], item["mentions"]), ("hello @muver", ["muver"]))
+        self.assertTrue(res.json()["has_more"])
+
+    def test_feed_rejects_unknown_filter_codes(self):
+        res = self.client.get("/api/app/feed", params={"type": "z"}, headers=headers(READER))
+        self.assertEqual(res.status_code, 422)
+
+    def test_card_about_another_account_is_403(self):
+        row = {"id": 9, "chat": "Chan", "text": "t", "mentions": '["someone_else"]'}
+        with patch("routers.miniapp.feed.database.get_ping_by_id", AsyncMock(return_value=row)):
+            other = self.client.get("/api/app/feed/9", headers=headers(SCOPED))
+            owner = self.client.get("/api/app/feed/9", headers=headers(OWNER))
+        self.assertEqual((other.status_code, owner.status_code), (403, 200))
+        self.assertIsNone(owner.json()["giveaway_status"])
+
+    # --- guest screens: notifications ---------------------------------------
+    def member(self, prefs=None):
+        return patch("routers.miniapp.prefs.get_bot_member",
+                     AsyncMock(return_value={"tg_id": READER, "notification_prefs": json.dumps(prefs or {})}))
+
+    def test_owner_has_no_personal_prefs(self):
+        self.assertEqual(self.client.get("/api/app/prefs", headers=headers(OWNER)).status_code, 404)
+
+    def test_prefs_show_only_granted_types(self):
+        with self.member():
+            res = self.client.get("/api/app/prefs", headers=headers(READER))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["allowed"], ["mentions", "wins"])
+        self.assertEqual(res.json()["hidden"], ["giveaways", "digest"])
+
+    def test_prefs_write_needs_a_fresh_session(self):
+        with self.member(), patch("routers.miniapp.prefs.set_bot_member_prefs", AsyncMock()) as save:
+            res = self.client.post("/api/app/prefs", headers=headers(READER, age_seconds=2 * 60 * 60),
+                                   json={"wins": False})
+        self.assertEqual(res.status_code, 401)
+        save.assert_not_awaited()
+
+    def test_prefs_refuse_a_type_the_key_never_granted(self):
+        with self.member(), patch("routers.miniapp.prefs.set_bot_member_prefs", AsyncMock()) as save:
+            res = self.client.post("/api/app/prefs", headers=headers(READER), json={"giveaways": True})
+        self.assertEqual(res.status_code, 403)
+        save.assert_not_awaited()
+
+    def test_prefs_refuse_an_unknown_autoclean_value(self):
+        with self.member(), patch("routers.miniapp.prefs.set_bot_member_prefs", AsyncMock()) as save:
+            res = self.client.post("/api/app/prefs", headers=headers(READER), json={"autoclean_hours": 5})
+        self.assertEqual(res.status_code, 422)
+        save.assert_not_awaited()
+
+    def test_prefs_patch_is_merged_and_saved(self):
+        with self.member({"min_score": 40}), \
+                patch("routers.miniapp.prefs.set_bot_member_prefs", AsyncMock()) as save:
+            res = self.client.post("/api/app/prefs", headers=headers(READER),
+                                   json={"wins": False, "muted": True, "autoclean_hours": 24})
+        self.assertEqual(res.status_code, 200)
+        saved = save.await_args.args[1]
+        self.assertEqual((saved["wins"], saved["muted"], saved["autoclean_hours"], saved["min_score"]),
+                         (False, True, 24, 40))
+        self.assertTrue(saved["mentions"])
+        self.assertEqual(res.json()["prefs"], saved)
+
+    # --- guest screens: statistics ------------------------------------------
+    def test_statistics_need_stats_or_analytics(self):
+        self.assertEqual(self.client.get("/api/app/analytics", headers=headers(READER)).status_code, 403)
+
+    def test_statistics_are_counted_over_the_keys_accounts(self):
+        report = {"summary": {"total": 1}, "daily": [], "chats": [{"chat": "x"}], "hours": [0] * 24}
+        with patch("routers.miniapp.analytics.build_panel_report", AsyncMock(return_value=report)) as build, \
+                patch("routers.miniapp.analytics.visible_accounts", return_value=["muver"]):
+            scoped = self.client.get("/api/app/analytics", headers=headers(SCOPED))
+            owner = self.client.get("/api/app/analytics", headers=headers(OWNER))
+        self.assertEqual(scoped.status_code, 200)
+        self.assertEqual(build.await_args_list[0].args, (["muver"], ["muver"]))
+        self.assertEqual(build.await_args_list[1].args[0], [])
+        # `stats` alone opens the summary, not the breakdowns.
+        self.assertNotIn("chats", scoped.json())
+        self.assertIn("chats", owner.json())
+
+    # --- guest screens: home -------------------------------------------------
+    def test_guest_home_carries_their_own_profile(self):
+        member = {"tg_id": SCOPED, "notification_prefs": json.dumps({"muted": True})}
+        with patch("routers.miniapp.home.get_bot_member", AsyncMock(return_value=member)), \
+                patch("routers.miniapp.home.list_access_windows", AsyncMock(return_value=[])), \
+                patch("routers.miniapp.home.member_engagement_since",
+                      AsyncMock(return_value={"joined": 2, "skipped": 1})), \
+                patch("routers.miniapp.home.account_win_stats",
+                      AsyncMock(return_value={"wins": 3, "claimed": 1})) as wins, \
+                patch("routers.miniapp.home.visible_accounts", return_value=["muver"]), \
+                patch("routers.miniapp.home.salary_visible", AsyncMock(return_value=False)):
+            res = self.client.get("/api/app/home", headers=headers(SCOPED))
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["sections"]["feed"])
+        self.assertEqual((data["sections"]["prefs"], data["sections"]["analytics"]), (True, True))
+        self.assertFalse(data["sections"]["giveaways"])
+        self.assertEqual((data["me"]["role"], data["me"]["accounts"], data["me"]["muted"]),
+                         ("premium", ["muver"], True))
+        self.assertEqual(data["me"]["access"], {"scheduled": False, "until": None})
+        self.assertEqual(data["mine"]["wins"], {"wins": 3, "claimed": 1})
+        self.assertEqual(wins.await_args.args[0], ["muver"])
+        self.assertEqual(data["mine"]["recent_wins"], [])
 
     # --- headers ----------------------------------------------------------
     def test_api_answers_are_never_cached(self):

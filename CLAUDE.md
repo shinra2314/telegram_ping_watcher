@@ -132,16 +132,29 @@ routers/                   — `health.py` (main app) and `miniapp/` (panel app 
                       converts while typing; `/convert?q=` uses `parse_query`),
                       accounts (+ login, via `account_login`), debts
                       (`segment_rows`/`total_value`), salary (`sections/salary.visible`,
-                      404 when not visible, like the bot's "Неизвестная команда")
+                      404 when not visible, like the bot's "Неизвестная команда").
+                      Guest areas: feed (`sections/feed.fetch` — same FeedFilter,
+                      same FTS path, same `mention_any` cut; the list needs
+                      `recent`, a `q=` needs `search`), prefs (`allowed_pref_keys`
+                      + `bot_prefs.apply_prefs_patch`; 404 for the owner, who has
+                      no member row, and the only endpoint on `fresh_caller`
+                      rather than `fresh_admin`), analytics
+                      (`analytics.build_panel_report`, counted **only over the
+                      key's accounts** — unlike the bot's 📊/📈, which show a
+                      guest global figures; `stats` gets the summary and the day
+                      chart, `analytics` the rest). `home` adds `me` (role,
+                      accounts, notify types, delay, schedule) and `mine` (their
+                      accounts' wins, engagement, last wins) for a non-admin
 
 static/app/                — the panel page. Vanilla JS, no build step, one global
   scope, load order in index.html: icons.js → app.js (App nav stack, api(),
   Sheet, Store = Telegram CloudStorage w/ localStorage fallback, delegated
-  `data-act` routing to the current screen's `actions`/`inputs`) →
+  `data-act` routing to the current screen's `actions`/`inputs`/`changes`) →
   screens/*.js (App.register) → boot.js. CSP allows scripts from self and
   telegram.org only, so no inline scripts. A screen that updates in place
-  (converter typing, debt selection) must not re-render — that steals focus
-  and refetches. Animations move but never fade: a throttled WebView would
+  (converter typing, debt selection, every switch on «Уведомления») must not
+  re-render — that steals focus and refetches. A slider reads `input` for its
+  label and `changes` for the save, so a drag is one request, not fifty. Animations move but never fade: a throttled WebView would
   hold a fading screen at opacity 0.
   Dev: `scripts/miniapp_dev_link.py` prints a localhost link with initData
   signed by the real bot token (no auth bypass exists in the server).
@@ -311,7 +324,11 @@ src/pulse_desk/
                       `register(router)` plus its own renderers, so the slash
                       command and the button can never render different screens.
                       `legacy.py` answers the underscore callbacks still sitting
-                      on old messages in the chat (`fav_`, `read_`, `gconfirm_`)
+                      on old messages in the chat (`fav_`, `read_`, `gconfirm_`).
+                      The feed's 🔎 is gated on the **`search`** grant
+                      (`feed.can_search`, `keyboards.feed_keyboard(can_search=)`):
+                      `/search` always needed it, the in-feed button did not, so
+                      one key had two different answers to the same question
   bot/pending.py    — free-text capture (Telethon has no ConversationHandler):
                       one armed entry per sender in `state.bot_pending_inputs`,
                       300 s TTL, swept on every new prompt. A section declares

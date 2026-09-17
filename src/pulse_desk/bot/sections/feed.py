@@ -26,7 +26,7 @@ from database import (
 
 from ...app_ctx import state
 from ...bot_membership import configured_admin_ids, resolve_member_access
-from ...bot_permissions import accounts_allowed, full_permissions
+from ...bot_permissions import accounts_allowed, full_permissions, has_feature
 from ...common import record_app_event
 from ...ping_actions import UnknownStatus, action_for_giveaway, apply_ping_meta
 from ..cards import feed_badge, feed_header, ping_card
@@ -36,7 +36,7 @@ from ..keyboards import (
 )
 from ..pending import InputRejected, prompt_pending, register_prompt
 from ..reply import safe_edit
-from ..router import CallbackRouter, Click
+from ..router import FEATURE_DENIED, CallbackRouter, Click
 from ..undo import remember, snapshot, undo_row
 from ..views import (
     DIV, FEED_SORT_DB, FEED_STATUS_DB, FEED_TYPE_CODE, FeedFilter, describe_feed_filter,
@@ -45,6 +45,7 @@ from ..views import (
 )
 
 FEATURE = "recent"
+SEARCH_FEATURE = "search"
 PAGE_SIZE = 8
 LABELS = dict(MON_FILTERS)
 # Сохранённые выборки лежат в том же ключе, что писал веб, — пресеты владельца
@@ -73,13 +74,20 @@ def set_query(sender_id: int, text: str) -> None:
     state.bot_feed_queries[sender_id] = (text, datetime.now())
 
 
+def can_search(role: Optional[str], perms: Optional[dict]) -> bool:
+    """Поиск — свой грант. Раньше 🔎 в ленте открывался любому ключу с `recent`,
+    хотя `/search` требовал `search`, и один ключ видел разный набор возможностей."""
+    return role == "admin" or has_feature(perms or {}, SEARCH_FEATURE)
+
+
 # ---- выборка ------------------------------------------------------------
 def _searching_only(state_filter: FeedFilter) -> bool:
     """Поиск без остальных фильтров — случай, который умеет делать индекс."""
     return state_filter.query and state_filter.with_(query=False, page=1) == FeedFilter()
 
 
-async def fetch(state_filter: FeedFilter, perms: dict, query: str) -> tuple[list[dict], bool]:
+async def fetch(state_filter: FeedFilter, perms: dict, query: str,
+                page_size: int = PAGE_SIZE) -> tuple[list[dict], bool]:
     """Страница ленты плюс признак, что дальше есть ещё.
 
     Берём на одну строку больше, чем показываем: это дешевле, чем считать
@@ -93,8 +101,8 @@ async def fetch(state_filter: FeedFilter, perms: dict, query: str) -> tuple[list
     значит завести вторую правду о том, что такое «важные».
     """
     perms = perms or full_permissions()
-    wanted = PAGE_SIZE + 1
-    offset = (max(1, state_filter.page) - 1) * PAGE_SIZE
+    wanted = page_size + 1
+    offset = (max(1, state_filter.page) - 1) * page_size
     search = query if (state_filter.query and query) else None
 
     if search and _searching_only(state_filter):
@@ -104,7 +112,7 @@ async def fetch(state_filter: FeedFilter, perms: dict, query: str) -> tuple[list
         if found:
             rows = [r for r in found if accounts_allowed(perms, r.get("mentions"))]
             window = rows[offset:offset + wanted]
-            return window[:PAGE_SIZE], len(window) > PAGE_SIZE
+            return window[:page_size], len(window) > page_size
 
     rows = await get_pings(
         limit=wanted,
@@ -117,7 +125,7 @@ async def fetch(state_filter: FeedFilter, perms: dict, query: str) -> tuple[list
         sort_order=state_filter.db_order,
         mention_any=perms.get("accounts") or None,
     )
-    return rows[:PAGE_SIZE], len(rows) > PAGE_SIZE
+    return rows[:page_size], len(rows) > page_size
 
 
 def visible_pings(rows: list[dict], perms: dict, limit: int) -> list[dict]:
@@ -137,7 +145,8 @@ async def render(state_filter: Optional[FeedFilter] = None, perms: Optional[dict
         items.append((int(r["id"]), label[:48]))
     head = feed_header(state_filter.type_label, len(rows))
     head += f"\n🔎 __{describe_feed_filter(state_filter, query)}__"
-    return head, feed_keyboard(items, state_filter, has_more=has_more, is_admin=is_admin)
+    return head, feed_keyboard(items, state_filter, has_more=has_more, is_admin=is_admin,
+                               can_search=is_admin or has_feature(perms or full_permissions(), SEARCH_FEATURE))
 
 
 async def open_search(sender_id: int, query: str, perms: Optional[dict] = None,
@@ -164,7 +173,7 @@ def card_text(ping: dict) -> str:
     extras = [f"🏷 Статус: `{ping_status_label(ping.get('status'))}`"]
     if ping.get("is_giveaway") or ping.get("is_win"):
         extras.append(f"🎁 Розыгрыш: `{giveaway_status_label(ping.get('giveaway_status'))}`")
-    tags = _tags_of(ping)
+    tags = tags_of(ping)
     if tags:
         extras.append("🏷 Теги: " + ", ".join(f"`{t}`" for t in tags))
     if ping.get("note"):
@@ -172,7 +181,7 @@ def card_text(ping: dict) -> str:
     return f"{text}\n{DIV}\n" + "\n".join(extras)
 
 
-def _tags_of(ping: dict) -> list[str]:
+def tags_of(ping: dict) -> list[str]:
     """Теги записи: колонка хранит JSON, но в старых строках лежит «a, b»."""
     raw = ping.get("tags")
     if isinstance(raw, list):
@@ -189,6 +198,9 @@ def _tags_of(ping: dict) -> list[str]:
             return []
         return [str(t) for t in parsed] if isinstance(parsed, list) else []
     return [p.strip() for p in text.split(",") if p.strip()]
+
+
+_tags_of = tags_of
 
 
 # ---- показ --------------------------------------------------------------
@@ -217,6 +229,9 @@ async def _consume_search(event, pending: dict, raw: str) -> None:
     # упоминания не должны находиться поиском.
     role, perms = await resolve_member_access(event.sender_id,
                                               admin_ids=configured_admin_ids())
+    if not can_search(role, perms):
+        await event.respond(f"🔒 {FEATURE_DENIED}.")
+        return
     text, kb = await open_search(event.sender_id, raw, perms, is_admin=role == "admin")
     await event.respond(f"🔎 Поиск: «{raw[:64]}»\n\n{text}", buttons=kb, link_preview=False)
 
@@ -382,6 +397,9 @@ async def handle(click: Click) -> None:
                         buttons=feed_filters_keyboard(state_filter, click.role == "admin"))
         return
     if action == "q":
+        if not can_search(click.role, click.perms):
+            await event.answer(FEATURE_DENIED, alert=True)
+            return
         await prompt_pending(event, SEARCH_INPUT)
         return
     if action == "ra":

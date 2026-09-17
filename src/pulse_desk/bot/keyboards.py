@@ -130,8 +130,12 @@ def feed_keyboard(
     page: int = 1,
     has_more: bool = False,
     is_admin: bool = False,
+    can_search: bool = True,
 ) -> list[list[Button]]:
-    """Лента: строка на упоминание, быстрые типы, панель, пагинация, низ."""
+    """Лента: строка на упоминание, быстрые типы, панель, пагинация, низ.
+
+    🔎 рисуется только ключу с грантом `search` — кнопка без права вела бы в отказ.
+    """
     state = _as_feed_state(state, page)
     labels = {code: label for code, _db, label in FEED_TYPES}
     rows: list[list[Button]] = [
@@ -142,10 +146,9 @@ def feed_keyboard(
                       feed_filter_cb(state.with_(type=code)))
         for code in FEED_QUICK_TYPES
     ])
-    tools = [
-        Button.inline("⚙️ Фильтры", feed_state_cb("mon:ff", state)),
-        Button.inline("🔎 Поиск", b"mon:q"),
-    ]
+    tools = [Button.inline("⚙️ Фильтры", feed_state_cb("mon:ff", state))]
+    if can_search:
+        tools.append(Button.inline("🔎 Поиск", b"mon:q"))
     if is_admin:
         tools.append(Button.inline("✅ Прочитать", feed_state_cb("mon:ra", state)))
     rows.append(tools)

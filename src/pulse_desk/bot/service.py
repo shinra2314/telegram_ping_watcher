@@ -321,7 +321,7 @@ async def init_bot() -> None:
                 + f"{DIV}\n"
                 + access_line
                 + "\n\nВыберите раздел 👇",
-                buttons=await home_section.menu_buttons(event.sender_id, role),
+                buttons=await home_section.menu_buttons(event.sender_id, role, perms),
             )
             if is_new_member:
                 # The owner hears about every new person, and a one-time invite
@@ -338,7 +338,7 @@ async def init_bot() -> None:
             if is_new_member and role != "admin":
                 # First-time onboarding: let the member tune notifications right away.
                 prefs = parse_member_prefs(None)
-                text, buttons = prefs_section.menu(prefs)
+                text, buttons = prefs_section.menu(prefs, perms)
                 await event.respond(
                     "⚙️ **Настройте уведомления под себя**\n"
                     f"{DIV}\n"
@@ -365,19 +365,22 @@ async def init_bot() -> None:
                     return
                 await event.respond("❌ **Ключ недействителен или отозван.**")
                 return
-            role = await bot_role(event.sender_id)
+            # Grants too, not just the role: a menu drawn without them shows a
+            # guest every section and then refuses the ones the key never opened.
+            role, perms = await resolve_member_access(event.sender_id)
             if role is None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             welcome_banner = BOT_ASSETS_DIR / "welcome.png"
             home = await home_section.render_home(role)
+            buttons = await home_section.menu_buttons(event.sender_id, role, perms)
             if welcome_banner.exists():
                 try:
-                    await respond_rich(event, home, buttons=await home_section.menu_buttons(event.sender_id, role), file=str(welcome_banner))
+                    await respond_rich(event, home, buttons=buttons, file=str(welcome_banner))
                     return
                 except Exception:
                     logger.warning("Failed to send welcome banner, falling back to text", exc_info=True)
-            await respond_rich(event, home, buttons=await home_section.menu_buttons(event.sender_id, role))
+            await respond_rich(event, home, buttons=buttons)
 
         @bot_client.on(events.NewMessage(pattern=r"/redeem(?:\s+(\S+))?"))
         @safe
@@ -395,19 +398,20 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/menu"))
         @safe
         async def menu_handler(event):
-            role = await bot_role(event.sender_id)
+            role, perms = await resolve_member_access(event.sender_id)
             if role is None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             home = await home_section.render_home(role)
+            buttons = await home_section.menu_buttons(event.sender_id, role, perms)
             banner = BOT_ASSETS_DIR / "welcome.png"
             if banner.exists():
                 try:
-                    await respond_rich(event, home, buttons=await home_section.menu_buttons(event.sender_id, role), file=str(banner))
+                    await respond_rich(event, home, buttons=buttons, file=str(banner))
                     return
                 except Exception:
                     logger.warning("menu banner failed, text fallback", exc_info=True)
-            await respond_rich(event, home, buttons=await home_section.menu_buttons(event.sender_id, role))
+            await respond_rich(event, home, buttons=buttons)
 
         @bot_client.on(events.NewMessage(pattern="/settings"))
         @viewer_only()
@@ -837,7 +841,7 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.message and e.message.text and not e.message.text.startswith("/"))))
         @safe
         async def freeform_handler(event):
-            role = await bot_role(event.sender_id)
+            role, perms = await resolve_member_access(event.sender_id)
             if role is not None:
                 # Members' free text only feeds pending settings inputs; the owner
                 # may also answer a roulette nudge with a bare time.
@@ -847,7 +851,7 @@ async def init_bot() -> None:
                         await delete_quietly(pending.get("chat_id"), pending.get("cleanup") or [])
                         await event.respond(
                             "⌛ Время ввода истекло — поле сброшено.\nОткройте меню заново: /menu",
-                            buttons=await home_section.menu_buttons(event.sender_id, role),
+                            buttons=await home_section.menu_buttons(event.sender_id, role, perms),
                         )
                     else:
                         await consume_pending(event, role, pending)

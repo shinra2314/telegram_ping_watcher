@@ -83,10 +83,13 @@ const App = {
   },
 
   tabs() {
+    const s = this.sections;
     const tabs = [['home', 'home', 'Главная']];
-    if (this.sections.giveaways) tabs.push(['giveaways', 'gift', 'Розыгрыши']);
-    if (this.sections.market) tabs.push(['converter', 'exchange', 'Конвертер']);
-    if (this.sections.debts || this.sections.accounts || this.sections.salary) tabs.push(['more', 'grid', 'Ещё']);
+    if (s.giveaways) tabs.push(['giveaways', 'gift', 'Розыгрыши']);
+    if (s.feed) tabs.push(['feed', 'list', 'Лента']);
+    if (s.market) tabs.push(['converter', 'exchange', 'Конвертер']);
+    // At most five tabs: everything that is not a daily screen goes under «Ещё».
+    if (s.debts || s.accounts || s.salary || s.prefs || s.analytics) tabs.push(['more', 'grid', 'Ещё']);
     return tabs;
   },
 };
@@ -365,7 +368,7 @@ function dispatch(kind, event) {
   if (!target) return;
   const act = target.dataset.act;
   const def = App.screens[App.current().name] || {};
-  const table = kind === 'click' ? def.actions : def.inputs;
+  const table = kind === 'click' ? def.actions : (kind === 'change' ? def.changes : def.inputs);
   const run = (table && table[act]) || (kind === 'click' && GLOBAL_ACTIONS[act]);
   if (!run) return;
   if (kind === 'click') haptic();
@@ -378,6 +381,9 @@ document.addEventListener('click', (event) => {
   dispatch('click', event);
 });
 document.addEventListener('input', (event) => dispatch('input', event));
+// A slider fires `input` on every step and `change` once when released — the
+// label follows the first, the save waits for the second.
+document.addEventListener('change', (event) => dispatch('change', event));
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && event.target.matches('[data-enter]')) {
     const def = App.screens[App.current().name] || {};
@@ -386,7 +392,9 @@ document.addEventListener('keydown', (event) => {
   }
 });
 // A focused field pulls the keyboard up; a fixed bar would then float over it.
-document.addEventListener('focusin', (e) => { if (e.target.matches('input')) App.bar.style.display = 'none'; });
+// A slider takes focus too, but brings no keyboard.
+const TYPING = 'input:not([type=range])';
+document.addEventListener('focusin', (e) => { if (e.target.matches(TYPING)) App.bar.style.display = 'none'; });
 document.addEventListener('focusout', () => { setTimeout(() => {
-  if (!document.activeElement || !document.activeElement.matches('input')) App.bar.style.display = '';
+  if (!document.activeElement || !document.activeElement.matches(TYPING)) App.bar.style.display = '';
 }, 80); });

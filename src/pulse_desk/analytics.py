@@ -1,15 +1,15 @@
 """Analytics aggregation.
 
 `build_analytics` feeds the dashboard summary and the bot's home/summary cards;
-`build_detailed_analytics` backs the bot's 📈 Аналитика section (the web app has
-no analytics page any more — the whole report lives in the bot).
+`build_detailed_analytics` backs the bot's 📈 Аналитика section;
+`build_panel_report` backs the Mini App's statistics screen, cut to a key's accounts.
 """
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import aiosqlite
 
@@ -249,6 +249,157 @@ async def _build_detailed_analytics_uncached() -> dict[str, Any]:
         "channels_by_account": channels_by_account,
         "channel_memberships_total": sum(int(row.get("channels") or 0) for row in channels_by_account),
     }
+
+
+# Mini App statistics: the day chart length, how far back the "where / who /
+# when" sections look, and how many rows they list.
+PANEL_DAYS = 14
+PANEL_WINDOW_DAYS = 30
+PANEL_TOP = 8
+
+
+def clean_names(raw: Optional[Sequence[str]]) -> list[str]:
+    """Tracked usernames as ``ping_mentions`` stores them: no '@', lower case."""
+    return sorted({str(n).strip().lstrip("@").lower() for n in raw or [] if str(n).strip().lstrip("@")})
+
+
+def fill_days(rows: list[dict[str, Any]], last_day: date, days: int = PANEL_DAYS) -> list[dict[str, Any]]:
+    """One entry per calendar day, oldest first; days with no pings are zeros.
+
+    A chart built from GROUP BY alone skips quiet days and draws a busy week
+    and a dead one at the same width.
+    """
+    by_day = {str(r.get("day")): r for r in rows}
+    result = []
+    for offset in range(days - 1, -1, -1):
+        key = (last_day - timedelta(days=offset)).isoformat()
+        row = by_day.get(key) or {}
+        result.append({
+            "day": key,
+            "total": int(row.get("total") or 0),
+            "wins": int(row.get("wins") or 0),
+            "giveaways": int(row.get("giveaways") or 0),
+        })
+    return result
+
+
+async def _build_panel_report_uncached(scope: list[str], listed: list[str]) -> dict[str, Any]:
+    """The Mini App's statistics screen, counted only over what a key may see.
+
+    ``scope`` is the key's account whitelist: every aggregate is limited to pings
+    that mention one of those accounts (through the indexed ``ping_mentions``).
+    Empty — the key covers every account, and the report is global. Owner-only
+    facts (session names, the status workflow, source scores) stay out.
+    Timestamps are compared as local ISO strings, the form ``detected_at`` is
+    stored in — SQLite's ``'now'`` is UTC and would shift every window.
+    """
+    import database
+
+    where = "1 = 1"
+    if scope:
+        where = ("p.id IN (SELECT ping_id FROM ping_mentions WHERE lower(username) IN ("
+                 + ",".join("?" * len(scope)) + "))")
+    now = datetime.now().replace(microsecond=0)
+    day_ago = (now - timedelta(days=1)).isoformat()
+    week_ago = (now - timedelta(days=7)).isoformat()
+    window = (now - timedelta(days=PANEL_WINDOW_DAYS)).isoformat()
+    first_day = (now - timedelta(days=PANEL_DAYS - 1)).date().isoformat()
+
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout=5000")
+
+        async def fetch(sql: str, *before: Any) -> list[dict[str, Any]]:
+            # The scope placeholders always close the WHERE clause.
+            cursor = await db.execute(sql, [*before, *scope])
+            return [dict(r) for r in await cursor.fetchall()]
+
+        head = (await fetch(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(p.is_win), 0) AS wins, "
+            "COALESCE(SUM(p.is_giveaway), 0) AS giveaways, "
+            "COALESCE(SUM(p.detected_at >= ?), 0) AS last_24h, "
+            "COALESCE(SUM(p.detected_at >= ?), 0) AS last_7d "
+            f"FROM pings p WHERE {where}",
+            day_ago, week_ago,
+        ))[0]
+        daily = await fetch(
+            "SELECT substr(p.detected_at, 1, 10) AS day, COUNT(*) AS total, "
+            "COALESCE(SUM(p.is_win), 0) AS wins, COALESCE(SUM(p.is_giveaway), 0) AS giveaways "
+            f"FROM pings p WHERE p.detected_at >= ? AND {where} GROUP BY day",
+            first_day,
+        )
+        hours = await fetch(
+            "SELECT CAST(substr(p.detected_at, 12, 2) AS INTEGER) AS hour, COUNT(*) AS count "
+            f"FROM pings p WHERE p.detected_at >= ? AND {where} GROUP BY hour",
+            window,
+        )
+        chats = await fetch(
+            "SELECT COALESCE(p.chat, '?') AS chat, COUNT(*) AS count, "
+            "COALESCE(SUM(p.is_win), 0) AS wins, COALESCE(SUM(p.is_giveaway), 0) AS giveaways "
+            f"FROM pings p WHERE p.detected_at >= ? AND {where} "
+            f"GROUP BY p.chat ORDER BY count DESC, wins DESC LIMIT {PANEL_TOP}",
+            window,
+        )
+        senders = await fetch(
+            "SELECT COALESCE(NULLIF(p.sender, ''), '?') AS sender, COUNT(*) AS count, "
+            "COALESCE(SUM(p.is_win), 0) AS wins "
+            f"FROM pings p WHERE p.detected_at >= ? AND {where} "
+            f"GROUP BY p.sender ORDER BY count DESC, wins DESC LIMIT {PANEL_TOP}",
+            window,
+        )
+        latency_rows = await fetch(
+            "SELECT p.chat, p.date, p.detected_at, p.is_win, p.edited_at, p.win_detected_at "
+            f"FROM pings p WHERE p.detected_at >= ? AND {where}",
+            window,
+        )
+        accounts: list[dict[str, Any]] = []
+        if listed:
+            cursor = await db.execute(
+                "SELECT lower(m.username) AS name, COUNT(*) AS mentions, "
+                "COALESCE(SUM(p.is_win), 0) AS wins "
+                "FROM ping_mentions m JOIN pings p ON p.id = m.ping_id "
+                f"WHERE lower(m.username) IN ({','.join('?' * len(listed))}) GROUP BY lower(m.username)",
+                listed,
+            )
+            counted = {r["name"]: dict(r) for r in await cursor.fetchall()}
+            accounts = sorted(
+                ({"name": name, "mentions": int((counted.get(name) or {}).get("mentions") or 0),
+                  "wins": int((counted.get(name) or {}).get("wins") or 0)} for name in listed),
+                key=lambda a: (-a["wins"], -a["mentions"], a["name"]),
+            )
+
+    total = int(head["total"] or 0)
+    wins = int(head["wins"] or 0)
+    by_hour = {int(r["hour"]): int(r["count"]) for r in hours if r.get("hour") is not None}
+    return {
+        "summary": {
+            "total": total,
+            "wins": wins,
+            "giveaways": int(head["giveaways"] or 0),
+            "last_24h": int(head["last_24h"] or 0),
+            "last_7d": int(head["last_7d"] or 0),
+            "win_rate": round(wins / total * 100, 1) if total else 0,
+        },
+        "daily": fill_days(daily, now.date()),
+        "window_days": PANEL_WINDOW_DAYS,
+        "hours": [by_hour.get(h, 0) for h in range(24)],
+        "chats": chats,
+        "senders": senders,
+        "accounts": accounts,
+        "latency": build_latency(latency_rows),
+    }
+
+
+async def build_panel_report(scope: Optional[Sequence[str]], listed: Optional[Sequence[str]] = None) -> dict[str, Any]:
+    """Mini App statistics for one account scope, memoised like the bot's report.
+
+    ``scope`` — the key's whitelist (empty: every account); ``listed`` — the
+    accounts to break down in the per-account section.
+    """
+    names = clean_names(scope)
+    shown = clean_names(listed)
+    key = "panel:" + ",".join(names) + "|" + ",".join(shown)
+    return await _cached(key, lambda: _build_panel_report_uncached(names, shown))
 
 
 async def build_analytics() -> dict[str, Any]:

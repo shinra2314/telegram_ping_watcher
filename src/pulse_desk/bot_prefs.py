@@ -77,6 +77,38 @@ def toggle_member_pref(prefs: dict, key: str) -> dict:
     return updated
 
 
+def apply_prefs_patch(prefs: dict, patch: dict, allowed: list[str]) -> dict:
+    """Merge a partial update from the Mini App into a member's prefs.
+
+    ``allowed`` is ``allowed_pref_keys(perms)``: a type the key does not grant
+    cannot be switched (``PermissionError``) — the bot's ``pf_*`` buttons refuse
+    it the same way. ``muted`` is always the member's own. An auto-delete value
+    outside ``autoclean.CHOICES`` is a ``ValueError``, not a silent "off".
+    ``None`` in the patch means "leave as is".
+    """
+    from .autoclean import CHOICES
+
+    updated = dict(DEFAULT_MEMBER_PREFS)
+    updated.update(prefs or {})
+    for key, value in (patch or {}).items():
+        if value is None or key not in DEFAULT_MEMBER_PREFS:
+            continue
+        if key == "min_score":
+            updated[key] = max(0, min(100, int(value)))
+        elif key == "autoclean_hours":
+            hours = int(value)
+            if hours not in CHOICES:
+                raise ValueError(f"autoclean_hours must be one of {CHOICES}")
+            updated[key] = hours
+        elif key == "muted":
+            updated[key] = bool(value)
+        else:
+            if key not in allowed:
+                raise PermissionError(key)
+            updated[key] = bool(value)
+    return updated
+
+
 def notification_type_of(record: dict) -> str:
     if record.get("is_win"):
         return "win"

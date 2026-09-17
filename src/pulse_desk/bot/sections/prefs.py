@@ -17,6 +17,7 @@ from database import (
 )
 
 from ...autoclean import label as autoclean_label, next_choice
+from ...bot_membership import resolve_member_access
 from ...bot_permissions import allowed_pref_keys, full_permissions
 from ...bot_prefs import parse_member_prefs, render_member_prefs_text, toggle_member_pref
 from ..cards import member_stats_card
@@ -72,7 +73,9 @@ async def _consume_min_score(event, pending: dict, raw: str) -> None:
     prefs = parse_member_prefs(member.get("notification_prefs"))
     prefs["min_score"] = value
     await set_bot_member_prefs(event.sender_id, prefs)
-    text, buttons = menu(prefs)
+    # The redrawn menu must stay cut to the key's grants, like every pf_* screen.
+    _role, perms = await resolve_member_access(event.sender_id)
+    text, buttons = menu(prefs, perms)
     await event.respond(f"✅ Мин. score: {value if value else 'любой'}\n\n{text}", buttons=buttons)
 
 

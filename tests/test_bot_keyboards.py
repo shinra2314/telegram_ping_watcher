@@ -85,6 +85,12 @@ class FeedKeyboardTests(unittest.TestCase):
         self.assertIn(b"mon:ra:a:a:0:d:0:0:1", owner)
         self.assertIn(b"mon:q", guest)
 
+    def test_search_button_needs_the_search_grant(self):
+        # A key with `recent` but not `search` used to get 🔎 and search anyway.
+        tools = [b.data for b in feed_keyboard(self.ITEMS, FeedFilter(), can_search=False)[len(self.ITEMS) + 1]]
+        self.assertNotIn(b"mon:q", tools)
+        self.assertTrue(any(d.startswith(b"mon:ff") for d in tools))
+
     def test_footer_home_and_refresh_keep_the_selection(self):
         state = FeedFilter(type="w", favorite=True)
         footer = feed_keyboard(self.ITEMS, state)[-1]

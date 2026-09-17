@@ -149,3 +149,40 @@ def _notify(
         on_change(connected, attempt)
     except Exception:
         log.debug("Bot connection state callback failed", exc_info=True)
+
+
+async def keep_starting_bot(
+    start: Callable[[], Any],
+    *,
+    is_started: Callable[[], bool],
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    delay_for: Callable[[int], float] = bot_reconnect_delay_seconds,
+    should_stop: Optional[Callable[[], bool]] = None,
+    on_started: Optional[Callable[[int], Any]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    """Retry the bot's start-up until it succeeds; returns the retries it took.
+
+    ``watch_bot_connection`` only looks after a client that once started. When
+    the very first ``start()`` fails — the network is not up yet right after
+    boot — there was no client to watch and nothing tried again: on 15.08 the
+    bot stayed dead from 09:25 to 12:46 while pings kept being stored. A start
+    that fails *after* the client was published (a handler registration bug)
+    counts as started: retrying would only register the handlers twice.
+    """
+    log = logger or logging.getLogger(__name__)
+    stop = should_stop or (lambda: False)
+    attempt = 0
+    while not stop() and not is_started():
+        attempt += 1
+        await sleep(delay_for(attempt))
+        if stop():
+            break
+        log.info("Retrying Telegram bot start-up (attempt %d)", attempt)
+        await start()
+    if attempt and is_started() and on_started is not None:
+        try:
+            await on_started(attempt)
+        except Exception:
+            log.debug("Bot start-up callback failed", exc_info=True)
+    return attempt

@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from . import (
     accounts, analytics, backups, broadcast, converter, dashboard, debts, diagnostics, feed,
-    giveaways, home, keys, legacy, market, members, obsidian, prefs, roulette, salary, scan,
-    services, settings, system,
+    giveaways, home, ignored, keys, legacy, market, members, obsidian, prefs, report, roulette, salary, scan,
+    services, settings, system, undo, vacation,
 )
 
 SECTIONS = (
     accounts, analytics, backups, broadcast, converter, dashboard, debts, diagnostics, feed,
-    giveaways, home, keys, legacy, market, members, obsidian, prefs, roulette, salary, scan,
-    services, settings, system,
+    giveaways, home, ignored, keys, legacy, market, members, obsidian, prefs, report, roulette, salary, scan,
+    services, settings, system, undo, vacation,
 )
 
 

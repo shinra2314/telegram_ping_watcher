@@ -11,6 +11,7 @@ HTTP остался ровно ради этой ручки — её опраш�
 """
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 
 from fastapi import APIRouter
@@ -18,9 +19,9 @@ from fastapi import APIRouter
 import database
 from pulse_desk import APP_VERSION
 from pulse_desk import watch_settings as ws
-from pulse_desk.app_ctx import state
+from pulse_desk.app_ctx import settings, state
 from pulse_desk.common import now_iso
-from pulse_desk.jobs import expected_jobs, runtime_health
+from pulse_desk.jobs import expected_jobs, feature_job_polls, runtime_health
 from pulse_desk.watchdog import classify_job, default_thresholds
 
 router = APIRouter()
@@ -46,12 +47,17 @@ async def health():
         db_size_bytes = database.DB_PATH.stat().st_size if database.DB_PATH.exists() else 0
     except Exception:
         db_size_bytes = 0
+    try:
+        disk_free_mb = shutil.disk_usage(settings.base_dir).free // (1024 * 1024)
+    except OSError:
+        disk_free_mb = None
     # Engine health: which critical jobs have gone silent or died (same logic the
     # watchdog uses to page the admin).
     thresholds = default_thresholds(
         scan_interval_seconds=ws.SCAN_INTERVAL_SECONDS,
         market_poll_seconds=ws.MARKET_POLL_SECONDS,
         bot_configured=bot_configured,
+        enabled_features=feature_job_polls(settings),
     )
     now = datetime.now()
     unhealthy_jobs = []
@@ -82,6 +88,12 @@ async def health():
         pending_backlog = await database.pending_sends_backlog()
     except Exception:
         pending_backlog = None
+    try:
+        # Owner's ping cards not delivered yet (ping_notify). A number that stays
+        # up means mentions are being found but not reaching the owner.
+        owed_ping_cards = await database.count_owed_ping_notifications()
+    except Exception:
+        owed_ping_cards = None
     bot_ok = (
         not bot_configured
         or (
@@ -107,10 +119,16 @@ async def health():
             "bot_handler_errors": state.bot_handler_errors,
             "bot_handler_slow": state.bot_handler_slow,
             "pending_sends_backlog": pending_backlog,
+            "owed_ping_cards": owed_ping_cards,
             "unhealthy_jobs": unhealthy_jobs,
             "time": now_iso(),
             "version": APP_VERSION,
             "db_size_bytes": db_size_bytes,
+            "disk_free_mb": disk_free_mb,
+            # Filled by the hourly `maintenance` pass; None until its first run.
+            "db_freelist_pct": state.maintenance_stats.get("freelist_pct"),
+            "backups_bytes": state.maintenance_stats.get("backups_bytes"),
+            "last_maintenance_at": state.maintenance_stats.get("finished_at"),
             "last_scan_finished_at": state.last_scan_finished_at.isoformat(timespec="seconds")
             if state.last_scan_finished_at
             else None,

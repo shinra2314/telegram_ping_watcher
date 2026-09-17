@@ -10,8 +10,16 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 # 1. Stop current listener on the port, if any
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn) {
-    Write-Host "Stopping pid=$($conn.OwningProcess) on :$Port"
-    Stop-Process -Id $conn.OwningProcess -Force -Confirm:$false
+    # The whole tree, not just python.exe: Windows does not kill children with
+    # their parent, and an orphaned `tailscale funnel` kept the :443 listener so
+    # the new app's tunnel failed with "listener already exists" (2026-09-13).
+    Write-Host "Stopping pid=$($conn.OwningProcess) on :$Port (with its child processes)"
+    & taskkill.exe /PID $conn.OwningProcess /T /F | Out-Null
+    if (Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue) {
+        # It may exit between the check and the kill; under
+        # ErrorActionPreference=Stop that aborted the script before the new start.
+        Stop-Process -Id $conn.OwningProcess -Force -Confirm:$false -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Seconds 2
 }
 

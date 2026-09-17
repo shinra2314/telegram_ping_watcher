@@ -82,7 +82,12 @@ class Settings(BaseSettings):
     pings_retention_days: int = Field(default=90, alias="PINGS_RETENTION_DAYS")
     vacuum_interval_hours: int = Field(default=168, alias="VACUUM_INTERVAL_HOURS")
     flood_wait_max_seconds: int = Field(default=1800, alias="FLOOD_WAIT_MAX_SECONDS")
-    backup_retention: int = Field(default=10, alias="BACKUP_RETENTION")
+    backup_retention: int = Field(default=10, alias="BACKUP_RETENTION")  # newest copies kept unconditionally (≤3 used); 0 = never delete
+    # Read by database/backups.py through os.environ (load_dotenv above); listed
+    # here so this file stays the full list of supported variables.
+    backup_max_total_mb: int = Field(default=1024, alias="BACKUP_MAX_TOTAL_MB")  # size cap for backups/; the newest copy is always kept
+    backup_min_interval_hours: int = Field(default=6, alias="BACKUP_MIN_INTERVAL_HOURS")  # skip the startup backup when a newer one exists
+    disk_free_alert_mb: int = Field(default=2048, alias="DISK_FREE_ALERT_MB")  # owner alert below this much free space; 0 = off
     pending_auth_ttl_seconds: int = Field(default=600, alias="PENDING_AUTH_TTL_SECONDS")
     db_max_size_mb: int = Field(default=1024, alias="DB_MAX_SIZE_MB")  # main DB file size cap; 0 = disabled
     db_archive_enabled: bool = Field(default=True, alias="DB_ARCHIVE_ENABLED")  # copy old pings to pulse_desk_archive.db before deleting
@@ -121,6 +126,23 @@ class Settings(BaseSettings):
 
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
+
+    # --- Telegram Mini App («🛰 Панель») -----------------------------------
+    # The panel is served by a SECOND ASGI app on its own port, and only that
+    # port is published through the tunnel. A tunnel forwards a whole origin and
+    # cannot be narrowed to a path, so nothing else may share MINIAPP_PORT.
+    miniapp_enabled: bool = Field(default=False, alias="MINIAPP_ENABLED")
+    miniapp_port: int = Field(default=8010, alias="MINIAPP_PORT")
+    # "tailscale", "ngrok" or "cloudflared". Tailscale Funnel is the default:
+    # its hostname is stable, it needs no domain purchase, and unlike ngrok it
+    # is not quarantined by Defender's PUA protection. A cloudflared quick
+    # tunnel needs no account but mints a new hostname per restart, and its
+    # control host is blocked on some networks.
+    tunnel_provider: str = Field(default="tailscale", alias="TUNNEL_PROVIDER")
+    tailscale_bin: str = Field(default="tailscale", alias="TAILSCALE_BIN")
+    cloudflared_bin: str = Field(default="cloudflared", alias="CLOUDFLARED_BIN")
+    ngrok_bin: str = Field(default="ngrok", alias="NGROK_BIN")
+    ngrok_domain: str = Field(default="", alias="NGROK_DOMAIN")
 
     @field_validator("telegram_api_id", "admin_id", mode="before")
     @classmethod

@@ -10,7 +10,7 @@ from ...converter import (
     supported_text,
 )
 from ..keyboards import conversion_keyboard, converter_keyboard
-from ..pending import prompt_pending, register_prompt
+from ..pending import InputRejected, prompt_pending, register_prompt
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
 from ..views import DIV
@@ -36,11 +36,7 @@ async def _consume_query(event, pending: dict, raw: str) -> None:
     # button and the command, not by ownership.
     query = parse_query(raw)
     if query is None:
-        await event.respond(
-            f"❌ **Не понял запрос.**\n{USAGE_HINT}\n{DIV}\n{supported_text()}",
-            buttons=converter_keyboard(),
-        )
-        return
+        raise InputRejected(f"❌ **Не понял запрос.**\n{USAGE_HINT}\n{DIV}\n{supported_text()}")
     text, buttons = await render_result(query)
     await event.respond(text, buttons=buttons)
 

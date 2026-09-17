@@ -396,6 +396,7 @@ ANALYTICS_TABS: list[tuple[str, str]] = [
     ("who", "Люди"),
     ("time", "Время"),
     ("flow", "Качество"),
+    ("lat", "Задержка"),
 ]
 
 # home-screen button -> feature code its key must grant
@@ -440,7 +441,12 @@ def main_menu_buttons(role: str, perms: Optional[dict] = None, salary: bool = Fa
     else:
         rows.append([Button.inline("🔔 Мои уведомления", b"pf")])
     rows.append([Button.inline("❓ Помощь", b"menu_help")])
-    return rows
+    # Панель — сверху, когда туннель поднят. Без него `webapp_row` отдаёт пустой
+    # список, и меню ровно такое же, как без Mini App: inline-разделы остаются.
+    from .keyboards import webapp_row
+
+    panel = webapp_row("🛰 Панель")
+    return [panel] + rows if panel else rows
 
 
 # slash-command help line -> feature code it needs
@@ -478,7 +484,10 @@ def help_text(role: str, perms: Optional[dict] = None, salary: bool = False) -> 
             "👑 **Владелец**",
             "• /scan — скан истории",
             "• /logs — последние логи",
-            "• /export — CSV выгрузка",
+            "• /export — CSV выгрузка (`/export json` — JSON)",
+            "• /win <ссылка> [@аккаунт] — добавить пропущенную победу",
+            "• /report [месяц] — отчёт картинкой за 7 дней / месяц",
+            "• /invite [метка] — одноразовое приглашение",
             "• /newkey `[метка]` — создать ключ",
             "• /keys — список ключей",
             "• /members `[запрос]` — пользователи / поиск",

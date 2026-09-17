@@ -70,9 +70,12 @@ async def system_status() -> dict[str, Any]:
     }
 
 
-def recommendations(scan_health: dict, outbox: dict, runtime: dict) -> list[str]:
+def recommendations(scan_health: dict, outbox: dict, runtime: dict, owed_ping_cards: int = 0) -> list[str]:
     """Что делать с тем, что нашли. Пусто не бывает — молчание читается как сбой."""
     out: list[str] = []
+    if owed_ping_cards:
+        out.append(f"Не доставлено карточек об упоминаниях: {owed_ping_cards}. "
+                   "notify-retry досылает их, пока бот на связи — если число не падает, бот офлайн.")
     if scan_health.get("running"):
         out.append("Есть активный scan-run. Если скан давно не движется, перезапустите приложение.")
     if scan_health.get("recent_interrupted"):
@@ -94,8 +97,13 @@ async def diagnostics() -> dict[str, Any]:
     runtime = runtime_health(state, accounts_online=len(state.clients),
                              accounts_configured=len(state.session_names))
     size = db_size_bytes()
+    try:
+        owed_ping_cards = await database.count_owed_ping_notifications()
+    except Exception:
+        owed_ping_cards = 0
     return {
         "version": APP_VERSION,
+        "owed_ping_cards": owed_ping_cards,
         "schema_version": await get_schema_version(),
         "db": {
             "path": str(database.DB_PATH),
@@ -104,6 +112,8 @@ async def diagnostics() -> dict[str, Any]:
             "stats": await get_db_stats(),
             "backup_count": len(list_db_backups(limit=500)),
         },
+        # Last pass of the hourly `maintenance` job (empty until it has run).
+        "maintenance": dict(state.maintenance_stats),
         "live": {"outbox": outbox},
         "runtime": runtime,
         "scan": {
@@ -113,7 +123,7 @@ async def diagnostics() -> dict[str, Any]:
             "background_tasks": sorted(state.background_task_names),
         },
         "recent_problem_events": await get_recent_problem_events(limit=8),
-        "recommendations": recommendations(scan_health, outbox, runtime),
+        "recommendations": recommendations(scan_health, outbox, runtime, owed_ping_cards),
         "accounts": {
             "online": len(state.clients),
             "configured": len(state.session_names),

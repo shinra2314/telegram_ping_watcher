@@ -5,7 +5,7 @@ in, so every branch here unit-tests without a database.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from .bot.cards import spark
@@ -251,3 +251,54 @@ def format_digest(
 
     lines.append(f"\n__Сгенерировано {datetime.now().strftime('%d.%m.%Y %H:%M')}__")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Scheduling (pure): when the daily digest is due
+# ---------------------------------------------------------------------------
+# The loop used to sleep until HH:MM, so a slot that passed while the PC was
+# off was lost for the day. It now ticks like the roulette reminder and asks
+# `digest_due`; the date of the last handled slot lives in the `digest_state`
+# settings key (audit=False — it changes every day).
+
+DIGEST_POLL_SECONDS = 30
+# A digest is still worth sending this long after its slot; later than that the
+# day is half over and the next one is closer.
+DIGEST_CATCHUP_HOURS = 4
+
+
+def digest_slot(now: datetime, hhmm: str) -> datetime:
+    """The most recent digest moment at or before `now`."""
+    from .bot_prefs import parse_hhmm
+
+    clean = parse_hhmm(str(hhmm or "")) or "10:00"
+    slot = now.replace(hour=int(clean[:2]), minute=int(clean[3:]), second=0, microsecond=0)
+    if slot > now:
+        slot -= timedelta(days=1)
+    return slot
+
+
+def digest_due(now: datetime, cfg: dict, last_slot: Optional[str],
+               catchup_hours: float = DIGEST_CATCHUP_HOURS) -> bool:
+    """Should the digest go out on this tick?
+
+    `last_slot` is the ISO date of the last slot already handled (sent, or
+    deliberately skipped). A slot is sent once, and only within the catch-up
+    window, so a PC switched on at 11:00 still gets the 10:00 digest but one
+    switched on in the evening does not get the morning's.
+    """
+    if not cfg.get("enabled", True):
+        return False
+    slot = digest_slot(now, str(cfg.get("time") or ""))
+    if last_slot and last_slot >= slot.date().isoformat():
+        return False
+    return now - slot <= timedelta(hours=catchup_hours)
+
+
+def digest_seed_slot(now: datetime, cfg: dict) -> str:
+    """`last_slot` to store on the first run: the most recent slot counts as handled.
+
+    Before this key existed the old loop may already have sent today's digest;
+    treating it as handled avoids a duplicate right after the upgrade.
+    """
+    return digest_slot(now, str(cfg.get("time") or "")).date().isoformat()

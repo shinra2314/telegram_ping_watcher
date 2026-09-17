@@ -45,13 +45,8 @@ GROUPS: list[tuple[str, str]] = [
     ("mentions", "УПОМИНАНИЯ"),
 ]
 
-# Market-cap weights used only when a snapshot predates `usd_market_cap`
-# (added to the CoinGecko call in 2026-09). Rough order of magnitude — they
-# decide tile area on old data, never a number printed on the card.
-FALLBACK_CAP: dict[str, float] = {
-    "bitcoin": 1000, "ethereum": 380, "tether": 130, "binancecoin": 90,
-    "solana": 70, "the-open-network": 12, "notcoin": 2, "dogs-2": 1,
-}
+# FALLBACK_CAP (market-cap weights for snapshots predating `usd_market_cap`) is
+# imported from bot/render/screens.py above — a second copy here shadowed it.
 
 
 def _bucket(ping: dict[str, Any]) -> str:

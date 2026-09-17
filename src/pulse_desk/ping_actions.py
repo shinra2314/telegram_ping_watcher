@@ -59,6 +59,11 @@ async def apply_ping_meta(
         giveaway_status=giveaway_status,
         action_status=action_status,
     )
+    if giveaway_status is not None or action_status is not None:
+        # One prize, one decision: copies of the same winners post follow it.
+        from database import propagate_status_to_duplicates
+
+        await propagate_status_to_duplicates(ping_id, giveaway_status, action_status)
     if CLAIMED in (giveaway_status, action_status):
         await _mirror_claim(ping_id)
 

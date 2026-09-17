@@ -101,10 +101,40 @@ class ThresholdTests(unittest.TestCase):
         for name in ("auto-scan", "broadcast-approval", "source-scores", "access-scheduler", "market-fetch"):
             self.assertIn(name, t)
 
-    def test_optional_jobs_excluded(self):
+    def test_feature_jobs_excluded_unless_enabled(self):
         t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300)
-        self.assertNotIn("daily-digest", t)
         self.assertNotIn("obsidian-sync", t)
+        self.assertNotIn("salary-sync", t)
+
+    def test_enabled_feature_job_gets_ten_polls(self):
+        t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300,
+                               enabled_features={"salary-sync": 120, "obsidian-sync": 30})
+        self.assertEqual(t["salary-sync"], 1200)
+        # Never tighter than ten minutes, however fast the poll.
+        self.assertEqual(t["obsidian-sync"], 600)
+
+    def test_unknown_feature_is_ignored(self):
+        t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300,
+                               enabled_features={"tunnel": 10})
+        self.assertNotIn("tunnel", t)
+
+    def test_ticking_jobs_are_watched(self):
+        # The digest and roulette loops tick every 30 s now instead of sleeping
+        # to their target, so a silent one is a dead one.
+        t = default_thresholds(scan_interval_seconds=900, market_poll_seconds=300)
+        for name in ("daily-digest", "roulette-reminder", "maintenance"):
+            self.assertIn(name, t)
+
+    def test_feature_job_polls_follow_configuration(self):
+        from types import SimpleNamespace
+
+        from pulse_desk.jobs import feature_job_polls
+
+        off = feature_job_polls(SimpleNamespace(obsidian_sync_poll_seconds=30, salary_xlsx_path=""))
+        self.assertEqual(set(off), {"obsidian-sync"})
+        on = feature_job_polls(SimpleNamespace(obsidian_sync_poll_seconds=30,
+                                               salary_xlsx_path="book.xlsx", salary_sync_poll_seconds=60))
+        self.assertEqual(on["salary-sync"], 60)
 
 
 class FormatAgeTests(unittest.TestCase):

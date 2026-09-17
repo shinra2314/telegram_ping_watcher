@@ -34,7 +34,7 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, is_win, action_status, giveaway_status, priority_score, mentions
+            SELECT id, text, is_win, action_status, giveaway_status, priority_score, priority_label, mentions
             FROM pings
             WHERE is_giveaway = 1
             ORDER BY id DESC
@@ -43,38 +43,72 @@ async def reconcile_giveaway_outcomes(limit: int = 10000) -> dict[str, int]:
             (limit,),
         )).fetchall()
 
-    marked = 0
-    for row in rows:
-        if not _parse_mentions(row["mentions"]):
-            continue
-        if not is_giveaway_outcome_text(row["text"] or ""):
-            continue
-        resolution = giveaway_outcome_resolution(row["text"] or "")
-        is_final = (row["giveaway_status"] or "") in {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"} or (row["action_status"] or "") in {"claimed", "missed", "scam", "closed"}
-        next_action = row["action_status"] or "new"
-        if not is_final and next_action in {"", "new", "waiting_result", "to_check"}:
-            next_action = "missed" if resolution == "missed" else "claim_prize"
-        next_giveaway_status = resolution if not is_final and resolution == "missed" else "pending"
-        async with _connect() as db:
-            await db.execute(
+        updates: list[tuple[Any, ...]] = []
+        for row in rows:
+            if not _parse_mentions(row["mentions"]):
+                continue
+            if not is_giveaway_outcome_text(row["text"] or ""):
+                continue
+            wanted = outcome_target(dict(row), giveaway_outcome_resolution(row["text"] or ""))
+            current = (int(row["is_win"] or 0), row["giveaway_status"] or "", row["action_status"] or "new",
+                       int(row["priority_score"] or 0), row["priority_label"] or "")
+            # Only real changes are written and counted. The pass used to
+            # rewrite every result post on every start — 403 rows, one
+            # connection and commit each — and report them all as "marked".
+            if wanted != current:
+                updates.append((*wanted, int(row["id"])))
+        if updates:
+            await db.executemany(
                 """
                 UPDATE pings
-                SET is_win = 1,
-                    giveaway_status = CASE
-                        WHEN COALESCE(giveaway_status, '') = '' THEN ?
-                        WHEN COALESCE(giveaway_status, '') = 'pending' AND ? = 'missed' THEN 'missed'
-                        ELSE giveaway_status
-                    END,
-                    action_status = ?,
-                    priority_score = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 90 ELSE priority_score END,
-                    priority_label = CASE WHEN COALESCE(priority_score, 0) < 90 THEN 'critical' ELSE priority_label END
+                SET is_win = ?, giveaway_status = ?, action_status = ?, priority_score = ?, priority_label = ?
                 WHERE id = ?
                 """,
-                (next_giveaway_status, next_giveaway_status, next_action, int(row["id"])),
+                updates,
             )
             await db.commit()
-        marked += 1
-    return {"marked": marked}
+    return {"marked": len(updates)}
+
+
+_FINAL_GIVEAWAY = {"claimed", "missed", "missed_unsubscribe", "missed_reply", "scam", "closed"}
+_FINAL_ACTION = {"claimed", "missed", "scam", "closed"}
+
+
+def outcome_target(row: dict[str, Any], resolution: str) -> tuple[int, str, str, int, str]:
+    """``(is_win, giveaway_status, action_status, priority_score, priority_label)`` a
+    result post with a tracked mention should have.
+
+    A decision the owner already made (claimed, scam, missed…) is kept as is:
+    the old pass stamped ``giveaway_status='pending'`` back onto such rows.
+    """
+    giveaway_status = row.get("giveaway_status") or ""
+    action = row.get("action_status") or "new"
+    is_final = giveaway_status in _FINAL_GIVEAWAY or action in _FINAL_ACTION
+    if not is_final:
+        if action in {"", "new", "waiting_result", "to_check"}:
+            action = "missed" if resolution == "missed" else "claim_prize"
+        if giveaway_status == "":
+            giveaway_status = "missed" if resolution == "missed" else "pending"
+        elif giveaway_status == "pending" and resolution == "missed":
+            giveaway_status = "missed"
+    score = int(row.get("priority_score") or 0)
+    label = row.get("priority_label") or ""
+    if score < 90:
+        score, label = 90, "critical"
+    return 1, giveaway_status, action, score, label
+
+
+TEXTLESS_CARD_PREFIX = "🃏 Карточка mini-app"
+MANUAL_WIN_MARK = "Добавлено вручную"
+
+
+def _mentions_and_verdict_not_textual(row: Any) -> bool:
+    """Wins the keyword rule cannot judge (see ``reconcile_win_flags``)."""
+    if not _parse_mentions(row["mentions"]):
+        return False
+    text = (row["text"] or "").strip()
+    note = row["note"] if "note" in row.keys() else ""
+    return text.startswith(TEXTLESS_CARD_PREFIX) or MANUAL_WIN_MARK in (note or "") or MANUAL_WIN_MARK in text[:40]
 
 
 async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -> dict[str, int]:
@@ -93,7 +127,8 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """
-            SELECT id, text, chat_type, is_win, is_giveaway, action_status, giveaway_status, priority_score, mentions
+            SELECT id, text, chat_type, is_win, is_giveaway, action_status, giveaway_status, priority_score,
+                   mentions, note
             FROM pings
             ORDER BY id DESC
             LIMIT ?
@@ -105,6 +140,13 @@ async def reconcile_win_flags(win_keywords: Sequence[str], limit: int = 10000) -
             should_be_win = bool(_parse_mentions(row["mentions"])) and is_win_text(row["text"] or "", win_keywords)
             current = bool(row["is_win"])
             if should_be_win == current:
+                continue
+            if current and _mentions_and_verdict_not_textual(row):
+                # A win whose verdict never came from its text: a mini-app card
+                # (Telegram's search said win, the body is our placeholder) or a
+                # win the owner recorded with /win. Keyword-matching them always
+                # fails, so every start un-won them, the next sweep won them
+                # back and the 🏆 card went out again.
                 continue
             current_action = row["action_status"] or "new"
             current_giveaway_status = row["giveaway_status"] or ""
@@ -181,7 +223,16 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
         )).fetchall()
 
         for row in rows:
-            should_be_giveaway = bool(_parse_mentions(row["mentions"])) and _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
+            has_mentions = bool(_parse_mentions(row["mentions"]))
+            should_be_giveaway = has_mentions and _matches_strict_giveaway_rule(row["text"] or "", row["chat_type"] or "", keywords)
+            if row["is_win"] and has_mentions and (row["chat_type"] or "") == "channel":
+                # A channel win is always a giveaway row: save_ping keeps the
+                # pair on every sweep (only channels are swept). Clearing the
+                # flag here (and wiping the giveaway status with it, «claimed»
+                # included) was undone by the next sweep and redone on the next
+                # start — 22 rows every time. Old private/group copies are never
+                # re-read, so they keep the rule they always had.
+                should_be_giveaway = True
             is_giveaway = bool(row["is_giveaway"])
             if should_be_giveaway == is_giveaway:
                 continue
@@ -221,7 +272,10 @@ async def reconcile_giveaway_flags(keywords: Sequence[str], limit: int = 10000) 
                 """
                 UPDATE pings
                 SET is_giveaway = 0,
-                    giveaway_status = '',
+                    giveaway_status = CASE
+                        WHEN giveaway_status IN ('claimed', 'missed', 'missed_unsubscribe', 'missed_reply', 'scam', 'closed')
+                        THEN giveaway_status ELSE ''
+                    END,
                     action_status = ?
                 WHERE id = ?
                 """,

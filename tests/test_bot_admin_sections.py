@@ -162,7 +162,7 @@ class AccountTests(unittest.TestCase):
 
 class DiagnosticsTests(unittest.TestCase):
     REPORT = {
-        "schema_version": 22,
+        "schema_version": 23,
         "db": {"size_mb": 136.3, "backup_count": 10},
         "runtime": {"missing_background_tasks": ["auto-scan"]},
         "scan": {"background_tasks": ["digest", "auto-scan"]},

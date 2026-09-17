@@ -143,7 +143,7 @@ $code = $LASTEXITCODE
 Write-Log "restart_app.ps1 exit code: $code"
 
 if ($code -ne 0) {
-    # restart_app gates on "/" for only 40 s; cold start can take longer.
+    # restart_app gates on /api/health for only 40 s; cold start can take longer.
     # Wait up to 120 s more before declaring failure. Never re-invoke restart
     # here - the state-file lockout lets the next 5-min tick retry cleanly.
     $deadline = (Get-Date).AddSeconds(120)

@@ -5,6 +5,6 @@ init_bot`; this re-export keeps that import path stable.
 """
 from __future__ import annotations
 
-from .bot.service import init_bot
+from .bot.service import bot_start_needs_retry, init_bot, retry_bot_start
 
-__all__ = ["init_bot"]
+__all__ = ["bot_start_needs_retry", "init_bot", "retry_bot_start"]

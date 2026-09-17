@@ -13,7 +13,7 @@ from ... import watch_settings as ws
 from ...roulette import apply_checkin, checkin_moment, skip_today
 from ..cards import roulette_card
 from ..keyboards import roulette_panel_keyboard
-from ..pending import prompt_pending, register_prompt
+from ..pending import InputRejected, prompt_pending, register_prompt
 from ..persist import save_roulette
 from ..reply import safe_edit
 from ..router import Click, CallbackRouter
@@ -36,13 +36,13 @@ async def checkin(event, when: datetime) -> None:
 async def _consume_time(event, pending: dict, raw: str) -> None:
     moment = checkin_moment(datetime.now(), raw)
     if moment is None:
-        await event.respond("❌ Формат: `21:47`. Попробуйте ещё раз через меню.")
-        return
+        raise InputRejected("❌ Формат: `21:47`.")
     await checkin(event, moment)
 
 
 TIME_INPUT = register_prompt(
-    "roulette_time", "Пришлите время проклика последнего аккаунта: `21:47`.", _consume_time)
+    "roulette_time", "Пришлите время проклика последнего аккаунта: `21:47`.", _consume_time,
+    keep_screen=True)
 
 
 async def handle(click: Click) -> None:

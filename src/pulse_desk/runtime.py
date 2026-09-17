@@ -17,6 +17,9 @@ class AppState:
     bot_client: Optional[TelegramClient] = None
     bot_id: Optional[int] = None
     bot_username: Optional[str] = None
+    # HTTPS origin of the Mini App, owned by the ``tunnel`` job. None while the
+    # tunnel is down — the «🛰 Панель» button is simply not rendered then.
+    public_url: Optional[str] = None
     # Bot connection health, maintained by the ``bot-connection`` supervisor
     # (see bot_connection.py). While the client is down it receives no updates,
     # so an outage here means every command/button the owner sends is queued on
@@ -46,6 +49,14 @@ class AppState:
     # что в кнопку список из десятка id не влезает. Теряется при перезапуске —
     # это выбор пользователя на один заход, а не данные.
     bot_debt_marks: dict[int, set[int]] = field(default_factory=dict)
+    # When each sender last touched their marks — the janitor forgets a
+    # selection nobody has looked at for an hour.
+    bot_debt_marks_touched: dict[int, datetime] = field(default_factory=dict)
+    # 30-second undo of the last status change per sender (see bot/undo.py).
+    bot_undo: dict[int, dict] = field(default_factory=dict)
+    # Last dead-channel scan: {"at": datetime, "items": {chat_id: candidate}} —
+    # the leave button needs to know which accounts sit in the channel.
+    bot_cleanup_cache: dict[str, Any] = field(default_factory=dict)
     # Resolved custom-emoji pack: standard-emoji char -> document_id. Empty when
     # BOT_CUSTOM_EMOJI_SET is unset or the pack can't be resolved (plain fallback).
     custom_emoji_map: dict[str, int] = field(default_factory=dict)
@@ -70,6 +81,12 @@ class AppState:
     job_last_error: dict[str, str] = field(default_factory=dict)
     last_scan_finished_at: Optional[datetime] = None
     last_scan_status: Optional[str] = None
+    # Result of the last `maintenance` pass (sizes, freelist share, what was
+    # removed) — read by /api/health and the bot's diagnostics without a query.
+    maintenance_stats: dict[str, Any] = field(default_factory=dict)
+    # Downtime before this start (previous process's last heartbeat → start),
+    # set only when long enough to report. Cleared once the catch-up card is sent.
+    downtime_gap: Optional[tuple[datetime, datetime]] = None
     account_cooldown_until: dict[str, datetime] = field(default_factory=dict)
     shutting_down: bool = False
     last_giveaway_action_at: Optional[datetime] = None
@@ -83,6 +100,7 @@ class AppState:
     salary_book: Any = None
     salary_meta: dict = field(default_factory=dict)
     ping_usernames: list = field(default_factory=list)
+    ignored_chat_ids: set = field(default_factory=set)  # ignored_chats.py
     ping_regex: object = None  # compiled regex or None
     ping_user_ids: dict[int, str] = field(default_factory=dict)  # resolved user_id -> tracked username
     ping_user_ids_resolved: set[str] = field(default_factory=set)  # lowercase usernames already attempted

@@ -11,10 +11,16 @@ from telethon import Button
 
 from .app_ctx import ADMIN_ID, BASE_DIR, logger, state
 from .bot_permissions import permission_delay_minutes
-from .bot_prefs import filter_broadcast_members, notification_type_of
+from .bot_prefs import filter_broadcast_members, notification_type_of, parse_member_prefs
 from .common import flood_wait_seconds, record_app_event
 from .telegram_errors import is_unreachable_recipient
-from .watch_settings import load_notification_settings, notification_matches, should_throttle_notification
+from .watch_settings import (
+    default_notification_settings,
+    load_notification_settings,
+    notification_matches,
+    owner_card_muted,
+    should_throttle_notification,
+)
 
 try:
     from telethon.errors import FloodWaitError
@@ -138,10 +144,12 @@ def _resolve_peer(target: Any) -> Any:
     return target
 
 
-async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[Any] = None) -> Optional[Any]:
+async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[list[Button]]] = None,
+                            file: Optional[Any] = None, silent: bool = False) -> Optional[Any]:
     """Send a single bot message to an arbitrary peer with flood-wait retries.
 
     `file` is a path, or a list of them for an album (the digest's two cards).
+    `silent` delivers it without a sound (a muted ping card).
     Returns the sent Telethon message (callers may need ``.id``) or None."""
     if not state.bot_client or peer in (None, ""):
         return None
@@ -152,12 +160,13 @@ async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[l
         return None
     target = _resolve_peer(peer)
     buttons = buttons or None  # Telethon rejects an empty markup list
+    extra = {"silent": True} if silent else {}
     for attempt in range(3):
         try:
             if not await ensure_bot_connected():
                 return None
             try:
-                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, file=file)
+                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, file=file, **extra)
             except FloodWaitError:
                 raise
             except Exception:
@@ -165,7 +174,7 @@ async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[l
                     raise
                 # Media upload failed — fall back to plain text once.
                 file = None
-                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False)
+                sent = await state.bot_client.send_message(target, message, buttons=buttons, link_preview=False, **extra)
             clear_peer_unreachable(peer)
             return sent
         except FloodWaitError as exc:
@@ -190,10 +199,67 @@ async def _send_bot_message(peer: Any, message: str, *, buttons: Optional[list[l
     return None
 
 
-async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None, file: Optional[Any] = None) -> bool:
+def member_autoclean_hours(member: Optional[dict]) -> int:
+    return int(parse_member_prefs((member or {}).get("notification_prefs")).get("autoclean_hours") or 0)
+
+
+async def owner_autoclean_hours() -> int:
+    """The owner's auto-delete choice (``autoclean`` settings key); 0 when off."""
+    from database import get_setting
+
+    from .autoclean import SETTINGS_KEY, owner_hours
+
+    try:
+        return owner_hours(await get_setting(SETTINGS_KEY, None))
+    except Exception:
+        return 0
+
+
+async def schedule_autoclean(chat_id: Any, sent: Any, kind: str, hours: Any) -> None:
+    """Queue a delivered message for deletion when its kind and the choice allow it."""
+    from database import schedule_message_deletion
+
+    from .autoclean import delete_at, should_schedule
+
+    message_id = _message_id(sent) if not isinstance(sent, int) else sent
+    if message_id is None or not should_schedule(kind, hours):
+        return
+    try:
+        await schedule_message_deletion([(int(chat_id), int(message_id))], delete_at(datetime.now(), hours), kind)
+    except Exception:
+        logger.debug("Could not schedule auto-delete for %s/%s", chat_id, message_id, exc_info=True)
+
+
+async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None,
+                                 file: Optional[Any] = None, kind: str = "") -> bool:
+    """Message the owner. ``kind`` ("market", "system", "mention") marks it as
+    minor, so it is deleted later if the owner switched auto-delete on."""
     if not ADMIN_ID:
         return False
-    return await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file) is not None
+    owner, delegate = await vacation_routing(kind)
+    if delegate:
+        # Vacation delegate gets the owner's copy (see vacation.py).
+        await _send_bot_message(delegate, message, buttons=buttons, file=file)
+    if not owner:
+        return True
+    sent = await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file)
+    if sent is not None and kind:
+        await schedule_autoclean(ADMIN_ID, sent, kind, await owner_autoclean_hours())
+    return sent is not None
+
+
+async def vacation_routing(kind: str) -> tuple[bool, Optional[int]]:
+    """(owner still receives it, delegate chat id or None) under vacation mode."""
+    from database import get_setting
+
+    from .vacation import SETTINGS_KEY, delegate_receives, normalize, owner_receives
+
+    try:
+        cfg = normalize(await get_setting(SETTINGS_KEY, None))
+    except Exception:
+        return True, None
+    now = datetime.now()
+    return owner_receives(kind, cfg, now), delegate_receives(kind, cfg, now)
 
 
 async def send_member_bot_message(tg_id: int, message: str, *, buttons: Optional[list[list[Button]]] = None) -> bool:
@@ -288,8 +354,6 @@ async def broadcast_member_notification(
     from database import list_bot_members, queue_pending_send
 
     delivered: list[tuple[int, int]] = []
-    if not state.bot_client:
-        return delivered
     try:
         members = await list_bot_members()
     except Exception:
@@ -350,6 +414,12 @@ async def broadcast_member_notification(
             {"reason": reason, "queued": queued, "remaining": len(members_left)},
         )
 
+    if not state.bot_client:
+        # The bot never started (network down at boot). Returning here used to
+        # drop every copy; queued, they go out once the bot is up.
+        await requeue(immediate, "bot not started")
+        return delivered
+
     for index, member in enumerate(immediate):
         tg_id = member.get("tg_id")
         if peer_is_unreachable(tg_id):
@@ -371,6 +441,8 @@ async def broadcast_member_notification(
             message_id = _message_id(sent)
             if message_id is not None:
                 delivered.append((int(tg_id), message_id))
+                await schedule_autoclean(tg_id, message_id, notif_type,
+                                         member_autoclean_hours(member))
         except FloodWaitError as exc:
             # The wait is ours, not this member's. Sleeping here would hold the
             # ping pipeline for up to 30 minutes and still lose this recipient,
@@ -390,6 +462,9 @@ def build_ping_card(
 ) -> tuple[str, Optional[str], Optional[str]]:
     """Build the notification card. Returns (text, link_or_none, header_image_or_none)."""
     title = "🔔 Новое упоминание"
+    if record.get("chat_type") == "group":
+        # A group or a channel's comment thread — often a reply, with no @ in it.
+        title = "💬 Упоминание в чате"
     if record.get("is_win"):
         title = "🏆 Похоже на победу в розыгрыше"
     elif record.get("is_giveaway"):
@@ -432,7 +507,7 @@ def _member_card_buttons(link: Optional[str], ping_id: Optional[int], notif_type
     return buttons or None
 
 
-def _admin_card_buttons(link: Optional[str], ping_id: Optional[int]) -> list[list[Button]]:
+def _admin_card_buttons(link: Optional[str], ping_id: Optional[int], chat_type: str = "") -> list[list[Button]]:
     buttons: list[list[Button]] = []
     if link:
         buttons.append([Button.url("🔗 Открыть в Telegram", link)])
@@ -441,6 +516,9 @@ def _admin_card_buttons(link: Optional[str], ping_id: Optional[int]) -> list[lis
             Button.inline("⭐ В избранное", data=f"fav_{ping_id}"),
             Button.inline("✓ Прочитано", data=f"read_{ping_id}"),
         ])
+        if chat_type == "group":
+            # Groups are where a nickname in passing is not news (bot/sections/ignored.py).
+            buttons.append([Button.inline("🔇 Не следить за чатом", data=f"igc:add:{ping_id}")])
     return buttons
 
 
@@ -507,7 +585,85 @@ async def edit_pending_admin_card(
         logger.warning("Failed to edit moderation card %s: %s", row.get("id"), exc)
 
 
-async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None) -> None:
+LATE_CARD_MINUTES = 2
+
+
+def late_card_footer(detected_at: Any, now: Optional[datetime] = None) -> str:
+    """Footer for a card delivered well after its ping was found; '' when on time."""
+    try:
+        found = datetime.fromisoformat(str(detected_at)).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return ""
+    now = now or datetime.now()
+    if (now - found).total_seconds() < LATE_CARD_MINUTES * 60:
+        return ""
+    when = f"{found:%H:%M}" if found.date() == now.date() else f"{found:%d.%m %H:%M}"
+    return f"\n\n⏳ С опозданием: найдено в {when}"
+
+
+async def owner_card_silent(record: dict[str, Any], settings: dict[str, Any], *, throttled: bool = False) -> bool:
+    """A muted ping card still reaches the owner — without a sound.
+
+    Quiet hours, the notification filters and rules, vacation mode and the
+    repeat throttle all used to *drop* the owner's card, and a dropped card is
+    gone for good: the ping is already stored, so no later pass sends it.
+    """
+    if throttled or owner_card_muted(record, settings):
+        return True
+    owner_loud, _ = await vacation_routing(notification_type_of(record))
+    return not owner_loud
+
+
+async def send_owner_ping_card(
+    record: dict[str, Any],
+    ping_id: Optional[int] = None,
+    *,
+    silent: bool = False,
+    late_since: Any = None,
+) -> Optional[Any]:
+    """The owner's card for one ping. Returns the sent message or None.
+
+    Never filtered — see ``owner_card_silent``. ``late_since`` (the ping's
+    detection time) adds a "delivered late" footer to a retried card.
+    """
+    if not ADMIN_ID:
+        return None
+    msg, link, header_image = build_ping_card(record)
+    if late_since:
+        msg += late_card_footer(late_since)
+    sent = await _send_bot_message(ADMIN_ID, msg, buttons=_admin_card_buttons(link, ping_id, record.get("chat_type") or ""),
+                                   file=header_image, silent=silent)
+    if sent is not None:
+        # Only a plain mention is minor; wins and giveaways are never auto-deleted.
+        await schedule_autoclean(ADMIN_ID, sent, notification_type_of(record), await owner_autoclean_hours())
+    return sent
+
+
+async def _edit_owner_card(owner_message: Any, text: str, buttons: list[list[Button]]) -> None:
+    message_id = _message_id(owner_message)
+    if not state.bot_client or not ADMIN_ID or message_id is None:
+        return
+    try:
+        await state.bot_client.edit_message(int(ADMIN_ID), int(message_id), text, buttons=buttons or None, link_preview=False)
+    except Exception as exc:
+        logger.warning("Failed to update the owner's ping card %s: %s", message_id, exc)
+
+
+async def broadcast_ping(
+    record: dict[str, Any],
+    ping_id: Optional[int] = None,
+    *,
+    settings: Optional[dict[str, Any]] = None,
+    throttled: bool = False,
+    owner_message: Any = None,
+) -> None:
+    """The once-per-ping part of a notification, after the owner's card is out.
+
+    The vacation delegate's copy, the member broadcast (or its moderation hold),
+    then the owner's card is edited to carry what that produced: the giveaway
+    score, "🙈 Скрыть у друзей", the moderation buttons. The owner no longer
+    waits for every member's copy before seeing their own.
+    """
     from database import (
         count_pending_sends,
         create_pending_broadcast,
@@ -516,35 +672,32 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
         set_pending_broadcast_admin_message,
     )
 
-    if not state.bot_client:
-        return
-    try:
-        settings = await load_notification_settings()
-        if not notification_matches(record, settings):
-            return
-        if should_throttle_notification(record, int(settings.get("cooldown_seconds", 120) or 0)):
-            await record_app_event("INFO", "notifications", "Similar notification suppressed", {"chat": record.get("chat"), "mentions": record.get("mentions")})
-            return
-        candidate = await get_giveaway_candidate(int(ping_id)) if ping_id and record.get("is_giveaway") else None
-        msg, link, header_image = build_ping_card(record, candidate=candidate)
-        buttons = _admin_card_buttons(link, ping_id)
-        notif_type = notification_type_of(record)
+    settings = settings if settings is not None else await load_notification_settings()
+    notif_type = notification_type_of(record)
+    candidate = await get_giveaway_candidate(int(ping_id)) if ping_id and record.get("is_giveaway") else None
+    msg, link, header_image = build_ping_card(record, candidate=candidate)
+    owner_buttons = _admin_card_buttons(link, ping_id, record.get("chat_type") or "")
+    owner_text = msg
+    changed = candidate is not None
+
+    _, delegate = await vacation_routing(notif_type)
+    if delegate:
+        # Vacation delegate gets the owner's copy (see vacation.py).
+        await _send_bot_message(delegate, msg, buttons=owner_buttons, file=header_image)
+
+    if throttled:
+        await record_app_event("INFO", "notifications", "Similar notification suppressed",
+                               {"chat": record.get("chat"), "mentions": record.get("mentions")})
+    elif notification_matches(record, settings):
         score = int(candidate.get("score") or 0) if candidate else None
         member_buttons = _member_card_buttons(link, ping_id, notif_type)
-
         if str(settings.get("moderation_mode", "auto")) == "moderated" and ADMIN_ID:
             # Hold the member broadcast until the owner approves (or the timeout
             # fires). Premium members are the exception — they get it right away.
             bc_token = secrets_module.token_hex(4)
             premium_delivered = await broadcast_member_notification(
-                msg,
-                member_buttons,
-                file=header_image,
-                notif_type=notif_type,
-                score=score,
-                premium_only=True,
-                mentions=record.get("mentions"),
-                token=bc_token,
+                msg, member_buttons, file=header_image, notif_type=notif_type, score=score,
+                premium_only=True, mentions=record.get("mentions"), token=bc_token,
             )
             if premium_delivered:
                 await save_broadcast_messages(bc_token, premium_delivered)
@@ -553,45 +706,66 @@ async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] =
             timeout = int(settings.get("approval_timeout_seconds", 300) or 300)
             expires_at = (datetime.now() + timedelta(seconds=timeout)).replace(microsecond=0).isoformat()
             pb_id = await create_pending_broadcast(
-                ping_id,
-                notif_type,
-                msg,
-                link=link or "",
-                file_path=header_image or "",
-                expires_at=expires_at,
-                bc_token=bc_token,
+                ping_id, notif_type, msg, link=link or "", file_path=header_image or "",
+                expires_at=expires_at, bc_token=bc_token,
             )
-            buttons.append([
+            owner_buttons.append([
                 Button.inline("📣 Разослать", data=f"bc:ok:{pb_id}"),
                 Button.inline("🚫 Отклонить", data=f"bc:no:{pb_id}"),
             ])
             footer = f"🛡 Рассылка друзьям на модерации · авто-отправка в {expires_at[11:16]}"
             if premium_delivered:
                 footer += f"\n⚡ Премиум уже получили: {len(premium_delivered)}"
-            sent = await _send_bot_message(ADMIN_ID, msg + "\n\n" + footer, buttons=buttons, file=header_image)
-            if sent is not None:
-                await set_pending_broadcast_admin_message(pb_id, int(sent.id))
+            owner_text = msg + "\n\n" + footer
+            changed = True
+            owner_message_id = _message_id(owner_message) if owner_message is not None else None
+            if owner_message_id is not None:
+                await set_pending_broadcast_admin_message(pb_id, owner_message_id)
             else:
-                logger.error("Failed to send moderation card for pending broadcast %s", pb_id)
-            return
+                # The retried card will be a plain one; the hold still auto-sends.
+                logger.error("Owner card missing for pending broadcast %s", pb_id)
+        else:
+            token = secrets_module.token_hex(4)
+            delivered = await broadcast_member_notification(
+                msg, member_buttons, file=header_image, notif_type=notif_type, score=score,
+                mentions=record.get("mentions"), token=token,
+            )
+            if delivered:
+                await save_broadcast_messages(token, delivered)
+            scheduled = await count_pending_sends(token)
+            if delivered or scheduled:
+                label = f"🙈 Скрыть у друзей ({len(delivered) + scheduled})"
+                if scheduled and not delivered:
+                    label = f"🙈 Отменить отправку ({scheduled})"
+                owner_buttons.append([Button.inline(label, data=f"hidebc_{token}")])
+                changed = True
 
-        # Mirror notification to viewer members first, so the admin message can
-        # carry a working "hide from friends" button.
-        token = secrets_module.token_hex(4)
-        delivered = await broadcast_member_notification(
-            msg, member_buttons, file=header_image, notif_type=notif_type, score=score,
-            mentions=record.get("mentions"), token=token,
-        )
-        if delivered:
-            await save_broadcast_messages(token, delivered)
-        scheduled = await count_pending_sends(token)
-        if delivered or scheduled:
-            label = f"🙈 Скрыть у друзей ({len(delivered) + scheduled})"
-            if scheduled and not delivered:
-                label = f"🙈 Отменить отправку ({scheduled})"
-            buttons.append([Button.inline(label, data=f"hidebc_{token}")])
-        sent = await send_admin_bot_message(msg, buttons=buttons, file=header_image)
-        if not sent:
-            logger.error("Failed to send bot notification after retries")
+    if owner_message is not None and changed:
+        await _edit_owner_card(owner_message, owner_text, owner_buttons)
+
+
+async def send_bot_notification(record: dict[str, Any], ping_id: Optional[int] = None) -> bool:
+    """Owner's card first, then the member broadcast. True when the owner got it.
+
+    The pipeline goes through ``ping_notify``, which adds the outbox bookkeeping
+    around these two steps; this stays as the plain one-call form.
+    """
+    try:
+        settings = await load_notification_settings()
     except Exception:
-        logger.exception("Failed to send bot notification")
+        logger.exception("Could not load notification settings; using defaults")
+        settings = default_notification_settings()
+    throttled = should_throttle_notification(record, int(settings.get("cooldown_seconds", 120) or 0))
+    sent = None
+    try:
+        silent = await owner_card_silent(record, settings, throttled=throttled)
+        sent = await send_owner_ping_card(record, ping_id, silent=silent)
+        if sent is None:
+            logger.error("Failed to send the owner's ping card after retries")
+    except Exception:
+        logger.exception("Failed to send the owner's ping card")
+    try:
+        await broadcast_ping(record, ping_id, settings=settings, throttled=throttled, owner_message=sent)
+    except Exception:
+        logger.exception("Failed to broadcast ping notification")
+    return sent is not None

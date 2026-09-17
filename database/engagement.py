@@ -76,3 +76,44 @@ async def engagement_summary() -> dict[str, Any]:
         "joined": sum(int(m["joined"] or 0) for m in members),
         "skipped": sum(int(m["skipped"] or 0) for m in members),
     }
+
+
+async def member_engagement_since(tg_id: int, since_iso: Optional[str] = None) -> dict[str, int]:
+    """«Участвую» / «пропустил» of one member, optionally from a moment on."""
+    sql = "SELECT action, COUNT(*) FROM member_engagement WHERE tg_id = ?"
+    params: list[Any] = [int(tg_id)]
+    if since_iso:
+        sql += " AND updated_at >= ?"
+        params.append(since_iso)
+    async with _connect() as db:
+        rows = await (await db.execute(sql + " GROUP BY action", params)).fetchall()
+    stats = {"joined": 0, "skipped": 0}
+    for action, count in rows:
+        if action in stats:
+            stats[action] = int(count)
+    return stats
+
+
+async def account_win_stats(usernames: list[str], since_iso: Optional[str] = None) -> dict[str, int]:
+    """Wins about these tracked accounts: how many, how many already claimed.
+
+    Claimed means the owner marked it so (``giveaway_status`` or
+    ``action_status`` = claimed) — the same bit the debts board and the
+    Obsidian note use.
+    """
+    names = sorted({u.strip().lstrip("@").lower() for u in usernames if u and u.strip()})
+    if not names:
+        return {"wins": 0, "claimed": 0}
+    sql = (
+        "SELECT COUNT(*), SUM(CASE WHEN COALESCE(p.giveaway_status, '') = 'claimed' "
+        "OR COALESCE(p.action_status, '') = 'claimed' THEN 1 ELSE 0 END) "
+        "FROM pings p WHERE p.is_win = 1 AND p.duplicate_of IS NULL AND p.id IN ("
+        f"SELECT ping_id FROM ping_mentions WHERE lower(username) IN ({','.join('?' * len(names))}))"
+    )
+    params: list[Any] = list(names)
+    if since_iso:
+        sql += " AND p.detected_at >= ?"
+        params.append(since_iso)
+    async with _connect() as db:
+        row = await (await db.execute(sql, params)).fetchone()
+    return {"wins": int(row[0] or 0), "claimed": int(row[1] or 0)}

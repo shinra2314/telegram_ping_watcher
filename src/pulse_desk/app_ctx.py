@@ -61,6 +61,7 @@ DB_ARCHIVE_ENABLED = settings.db_archive_enabled
 SCAN_RUNS_RETENTION = max(0, settings.scan_runs_retention)
 AUDIT_RETENTION_DAYS = max(0, settings.audit_retention_days)
 ARCHIVE_RETENTION_DAYS = max(0, settings.archive_retention_days)
+DISK_FREE_ALERT_MB = max(0, settings.disk_free_alert_mb)
 FLOOD_WAIT_MAX_SECONDS = max(60, settings.flood_wait_max_seconds)
 PENDING_AUTH_TTL_SECONDS = settings.pending_auth_ttl_seconds
 ADMIN_ID = settings.admin_id

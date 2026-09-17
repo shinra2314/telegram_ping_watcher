@@ -74,9 +74,10 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                 INSERT INTO pings (
                     date, chat, chat_id, sender, sender_id, message_id, mentions,
                     link, text, chat_type, detected_at, is_win, is_giveaway,
-                    giveaway_status, priority_score, priority_label, note, action_status
+                    giveaway_status, priority_score, priority_label, note, action_status,
+                    edited_at, win_detected_at, notified_at, win_notified_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.get("date"),
@@ -97,6 +98,12 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                     record.get("priority_label") or "normal",
                     record.get("note") or "",
                     record.get("action_status") or "new",
+                    record.get("edited_at") or None,
+                    detected_at if record.get("is_win") else None,
+                    # Set only by a pass that deliberately sends no card (backlog);
+                    # NULL leaves the card owed until ping_notify delivers it.
+                    record.get("notified_at") or None,
+                    (record.get("notified_at") or None) if record.get("is_win") else None,
                 ),
             )
             ping_id = int(cursor.lastrowid)
@@ -123,18 +130,41 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         link = COALESCE(NULLIF(?, ''), link),
                         text = COALESCE(?, text),
                         chat_type = COALESCE(NULLIF(?, ''), chat_type),
-                        is_win = ?,
-                        is_giveaway = ?,
+                        -- A win is sticky here. Re-reads disagree about the same
+                        -- post (a mini-app card's win verdict comes from each
+                        -- account's own search index, a sweep sees only the
+                        -- placeholder), and letting a later pass clear the flag
+                        -- made every next pass an "upgrade to win" and re-sent
+                        -- the 🏆 card forever. Un-winning is an explicit action
+                        -- (database/giveaways.py), never a side effect of a scan.
+                        is_win = MAX(COALESCE(is_win, 0), ?),
+                        is_giveaway = CASE WHEN COALESCE(is_win, 0) = 1 THEN 1 ELSE ? END,
                         giveaway_status = CASE
                             WHEN ? = 1 AND (giveaway_status IS NULL OR giveaway_status = '') THEN 'pending'
-                            WHEN ? = 0 THEN ''
+                            WHEN ? = 0 AND COALESCE(is_win, 0) = 0 THEN ''
                             ELSE giveaway_status
                         END,
-                        priority_score = ?, priority_label = COALESCE(NULLIF(?, ''), priority_label),
+                        -- So is a win's priority, for the same reason: a pass that
+                        -- does not see the win scored it 15 and sank a sticky win
+                        -- to the bottom of every list, and a pass without the
+                        -- result-post floor fought the startup reconcile 85↔90.
+                        priority_score = CASE
+                            WHEN COALESCE(is_win, 0) = 1 AND COALESCE(priority_score, 0) > ? THEN priority_score
+                            ELSE ?
+                        END,
+                        priority_label = CASE
+                            WHEN COALESCE(is_win, 0) = 1 AND COALESCE(priority_score, 0) > ? THEN priority_label
+                            ELSE COALESCE(NULLIF(?, ''), priority_label)
+                        END,
                         action_status = CASE
                             WHEN action_status IS NULL OR action_status = '' OR action_status = 'new'
                             THEN COALESCE(NULLIF(?, ''), action_status)
                             ELSE action_status
+                        END,
+                        edited_at = COALESCE(?, edited_at),
+                        win_detected_at = CASE
+                            WHEN ? = 1 AND win_detected_at IS NULL AND COALESCE(is_win, 0) = 0 THEN ?
+                            ELSE win_detected_at
                         END
                     WHERE id = ?
                     """,
@@ -152,8 +182,13 @@ async def save_ping(record: dict[str, Any]) -> Optional[int]:
                         1 if (record.get("is_giveaway") or record.get("is_win")) else 0,
                         1 if record.get("is_giveaway") else 0,
                         int(record.get("priority_score") or 0),
+                        int(record.get("priority_score") or 0),
+                        int(record.get("priority_score") or 0),
                         record.get("priority_label") or "",
                         record.get("action_status") or "",
+                        record.get("edited_at") or None,
+                        1 if record.get("is_win") else 0,
+                        detected_at,
                         ping_id,
                     ),
                 )

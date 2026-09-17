@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Iterable, Optional
 
 import aiosqlite
 
@@ -88,6 +89,28 @@ def db_size_bytes() -> int:
     return total
 
 
+async def db_page_stats() -> dict[str, int]:
+    """``page_count`` / ``freelist_count`` / ``page_size`` of the main DB.
+
+    Free pages are space a DELETE gave back to SQLite but not to the disk; only
+    VACUUM returns it. They are what ``housekeeping.vacuum_due`` decides on.
+    """
+    async with _connect() as db:
+        page_count = int((await (await db.execute("PRAGMA page_count")).fetchone())[0])
+        freelist = int((await (await db.execute("PRAGMA freelist_count")).fetchone())[0])
+        page_size = int((await (await db.execute("PRAGMA page_size")).fetchone())[0])
+    return {"page_count": page_count, "freelist_count": freelist, "page_size": page_size}
+
+
+async def vacuum_main_db() -> dict[str, int]:
+    """VACUUM the main DB and checkpoint the WAL; returns sizes before/after."""
+    before = db_size_bytes()
+    async with _connect() as db:
+        await db.execute("VACUUM")
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return {"size_before": before, "size_after": db_size_bytes()}
+
+
 def archive_db_path() -> Path:
     """Sibling archive DB that receives pings evicted by the size cap."""
     path = db_path()
@@ -121,6 +144,8 @@ async def cleanup_unbounded_tables(
     audit_days: int = 90,
     history_per_key: int = SETTINGS_HISTORY_PER_KEY,
     checkpoint_days: int = CHECKPOINT_STALE_DAYS,
+    live_sessions: Optional[Iterable[str]] = None,
+    tracked_usernames: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Trim the tables that otherwise grow forever.
 
@@ -129,7 +154,11 @@ async def cleanup_unbounded_tables(
     are capped by age, and ``settings_history`` additionally by count per key.
     ``scan_checkpoints`` drops rows for channels not seen in ``checkpoint_days``;
     a dropped checkpoint only means that channel is re-read from its window on
-    the next sweep, never a missed message. Returns per-table deletion counts.
+    the next sweep, never a missed message. ``live_sessions`` /
+    ``tracked_usernames``, when given and non-empty, also drop checkpoints of
+    accounts that no longer exist and of usernames no longer tracked — rows the
+    scanner can never read again, which otherwise wait out the 90 days.
+    Returns per-table deletion counts.
     """
     stats = {
         "scan_runs": 0,
@@ -177,8 +206,50 @@ async def cleanup_unbounded_tables(
                 "DELETE FROM scan_checkpoints WHERE COALESCE(updated_at, '') < ?", (stale,)
             )
             stats["scan_checkpoints"] = cur.rowcount or 0
+        stats["scan_checkpoints"] += await _drop_orphan_checkpoints(db, live_sessions, tracked_usernames)
         await db.commit()
     return stats
+
+
+async def _drop_orphan_checkpoints(
+    db: aiosqlite.Connection,
+    live_sessions: Optional[Iterable[str]],
+    tracked_usernames: Optional[Iterable[str]],
+) -> int:
+    """Checkpoints keyed by a session or username the scanner no longer uses.
+
+    Keys look like ``<username>|channel:<id>`` (older rows: bare username).
+    Both filters are skipped when their set is empty — an empty list means
+    "not loaded yet", and wiping every checkpoint on that would force a full
+    re-read of every channel.
+    """
+    deleted = 0
+    sessions = {s for s in (live_sessions or []) if s}
+    if sessions:
+        known = [str(row[0]) for row in await (await db.execute(
+            "SELECT DISTINCT session_name FROM scan_checkpoints"
+        )).fetchall()]
+        gone = [name for name in known if name not in sessions]
+        for start in range(0, len(gone), 500):
+            batch = gone[start:start + 500]
+            cur = await db.execute(
+                f"DELETE FROM scan_checkpoints WHERE session_name IN ({','.join('?' * len(batch))})", batch
+            )
+            deleted += cur.rowcount or 0
+    usernames = {u.strip().lstrip("@").lower() for u in (tracked_usernames or []) if u and u.strip()}
+    if usernames:
+        prefix = "lower(substr(username, 1, instr(username || '|', '|') - 1))"
+        known = [str(row[0]) for row in await (await db.execute(
+            f"SELECT DISTINCT {prefix} FROM scan_checkpoints"
+        )).fetchall()]
+        gone = [name for name in known if name and name not in usernames]
+        for start in range(0, len(gone), 500):
+            batch = gone[start:start + 500]
+            cur = await db.execute(
+                f"DELETE FROM scan_checkpoints WHERE {prefix} IN ({','.join('?' * len(batch))})", batch
+            )
+            deleted += cur.rowcount or 0
+    return deleted
 
 
 async def cleanup_archive_db(retention_days: int = 30, *, vacuum: bool = False) -> dict[str, int]:

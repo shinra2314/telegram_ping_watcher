@@ -4,7 +4,9 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 from telethon import Button
+from telethon.tl.types import KeyboardButtonWebView
 
+from ..app_ctx import state
 from ..bot_permissions import (
     ALL_FEATURES,
     ALL_NOTIFY,
@@ -49,6 +51,27 @@ def section_nav(refresh_cb: bytes) -> list[list[Button]]:
 def back_home() -> list[list[Button]]:
     """Footer for views with no refresh target (e.g. search results)."""
     return [[Button.inline("⬅️ Домой", b"menu_main")]]
+
+
+def webapp_row(label: str, path: str = "/app") -> list[Button]:
+    """A one-button row opening the Mini App, or an empty row when it is down.
+
+    The URL is read at send time rather than cached: the tunnel may come up
+    after the menu was first drawn, or change hostname on a provider without a
+    stable one. With no tunnel the row is empty and the keyboard is one row
+    shorter — the inline UI below it stays fully usable.
+
+    A screen inside the panel is addressed by query (``/app?s=accounts``), never
+    by ``#``: Telegram appends ``#tgWebAppData=…`` to the URL it opens, and a
+    fragment of our own would swallow it.
+
+    Telethon 1.43 counts ``KeyboardButtonWebView`` among its inline button
+    types, so the raw TL object goes straight into ``buttons=``.
+    """
+    base = (state.public_url or "").rstrip("/")
+    if not base:
+        return []
+    return [KeyboardButtonWebView(text=label, url=f"{base}{path}")]
 
 
 # Converter shortcuts shown under the landing card, as (src, dst) pairs.
@@ -443,9 +466,16 @@ def cleanup_keyboard(candidates: Sequence[dict], page: int = 0,
     """
     start = page * page_size
     window = list(candidates)[start:start + page_size]
+    def label(item: dict) -> str:
+        wins = int(item.get("wins") or 0)
+        mark = f"🏆{wins} " if wins else "🚪 "
+        title = str(item.get("title") or item.get("chat_id"))
+        seats = len(item.get("accounts") or [])
+        suffix = f" ×{seats}" if seats > 1 else ""
+        return f"{mark}{title[:30]}{suffix} · {item.get('inactive_days', '?')}д"[:60]
+
     rows: list[list[Button]] = [
-        [Button.inline(f"🚪 {str(item.get('title') or item.get('chat_id'))[:36]}",
-                       f"gw:lv:{item.get('chat_id')}".encode())]
+        [Button.inline(label(item), f"gw:lv:{item.get('chat_id')}".encode())]
         for item in window
     ]
     if not rows:
@@ -492,6 +522,7 @@ def management_grid() -> list[list[Button]]:
         [Button.inline("💾 Бэкапы", b"bk"), Button.inline("🩺 Здоровье", b"dg")],
         [Button.inline("🔄 Скан", b"menu_scan"), Button.inline("📜 Логи", b"menu_logs")],
         [Button.inline("🎰 Рулетка", b"rl"), Button.inline("♻️ Рестарт", b"menu_restart")],
+        [Button.inline("🖼 Отчёт", b"rp:w"), Button.inline("🏖 Отпуск", b"vc")],
         [Button.inline("⬅️ Домой", b"menu_main")],
     ]
 
@@ -608,6 +639,8 @@ def key_panel_keyboard(key: dict, perms: dict, account_total: int) -> list[list[
             Button.inline("🔗 Ссылка", f"key:link:{key_id}".encode()),
             Button.inline(f"👥 Вошли ({int(key.get('member_count') or 0)})", f"key:m:{key_id}".encode()),
         ],
+        [Button.inline("🎟 Одноразовый: да" if int(key.get("max_uses") or 0) == 1
+                       else "🎟 Одноразовый: нет", f"key:once:{key_id}".encode())],
         [toggle, Button.inline("🗑 Удалить", f"key:del:{key_id}".encode())],
         [Button.inline("⬅️ Ключи", b"menu_keys"), Button.inline("🔄 Обновить", f"key:{key_id}".encode())],
     ]
@@ -745,7 +778,10 @@ def restart_confirm_keyboard() -> list[list[Button]]:
 
 
 def logs_keyboard() -> list[list[Button]]:
-    return [[Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Обновить", b"menu_logs")]]
+    return [
+        [Button.inline("⚠️ Только проблемы", b"lg:err"), Button.inline("📎 Файлом", b"lg:file")],
+        [Button.inline("⬅️ Управление", b"adm:home"), Button.inline("🔄 Последние", b"menu_logs")],
+    ]
 
 
 # --- зарплаты ------------------------------------------------------------

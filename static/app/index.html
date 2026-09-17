@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="format-detection" content="telephone=no">
+  <title>Pulse Desk</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/app-static/app.css">
+</head>
+<body>
+  <header class="head">
+    <div class="brand">
+      <span class="mark" id="mark"></span>
+      <h1>Pulse Desk</h1>
+      <span class="sub" id="sub"></span>
+    </div>
+    <button class="icon-btn" id="refresh" aria-label="Обновить"></button>
+  </header>
+  <main id="screen"></main>
+  <nav class="bar" id="bar"></nav>
+  <!-- Load order matters: icons, then the core, then screens, then boot. -->
+  <script src="/app-static/icons.js"></script>
+  <script src="/app-static/app.js"></script>
+  <script src="/app-static/screens/home.js"></script>
+  <script src="/app-static/screens/converter.js"></script>
+  <script src="/app-static/screens/giveaways.js"></script>
+  <script src="/app-static/screens/accounts.js"></script>
+  <script src="/app-static/screens/debts.js"></script>
+  <script src="/app-static/screens/salary.js"></script>
+  <script src="/app-static/screens/more.js"></script>
+  <script src="/app-static/boot.js"></script>
+</body>
+</html>

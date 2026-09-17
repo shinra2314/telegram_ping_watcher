@@ -1216,6 +1216,73 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["is_win"], 0)
         self.assertEqual(row["action_status"], "waiting_result")
 
+    async def _win_row(self, message_id: int, **over):
+        record = {
+            "date": "2026-09-10T12:00:00", "chat": "Results", "chat_id": 900, "sender": "Channel",
+            "sender_id": 900, "message_id": message_id, "mentions": ["@Alpha"],
+            "link": f"https://t.me/test/{message_id}", "text": "Итоги розыгрыша. Победители: @Alpha",
+            "chat_type": "channel", "detected_at": "2026-09-10T12:01:00", "is_giveaway": True,
+            "is_win": True, "action_status": "claim_prize", "priority_score": 95,
+        }
+        record.update(over)
+        return await database.save_ping(record)
+
+    async def test_startup_reconciles_are_idempotent(self):
+        await self._win_row(910)
+        await database.reconcile_win_flags(["итоги"])
+        await database.reconcile_giveaway_flags(["розыгрыш"])
+        await database.reconcile_giveaway_outcomes()
+        # A second start must find nothing to do: the outcome pass used to
+        # rewrite and "mark" every result post on every start.
+        self.assertEqual(await database.reconcile_win_flags(["итоги"]), {"enabled": 0, "disabled": 0})
+        self.assertEqual(await database.reconcile_giveaway_flags(["розыгрыш"]), {"enabled": 0, "disabled": 0})
+        self.assertEqual((await database.reconcile_giveaway_outcomes())["marked"], 0)
+
+    async def test_channel_win_keeps_giveaway_flag_and_claimed_status(self):
+        ping_id = await self._win_row(911, text="Поздравляем! Победитель: @Alpha")
+        await database.update_ping_meta(ping_id, giveaway_status="claimed", action_status="claimed")
+        # No giveaway keyword in the text: the old pass cleared is_giveaway and
+        # wiped giveaway_status='claimed' on every start.
+        result = await database.reconcile_giveaway_flags(["розыгрыш"])
+        self.assertEqual(result["disabled"], 0)
+        row = await database.get_ping_by_id(ping_id)
+        self.assertEqual((row["is_giveaway"], row["giveaway_status"]), (1, "claimed"))
+
+    async def test_outcome_pass_keeps_owner_decisions(self):
+        ping_id = await self._win_row(912, priority_score=100)
+        await database.update_ping_meta(ping_id, giveaway_status="", action_status="scam")
+        await database.reconcile_giveaway_outcomes()
+        row = await database.get_ping_by_id(ping_id)
+        self.assertEqual((row["giveaway_status"], row["action_status"]), ("", "scam"))
+
+    async def test_rescan_and_startup_agree_on_a_result_post_priority(self):
+        from pulse_desk import ping_pipeline
+
+        saved = ping_pipeline.state.high_priority_keywords
+        ping_pipeline.state.high_priority_keywords = []
+        self.addCleanup(setattr, ping_pipeline.state, "high_priority_keywords", saved)
+        # What a sweep stores: a channel win whose text misses the giveaway rule.
+        record = {"text": "Итоги розыгрыша. Победители: @Alpha", "chat": "Results", "chat_type": "channel",
+                  "mentions": ["@Alpha"], "is_win": True, "is_giveaway": False}
+        self.assertEqual(ping_pipeline.apply_priority(dict(record))["priority_score"], 90)
+        ping_id = await self._win_row(916, priority_score=ping_pipeline.apply_priority(dict(record))["priority_score"])
+        await database.reconcile_giveaway_outcomes()
+        # The next sweep re-saves it; the next start must have nothing to fix.
+        await self._win_row(916, priority_score=ping_pipeline.apply_priority(dict(record))["priority_score"])
+        self.assertEqual((await database.reconcile_giveaway_outcomes())["marked"], 0)
+        self.assertEqual((await database.get_ping_by_id(ping_id))["priority_score"], 90)
+
+    async def test_wins_not_judged_by_text_are_not_unwon(self):
+        card = await self._win_row(
+            913, text="🃏 Карточка mini-app: её содержимое видно только в самом Telegram.\nПоиск Telegram нашёл в ней @Alpha")
+        manual = await self._win_row(914, text="✍️ Добавлено вручную: https://t.me/test/914", note="✍️ Добавлено вручную")
+        plain = await self._win_row(915, text="Спасибо за участие, @Alpha")
+        result = await database.reconcile_win_flags(["победител", "итоги"])
+        self.assertEqual(result["disabled"], 1)
+        self.assertEqual((await database.get_ping_by_id(card))["is_win"], 1)
+        self.assertEqual((await database.get_ping_by_id(manual))["is_win"], 1)
+        self.assertEqual((await database.get_ping_by_id(plain))["is_win"], 0)
+
     async def test_giveaway_candidate_and_action_roundtrip(self):
         ping_id = await database.save_ping({
             "date": "2026-05-07T10:00:00",

@@ -114,13 +114,27 @@ async def list_bot_key_members(key_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
+async def get_bot_key_by_secret(secret: str, for_tg_id: Optional[int] = None) -> Optional[dict]:
+    """The key behind an invite, or None when it no longer opens access.
+
+    Revoked, expired and — for a key with ``max_uses`` — used up all close it.
+    Someone who already joined through the key is not counted against its limit,
+    so they can still /start with the same link.
+    """
     if not secret:
         return None
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         row = await (
-            await db.execute("SELECT * FROM bot_access_keys WHERE secret = ?", (secret,))
+            await db.execute(
+                """
+                SELECT k.*,
+                       (SELECT COUNT(*) FROM bot_members m
+                        WHERE m.key_id = k.id AND m.tg_id != COALESCE(?, 0)) AS other_members
+                FROM bot_access_keys k WHERE k.secret = ?
+                """,
+                (for_tg_id, secret),
+            )
         ).fetchone()
     if not row:
         return None
@@ -130,7 +144,20 @@ async def get_bot_key_by_secret(secret: str) -> Optional[dict]:
     expires_at = key.get("expires_at")
     if expires_at and expires_at <= _now_iso():
         return None
+    max_uses = int(key.get("max_uses") or 0)
+    if max_uses and int(key.get("other_members") or 0) >= max_uses:
+        return None
     return key
+
+
+async def set_bot_key_max_uses(key_id: int, max_uses: int) -> None:
+    """0 = unlimited; 1 = a one-time invite that closes after its first person."""
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_access_keys SET max_uses = ? WHERE id = ?",
+            (max(0, int(max_uses)), int(key_id)),
+        )
+        await db.commit()
 
 
 async def set_bot_key_revoked(key_id: int, revoked: bool) -> None:
@@ -247,6 +274,13 @@ async def list_bot_members() -> list[dict]:
 async def touch_bot_member(tg_id: int) -> None:
     async with _connect() as db:
         await db.execute("UPDATE bot_members SET last_seen_at = ? WHERE tg_id = ?", (_now_iso(), tg_id))
+        await db.commit()
+
+
+async def set_bot_member_role(tg_id: int, role: str) -> None:
+    """Change a member's role (vacation delegation raises one to 'admin' for a while)."""
+    async with _connect() as db:
+        await db.execute("UPDATE bot_members SET role = ? WHERE tg_id = ?", (role or "viewer", int(tg_id)))
         await db.commit()
 
 

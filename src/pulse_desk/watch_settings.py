@@ -140,6 +140,18 @@ def notification_matches(record: dict[str, Any], settings: dict[str, Any]) -> bo
     return True
 
 
+def owner_card_muted(record: dict[str, Any], settings: dict[str, Any]) -> bool:
+    """Whether the owner's card for this ping should arrive without a sound.
+
+    The owner's card is never dropped: a mention is the reason the app exists,
+    and quiet hours or a filter used to delete it for good (nothing ever sends
+    a card for a ping that is already stored). Everything that used to drop it
+    — the global switch, quiet hours, filters and rules — now only mutes it.
+    ``notification_matches`` keeps deciding the member broadcast.
+    """
+    return is_quiet_time(settings) or not notification_matches(record, settings)
+
+
 def should_throttle_notification(record: dict[str, Any], cooldown_seconds: int) -> bool:
     if cooldown_seconds <= 0:
         return False

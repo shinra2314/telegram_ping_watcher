@@ -108,6 +108,57 @@ class UnboundedTablesTests(unittest.TestCase):
         self.assertEqual(sh, 1)       # only the fresh row remains
 
 
+class OrphanCheckpointTests(unittest.TestCase):
+    """Checkpoints of removed accounts / untracked usernames can never be read again."""
+
+    def setUp(self):
+        database.DB_PATH = TEST_DB_PATH
+        asyncio.run(database.init_db())
+        asyncio.run(self._seed())
+
+    def tearDown(self):
+        asyncio.run(self._wipe())
+
+    async def _wipe(self):
+        async with database._connect() as db:
+            await db.execute("DELETE FROM scan_checkpoints")
+            await db.commit()
+
+    async def _seed(self):
+        await self._wipe()
+        rows = [
+            ("live", "Alice|channel:1"), ("live", "alice|channel:2"), ("live", "bob|channel:1"),
+            ("live", "carol"), ("gone", "alice|channel:1"),
+        ]
+        async with database._connect() as db:
+            await db.executemany(
+                "INSERT INTO scan_checkpoints (session_name, username, last_message_id, updated_at) "
+                "VALUES (?, ?, 1, ?)", [(s, u, _iso(0)) for s, u in rows],
+            )
+            await db.commit()
+
+    async def _keys(self):
+        async with database._connect() as db:
+            rows = await (await db.execute(
+                "SELECT session_name, username FROM scan_checkpoints ORDER BY 1, 2"
+            )).fetchall()
+        return [tuple(r) for r in rows]
+
+    def test_drops_gone_sessions_and_untracked_usernames(self):
+        stats = asyncio.run(database.cleanup_unbounded_tables(
+            checkpoint_days=0, live_sessions=["live"], tracked_usernames=["@ALICE"],
+        ))
+        self.assertEqual(stats["scan_checkpoints"], 3)
+        self.assertEqual(asyncio.run(self._keys()), [("live", "Alice|channel:1"), ("live", "alice|channel:2")])
+
+    def test_empty_sets_mean_not_loaded_and_delete_nothing(self):
+        stats = asyncio.run(database.cleanup_unbounded_tables(
+            checkpoint_days=0, live_sessions=[], tracked_usernames=[],
+        ))
+        self.assertEqual(stats["scan_checkpoints"], 0)
+        self.assertEqual(len(asyncio.run(self._keys())), 5)
+
+
 class SizeCapTests(unittest.TestCase):
     def setUp(self):
         database.DB_PATH = TEST_DB_PATH

@@ -21,8 +21,10 @@ Only public channels have such a page — a private one cannot be recovered.
 from __future__ import annotations
 
 import html as html_module
+import logging
 import re
-from typing import Any, Optional
+import time
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -77,6 +79,58 @@ async def fetch_public_message_text(username: str, message_id: Any) -> str:
     if response.status_code != 200:
         return ""
     return parse_og_description(response.text)
+
+
+# Every sweep re-reads the recent window on every account that sits in the
+# channel, so one undecodable post was fetched from t.me — and logged — several
+# times a minute. The page only changes when the post is edited, so the text is
+# kept per post and re-read on a new edit date or once the entry expires. A
+# failed fetch is remembered briefly too: a t.me hiccup must not cost a 10 s
+# timeout on every account in every sweep.
+RECOVERY_CACHE_SECONDS = 30 * 60
+RECOVERY_FAILURE_SECONDS = 5 * 60
+RECOVERY_CACHE_MAX = 512
+# (username, message id) -> (expires at, edit marker, text)
+_recovered: dict[tuple[str, str], tuple[float, str, str]] = {}
+
+
+async def recover_public_text(
+    username: str,
+    message_id: Any,
+    edit_date: Any = None,
+    *,
+    fetch: Optional[Callable[[str, Any], Awaitable[str]]] = None,
+    now: Optional[float] = None,
+) -> tuple[str, bool]:
+    """(text, changed) for a public post, served from cache while it is fresh.
+
+    ``changed`` is True only when the text differs from what this process saw
+    for the post before, so the caller logs a recovery once instead of on every
+    sweep. Never raises.
+    """
+    clock = time.monotonic() if now is None else now
+    key = (str(username).lstrip("@").lower(), str(message_id))
+    marker = str(edit_date or "")
+    cached = _recovered.get(key)
+    if cached and cached[0] > clock and cached[1] == marker:
+        return cached[2], False
+    try:
+        text = await (fetch or fetch_public_message_text)(username, message_id)
+        ttl = RECOVERY_CACHE_SECONDS
+    except Exception:
+        logging.getLogger("pulse_desk").debug(
+            "Could not read the public page of %s/%s", username, message_id, exc_info=True)
+        text, ttl = "", RECOVERY_FAILURE_SECONDS
+    previous = cached[2] if cached else ""
+    if not text and previous:
+        text = previous  # a failed re-read does not forget a good copy
+    _recovered[key] = (clock + ttl, marker, text)
+    if len(_recovered) > RECOVERY_CACHE_MAX:
+        for stale in [k for k, v in _recovered.items() if v[0] <= clock]:
+            del _recovered[stale]
+        while len(_recovered) > RECOVERY_CACHE_MAX:
+            _recovered.pop(next(iter(_recovered)))
+    return text, bool(text) and text != previous
 
 
 def chat_username(chat: Any) -> Optional[str]:

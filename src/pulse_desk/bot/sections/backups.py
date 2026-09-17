@@ -1,19 +1,26 @@
-"""Резервные копии базы: список, создание, отправка файлом.
+"""Резервные копии базы и уборка: список, создание, отправка файлом, «уборка сейчас».
 
-Отправка ограничена: база сейчас под сотню мегабайт, а бот не почтовый сервер.
-Всё, что тяжелее ``MAX_UPLOAD_MB``, не уезжает в чат — бот называет путь и
-размер, файл забирается с машины руками. Это осознанно: молчаливая неудачная
-загрузка на десятой минуте хуже честного отказа на первой.
+Копия — согласованный снимок базы, сжатый в zip (см. ``database/backups.py``),
+поэтому обычно укладывается в ``MAX_UPLOAD_MB`` и уезжает в чат файлом. Всё,
+что тяжелее (старые несжатые ``.db``), не отправляется — бот называет путь и
+размер, файл забирается с машины руками: молчаливая неудачная загрузка на
+десятой минуте хуже честного отказа на первой.
+
+Уборка — тот же проход, что раз в час делает джоб ``maintenance``: удаление
+старых строк, VACUUM, ротация копий, чистка кэша картинок.
 """
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from telethon import Button
 
-from database import create_db_backup, list_db_backups, record_event
+from database import backups_total_bytes, create_db_backup, list_db_backups, record_event
 
+from ...app_ctx import logger, state
 from ..chrome import empty, header, kv
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
@@ -31,14 +38,43 @@ def _mb(size: Any) -> float:
         return 0.0
 
 
-def card(items: list[dict[str, Any]]) -> str:
-    lines = [header("💾", "Бэкапы", "Управление › Бэкапы"), kv("📦", "Копий", len(items)), DIV]
+def _cap_mb() -> int:
+    try:
+        return int(os.getenv("BACKUP_MAX_TOTAL_MB", "1024"))
+    except ValueError:
+        return 1024
+
+
+def maintenance_lines(stats: Optional[dict[str, Any]]) -> list[str]:
+    """Итог последней уборки — или честное «ещё не было»."""
+    if not stats:
+        return [empty("Уборка ещё не проходила — первая через 10 минут после запуска.")]
+    lines = [
+        kv("♻️", "Уборка", fmt_dt(stats.get("finished_at"))),
+        kv("💾", "База", f"{_mb(stats.get('db_bytes')):.1f} МБ · пустых {stats.get('freelist_pct', 0)}%"),
+        kv("💾", "Диск свободен",f"{_mb(stats.get('disk_free_bytes')) / 1024:.1f} ГБ"),
+    ]
+    freed = _mb(stats.get("freed_bytes"))
+    if freed >= 0.1:
+        lines.append(kv("🗑", "Освобождено", f"{freed:.1f} МБ"))
+    return lines
+
+
+def card(items: list[dict[str, Any]], total_bytes: Optional[int] = None,
+         stats: Optional[dict[str, Any]] = None) -> str:
+    lines = [header("💾", "Бэкапы", "Управление › Бэкапы"), kv("📦", "Копий", len(items))]
+    if total_bytes is not None:
+        lines.append(kv("📂", "Занято",f"{_mb(total_bytes):.1f} из {_cap_mb()} МБ"))
+    lines.append(DIV)
     if not items:
         lines.append(empty("Копий пока нет."))
     for item in items[:LIST_LIMIT]:
         lines.append(f"• `{item.get('name')}` · {_mb(item.get('size')):.1f} МБ · "
                      f"{fmt_dt(item.get('created_at'))}")
-    lines.append(f"\n__Файлом уезжает копия до {MAX_UPLOAD_MB} МБ; тяжелее — забирайте с диска.__")
+    lines.append(DIV)
+    lines += maintenance_lines(stats)
+    lines.append(f"\n__Файлом уезжает копия до {MAX_UPLOAD_MB} МБ; тяжелее — забирайте с диска. "
+                 "Хранятся 3 последние, по одной за день (неделя) и за неделю (месяц).__")
     return "\n".join(lines)
 
 
@@ -47,7 +83,7 @@ def keyboard(items: list[dict[str, Any]]) -> list[list[Button]]:
         [Button.inline(f"⬇️ {str(item.get('name'))[:32]}", f"bk:get:{i}".encode())]
         for i, item in enumerate(items[:LIST_LIMIT])
     ]
-    rows.append([Button.inline("➕ Создать копию", b"bk:new")])
+    rows.append([Button.inline("➕ Создать копию", b"bk:new"), Button.inline("🧹 Уборка сейчас", b"bk:clean")])
     rows.append([
         Button.inline("⬅️ Управление", b"adm:home"),
         Button.inline("🔄 Обновить", b"bk"),
@@ -63,14 +99,16 @@ def collect() -> list[dict[str, Any]]:
 
 
 async def _show(click: Click) -> None:
-    items = collect()
-    await safe_edit(click.event, card(items), buttons=keyboard(items))
+    items = await asyncio.to_thread(collect)
+    total = await asyncio.to_thread(backups_total_bytes)
+    await safe_edit(click.event, card(items, total, state.maintenance_stats), buttons=keyboard(items))
 
 
 async def handle(click: Click) -> None:
     action = click.arg(1)
     if action == "new":
-        created = create_db_backup()
+        # Снимок + zip всей базы — секунды; в event loop это заморозило бы бота.
+        created = await asyncio.to_thread(create_db_backup)
         if not created:
             await click.event.answer("Базы нет — копировать нечего", alert=True)
             return
@@ -79,10 +117,32 @@ async def handle(click: Click) -> None:
         await click.event.answer(f"Копия создана: {created.get('name')}")
         await _show(click)
         return
+    if action == "clean":
+        await _clean(click)
+        return
     if action == "get":
         await _send(click)
         return
     await _show(click)
+
+
+async def _clean(click: Click) -> None:
+    """Один проход уборки по кнопке. Ответ на нажатие — сразу: VACUUM может
+    занять дольше, чем живёт callback-query."""
+    from ...loops import run_maintenance_once
+
+    await click.event.answer("Уборка запущена…")
+    try:
+        stats = await run_maintenance_once(force_daily=True)
+    except Exception:
+        logger.exception("Maintenance pass from the bot failed")
+        await click.event.respond("⚠️ Уборка не удалась — подробности в /logs.")
+        return
+    freed = _mb(stats.get("freed_bytes"))
+    note = f"♻️ Уборка готова: освобождено `{freed:.1f} МБ`." if freed >= 0.1 else "♻️ Уборка готова: чистить было нечего."
+    items = await asyncio.to_thread(collect)
+    total = await asyncio.to_thread(backups_total_bytes)
+    await safe_edit(click.event, note + "\n\n" + card(items, total, stats), buttons=keyboard(items))
 
 
 async def _send(click: Click) -> None:

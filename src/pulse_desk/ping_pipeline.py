@@ -1,7 +1,6 @@
 """Ping processing pipeline: classify message, score, persist, notify."""
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -11,6 +10,7 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 
 from telegram_ping_watcher import (
     chat_type_from_entity,
+    is_mass_tag,
     mentions_in_text,
     message_looks_like_broadcast_channel,
     message_to_record,
@@ -18,16 +18,40 @@ from telegram_ping_watcher import (
 
 from .analytics import invalidate_analytics_cache
 from .app_ctx import logger, state
-from .bot_notify import send_bot_notification
 from .common import now_iso, record_app_event
 from .giveaway_actions import analyze_and_store_giveaway
 from .giveaways import giveaway_outcome_resolution, is_giveaway_outcome_text, is_win_text, matches_strict_giveaway_rule, should_analyze_giveaway
-from .public_preview import chat_username, fetch_public_message_text, is_unreadable_media
+from .ignored_chats import is_ignored
+from .ping_notify import notify_detected_ping, settle_quietly
+from .public_preview import chat_username, is_unreadable_media, recover_public_text
 
 CHANNEL_PROFILE_TTL_SECONDS = 6 * 60 * 60
 RESOLVE_RETRY_SECONDS = 600.0
 # tracked username -> monotonic deadline before the next resolve attempt.
 _resolve_retry_at: dict[str, float] = {}
+
+# Where a mention is looked for. Groups cover supergroups and — the reason they
+# were added — the discussion group behind a channel, where comments live: a
+# winner tagged under a post was invisible while only channels counted.
+# Private chats stay out: nobody @-mentions an account in its own DMs.
+WATCHED_CHAT_TYPES = frozenset({"channel", "group"})
+
+
+def own_mention(message: Any, account_username: str, tracked: list[str]) -> Optional[str]:
+    """The tracked name of the receiving account when Telegram says it was mentioned.
+
+    ``message.mentioned`` is Telegram's own flag for "this mentions *you*": an
+    @mention of the account or a reply to its message — the second has no @ in
+    the text at all, so the text parser alone never sees it. Only an account
+    that is itself tracked counts, and its own messages never do.
+    """
+    if not account_username or not getattr(message, "mentioned", False) or getattr(message, "out", False):
+        return None
+    wanted = account_username.strip().lstrip("@").lower()
+    for name in tracked:
+        if name.lower() == wanted:
+            return f"@{name}"
+    return None
 
 
 def check_is_win(text: str) -> bool:
@@ -86,7 +110,13 @@ def apply_priority(record: dict[str, Any]) -> dict[str, Any]:
         score += 20
     if any(keyword.lower() in text or keyword.lower() in chat for keyword in state.ignore_keywords):
         score -= 40
-    record["priority_score"] = max(0, min(score, 100))
+    score = max(0, min(score, 100))
+    # The floor `database.giveaways.outcome_target` applies at startup. A channel
+    # win whose text misses the strict giveaway rule scored 85 here (70 + 10 + 5),
+    # so every sweep wrote 85 over the startup's 90 and every start wrote 90 back.
+    if record.get("is_win") and record.get("mentions") and is_giveaway_outcome_text(record.get("text") or ""):
+        score = max(score, 90)
+    record["priority_score"] = score
     record["priority_label"] = priority_label(record["priority_score"])
     return record
 
@@ -248,11 +278,8 @@ async def undecodable_media_record(client: TelegramClient, message: Any) -> Opti
     if not username:
         # Private channel: no public page, nothing to recover from.
         return None
-    try:
-        text = await fetch_public_message_text(username, getattr(message, "id", None))
-    except Exception:
-        logger.debug("Could not read the public page of %s/%s", username, getattr(message, "id", None), exc_info=True)
-        return None
+    text, changed = await recover_public_text(
+        username, getattr(message, "id", None), getattr(message, "edit_date", None))
     mentions = mentions_in_text(text, state.ping_regex, state.ping_usernames)
     if not mentions:
         return None
@@ -268,13 +295,67 @@ async def undecodable_media_record(client: TelegramClient, message: Any) -> Opti
         return None
     record["text"] = text
     record["mentions"] = mentions
-    await record_app_event(
-        "INFO",
-        "scan",
-        "Undecodable post recovered from its public page",
-        {"chat": record.get("chat"), "message_id": record.get("message_id"), "mentions": mentions},
-    )
+    if changed:
+        await record_app_event(
+            "INFO",
+            "scan",
+            "Undecodable post recovered from its public page",
+            {"chat": record.get("chat"), "message_id": record.get("message_id"), "mentions": mentions},
+        )
     return record
+
+
+async def link_win_copies(ping_id: int) -> Optional[int]:
+    """Glue a win to an earlier copy of the same winners post (see dedupe.py).
+
+    Returns the primary's id when the row turned out to be (or to have) a copy.
+    Never raises into the pipeline: a failed link only leaves a duplicate row.
+    """
+    from database import get_ping_by_id, get_wins_for_dedupe, mark_duplicates
+
+    from .dedupe import WINDOW, find_primary, source_rank
+
+    try:
+        row = await get_ping_by_id(ping_id)
+        if not row or not row.get("is_win") or row.get("duplicate_of"):
+            return None
+        since = (datetime.now() - 2 * WINDOW).replace(microsecond=0).isoformat()
+        primary = find_primary(row, await get_wins_for_dedupe(since, primaries_only=True))
+        if primary is None:
+            return None
+        if source_rank(row) < source_rank(primary):
+            # The new row is the better source (the channel post arrived after
+            # a forwarded copy): it becomes the primary.
+            await mark_duplicates(ping_id, [int(primary["id"])])
+            return ping_id
+        await mark_duplicates(int(primary["id"]), [ping_id])
+        return int(primary["id"])
+    except Exception:
+        logger.debug("Win de-duplication failed for %s", ping_id, exc_info=True)
+        return None
+
+
+async def dedupe_existing_wins() -> int:
+    """One-off pass over stored wins; returns how many rows became duplicates."""
+    from database import get_wins_for_dedupe, mark_duplicates, update_ping_meta
+
+    from .dedupe import group_duplicates
+
+    final = {"claimed", "scam", "missed", "closed"}
+    rows = await get_wins_for_dedupe()
+    by_id = {int(r["id"]): r for r in rows}
+    marked = 0
+    for primary_id, copies in group_duplicates(rows):
+        primary = by_id[primary_id]
+        if (primary.get("action_status") or "new") not in final:
+            # The owner may have claimed one of the copies before they were
+            # glued: that decision belongs to the whole group.
+            handled = next((by_id[c] for c in copies if (by_id[c].get("action_status") or "new") in final), None)
+            if handled:
+                await update_ping_meta(primary_id, giveaway_status=handled.get("giveaway_status") or "",
+                                       action_status=handled.get("action_status"))
+        marked += await mark_duplicates(primary_id, copies)
+    return marked
 
 
 async def process_ping_message(
@@ -282,6 +363,7 @@ async def process_ping_message(
     message: Any,
     *,
     account_label: str = "",
+    account_username: str = "",
     notify: bool = True,
     source: str = "telegram",
     search_mentions: Optional[list[str]] = None,
@@ -294,22 +376,34 @@ async def process_ping_message(
     instead of the local text — the only source for a mini-app card whose
     body Telethon cannot decode (see ``global_search``). They are ignored
     whenever the message has real text to parse.
+
+    ``account_username`` is the receiving account's own @username, so a reply
+    to it in a group counts as its mention (see ``own_mention``).
     """
     from database import get_ping_by_message_ref, save_ping
 
-    chat_type = await get_message_chat_type(client, message)
-    if chat_type != "channel":
+    if is_ignored(getattr(message, "chat_id", None)):
+        # The owner muted this chat for good (🔇 on a card): nothing is read.
         return None
+    chat_type = await get_message_chat_type(client, message)
+    if chat_type not in WATCHED_CHAT_TYPES:
+        return None
+    own = None
+    if chat_type == "group":
+        if getattr(message, "sender_id", None) in state.connected_user_ids:
+            # The owner's own accounts talking in a chat are not news.
+            return None
+        own = own_mention(message, account_username, state.ping_usernames)
     await resolve_ping_user_ids(client)
     record = await message_to_record(
         client,
         message,
         state.ping_regex,
         state.ping_usernames,
-        require_mentions=not search_mentions,
+        require_mentions=not (search_mentions or own),
         tracked_ids=state.ping_user_ids or None,
     )
-    if not record:
+    if not record and chat_type == "channel":
         record = await undecodable_media_record(client, message)
     if not record:
         return None
@@ -317,8 +411,15 @@ async def process_ping_message(
         # Nothing local to judge by: the server matched the mention, trust it.
         record["mentions"] = list(search_mentions)
         record["text"] = search_text or record.get("text") or ""
+    if own and own.lower() not in {str(name).lower() for name in record.get("mentions") or []}:
+        record["mentions"] = sorted([*(record.get("mentions") or []), own], key=str.lower)
     if not record.get("mentions"):
         return None
+    if notify and chat_type == "group" and is_mass_tag(message, state.ping_regex, state.ping_usernames):
+        # A tag bot's ad (hidden links on a row of emoji): kept in the feed, but
+        # no card and no member copy — the owner asked for these not to ping.
+        notify = False
+        logger.debug("Mass tag stored without a card in %s", record.get("chat"))
     record["chat_type"] = chat_type
     record["detected_at"] = now_iso()
     classify_record(record)
@@ -329,21 +430,33 @@ async def process_ping_message(
     apply_action_state(record)
 
     existing = await get_ping_by_message_ref(record.get("chat_id"), record.get("message_id"))
+    if existing and chat_type == "group":
+        # A group mention can be per account (a reply to one of them): another
+        # account's read of the same message must not overwrite it away.
+        merged = {str(name).lstrip("@").lower(): f"@{str(name).lstrip('@')}"
+                  for name in [*(existing.get("mentions") or []), *record["mentions"]]}
+        record["mentions"] = sorted(merged.values(), key=str.lower)
+    if not notify:
+        # Backlog: stored without a card, and settled at birth so notify-retry
+        # does not send one later either.
+        record["notified_at"] = now_iso()
     ping_id = await save_ping(record)
     # Counters just moved; drop the memoised analytics so the next card is fresh.
     invalidate_analytics_cache()
-    if ping_id and should_analyze_giveaway(bool(record.get("is_giveaway")), existing is None, source):
-        await analyze_and_store_giveaway(client, int(ping_id), record, message)
+    analyze = bool(ping_id) and should_analyze_giveaway(bool(record.get("is_giveaway")), existing is None, source)
 
     if not ping_id:
         return None
+    if record.get("is_win"):
+        await link_win_copies(int(ping_id))
     win_upgrade = upgraded_to_win(existing, record)
     if existing is None:
-        logger.info("Channel ping found by %s in %s", account_label or "unknown", record["chat"])
+        found_label = "Channel ping found" if chat_type == "channel" else "Group ping found"
+        logger.info("%s by %s in %s", found_label, account_label or "unknown", record["chat"])
         await record_app_event(
             "INFO",
             source,
-            "Channel ping found",
+            found_label,
             {"account": account_label, "chat": record.get("chat"), "ping_id": ping_id},
         )
     elif win_upgrade:
@@ -354,10 +467,20 @@ async def process_ping_message(
             "Ping upgraded to win",
             {"account": account_label, "chat": record.get("chat"), "ping_id": ping_id},
         )
-    if notify and win_upgrade:
-        # The post was edited into a win — the first-detection card said
-        # "mention"/"giveaway", so send the 🏆 card now.
-        await send_bot_notification(record, ping_id=ping_id)
-    if notify and existing is None:
-        await send_bot_notification(record, ping_id=ping_id)
+
+    async def run_analysis() -> None:
+        await analyze_and_store_giveaway(client, int(ping_id), record, message)
+
+    announce = existing is None or win_upgrade
+    if notify and announce:
+        # A win edited into a known post owes the 🏆 card: the first-detection
+        # card said "mention"/"giveaway". Delivery is guaranteed by the outbox
+        # (ping_notify); the analysis runs between the owner's card and the
+        # member broadcast, which filters on its score.
+        await notify_detected_ping(int(ping_id), record, before_broadcast=run_analysis if analyze else None)
+    else:
+        if announce:
+            await settle_quietly(int(ping_id), record)
+        if analyze:
+            await run_analysis()
     return int(ping_id) if existing is None else None

@@ -26,3 +26,6 @@ config/services.json
 htmlcov/
 .coverage
 coverage.xml
+
+# Stable base interpreter for .venv (copied from the Codex runtime, which Codex replaces on update)
+.python/

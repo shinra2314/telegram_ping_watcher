@@ -40,13 +40,105 @@ def channel_checkpoint_key(username: str, chat_id: Any) -> str:
     return f"{username}|channel:{chat_id}"
 
 
-async def list_broadcast_channel_dialogs(client: TelegramClient) -> list[Any]:
-    dialogs: list[Any] = []
+async def list_scan_dialogs(client: TelegramClient) -> tuple[list[Any], list[Any]]:
+    """(broadcast channels, groups holding unread mentions) from one dialog listing."""
+    channels: list[Any] = []
+    groups: list[Any] = []
     async for dialog in client.iter_dialogs():
-        entity = getattr(dialog, "entity", None)
-        if chat_type_from_entity(entity) == "channel":
-            dialogs.append(dialog)
-    return dialogs
+        kind = chat_type_from_entity(getattr(dialog, "entity", None))
+        if kind == "channel":
+            channels.append(dialog)
+        elif kind == "group" and int(getattr(dialog, "unread_mentions_count", 0) or 0) > 0:
+            groups.append(dialog)
+    return channels, groups
+
+
+async def list_broadcast_channel_dialogs(client: TelegramClient) -> list[Any]:
+    channels, _ = await list_scan_dialogs(client)
+    return channels
+
+
+# Unread mentions fetched per group per pass. They are what the PC missed while
+# it was off; more than this in one chat is a pile the owner reads in Telegram.
+GROUP_MENTION_CATCHUP_LIMIT = 50
+# (session, chat_id) -> (unread mentions, newest message id) at the last pass.
+# The count stays up until the owner reads the chat in Telegram, so without this
+# every sweep would re-query every such group for the same old mentions.
+_group_mentions_seen: dict[tuple[str, Any], tuple[int, int]] = {}
+
+
+def group_mentions_due(key: tuple[str, Any], unread: int, latest_message_id: int) -> bool:
+    return unread > 0 and _group_mentions_seen.get(key) != (unread, latest_message_id)
+
+
+async def catch_up_group_mentions(
+    client: TelegramClient,
+    dialogs: list[Any],
+    *,
+    session_name: str,
+    account_label: str,
+    account_username: str,
+) -> int:
+    """Mentions of this account in groups and comment threads it did not see live.
+
+    The live handler covers groups while the app runs; the channel sweep never
+    reads groups at all (their history is chatter). Telegram keeps the unread
+    mentions per dialog, so the nightly gap costs one filtered search per group
+    that actually has one. Old unread mentions are stored without a card.
+    """
+    from database import get_ping_by_message_ref
+    from telethon.tl.types import InputMessagesFilterMyMentions
+
+    from .global_search import is_notifiable
+
+    found = 0
+    for dialog in dialogs:
+        if state.scan_cancel_event.is_set():
+            break
+        entity = dialog.entity
+        chat_id = getattr(entity, "id", None)
+        unread = int(getattr(dialog, "unread_mentions_count", 0) or 0)
+        latest = int(getattr(getattr(dialog, "message", None), "id", 0) or 0)
+        key = (session_name, chat_id)
+        if chat_id is None or not group_mentions_due(key, unread, latest):
+            continue
+        try:
+            async for message in iter_messages_resilient(
+                client, entity, filter=InputMessagesFilterMyMentions(),
+                limit=min(unread, GROUP_MENTION_CATCHUP_LIMIT), logger=logger,
+            ):
+                if state.scan_cancel_event.is_set():
+                    break
+                if await get_ping_by_message_ref(getattr(message, "chat_id", None), getattr(message, "id", None)):
+                    continue
+                ping_id = await process_ping_message(
+                    client, message, account_label=account_label, account_username=account_username,
+                    notify=is_notifiable(message), source="group-mention-catchup",
+                )
+                if ping_id:
+                    found += 1
+                    scan_status["found"] += 1
+            _group_mentions_seen[key] = (unread, latest)
+        except FloodWaitError as exc:
+            logger.warning("Flood wait during group mention catch-up in %s: %s seconds", chat_id, exc.seconds)
+            wait = flood_wait_seconds(exc.seconds)
+            mark_account_cooldown(session_name, wait)
+            await asyncio.sleep(wait)
+            break
+        except Exception as exc:
+            if is_auth_key_duplicated(exc):
+                scan_status["last_error"] = auth_key_duplicated_message(session_name)
+                state.scan_cancel_event.set()
+                await mark_auth_key_duplicated(session_name, client, exc)
+                break
+            if is_channel_inaccessible(exc):
+                continue
+            await record_app_event("WARNING", "scan", "Group mention catch-up failed",
+                                   {"session": session_name, "chat_id": chat_id, "error": str(exc)})
+            logger.warning("Group mention catch-up failed for %s in %s: %s", chat_id, session_name, exc)
+    if found:
+        logger.info("Group mention catch-up found %s for %s", found, account_label or session_name)
+    return found
 
 
 async def load_channel_username_checkpoints(session_name: str, chat_id: Any) -> dict[str, int]:
@@ -126,6 +218,7 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                     client,
                     message,
                     account_label=user_label,
+                    account_username=account_username,
                     notify=True,
                     source="recent-edit-sweep",
                 )
@@ -157,8 +250,9 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
     try:
         me = await client.get_me()
         user_label = me.username or str(me.id)
+        account_username = me.username or ""
         scan_status["current_account"] = user_label
-        dialogs = await list_broadcast_channel_dialogs(client)
+        dialogs, mention_groups = await list_scan_dialogs(client)
         account_state = state.accounts_state.setdefault(session_name, {"session_name": session_name})
         account_state.update({
             "channels_total": len(dialogs),
@@ -203,7 +297,8 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                         if state.scan_cancel_event.is_set():
                             break
                         new_last_id = max(new_last_id, int(getattr(message, "id", 0) or 0))
-                        ping_id = await process_ping_message(client, message, account_label=user_label, notify=True)
+                        ping_id = await process_ping_message(client, message, account_label=user_label,
+                                                             account_username=account_username, notify=True)
                         if ping_id:
                             found += 1
                             scan_status["found"] += 1
@@ -258,7 +353,8 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
                         if state.scan_cancel_event.is_set():
                             break
                         new_last_id = max(new_last_id, int(getattr(message, "id", 0) or 0))
-                        ping_id = await process_ping_message(client, message, account_label=user_label, notify=True)
+                        ping_id = await process_ping_message(client, message, account_label=user_label,
+                                                             account_username=account_username, notify=True)
                         if ping_id:
                             found += 1
                             scan_status["found"] += 1
@@ -293,11 +389,17 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
             if recent_found:
                 found += recent_found
                 scan_status["found"] += recent_found
+        if not state.scan_cancel_event.is_set() and mention_groups:
+            found += await catch_up_group_mentions(
+                client, mention_groups, session_name=session_name,
+                account_label=user_label, account_username=account_username,
+            )
         if not state.scan_cancel_event.is_set():
             # Reading messages cannot see a mini-app result card (Telethon gets
             # empty text); Telegram's global search index can. One query per
             # tracked username closes that blind spot for the whole account.
-            found += await scan_global_mentions(client, account_label=user_label, session_name=session_name)
+            found += await scan_global_mentions(client, account_label=user_label, session_name=session_name,
+                                                account_username=account_username)
         logger.info("Channel scan finished for %s, found %s", user_label, found)
     except Exception as exc:
         if is_auth_key_duplicated(exc):
@@ -433,6 +535,7 @@ async def backfill_account_name_mentions(client: TelegramClient, per_channel_lim
                         client,
                         message,
                         account_label=user_label,
+                        account_username=me.username or "",
                         notify=False,
                         source="mention-backfill",
                     )

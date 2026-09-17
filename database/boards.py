@@ -352,6 +352,8 @@ async def get_debt_board(tracked_usernames: Sequence[str], limit: int = 160) -> 
           AND COALESCE(p.chat_type, '') IN ('channel', 'group')
           AND COALESCE(NULLIF(p.giveaway_status, ''), 'pending') = 'pending'
           AND COALESCE(p.action_status, 'new') NOT IN ('claimed', 'missed', 'scam', 'closed')
+          -- Copies of the same winners post (dedupe.py) are listed once, under the primary.
+          AND p.duplicate_of IS NULL
         ORDER BY
             CASE WHEN COALESCE(p.status, '') = 'new' THEN 0 ELSE 1 END,
             COALESCE(p.priority_score, 0) DESC,

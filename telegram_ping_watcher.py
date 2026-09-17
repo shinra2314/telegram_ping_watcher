@@ -225,6 +225,51 @@ def extract_mentions(
     return sorted(found, key=str.lower)
 
 
+# Tag-all bots ("Зазывала tag bot") advertise in chats by hanging a hidden user
+# link on each emoji of a line like "🧔🏽‍♀️ 🚵 🫷🏽 🌋": every member they tag gets a
+# mention, and the owner got a ping card — for a casino ad.
+MASS_TAG_MIN_HIDDEN_LINKS = 3
+
+
+def hidden_user_links(message) -> int:
+    """User links whose visible text has no letter or digit — an emoji, a dot.
+
+    A real mention shows a name ("@name", "Вася"); a tag bot's link shows a
+    picture. Entity offsets are UTF-16 units, hence the surrogate round trip.
+    """
+    if types is None:
+        return 0
+    entities = getattr(message, "entities", None) or []
+    if not entities:
+        return 0
+    from telethon.helpers import add_surrogate, del_surrogate
+
+    wide = add_surrogate(getattr(message, "raw_text", "") or "")
+    count = 0
+    for ent in entities:
+        if MENTION_NAME_ENTITY_TYPES and isinstance(ent, MENTION_NAME_ENTITY_TYPES):
+            pass
+        elif isinstance(ent, types.MessageEntityTextUrl) and telegram_url_target(getattr(ent, "url", "") or ""):
+            pass
+        else:
+            continue
+        covered = del_surrogate(wide[ent.offset : ent.offset + ent.length])
+        if not any(char.isalnum() for char in covered):
+            count += 1
+    return count
+
+
+def is_mass_tag(message, ping_regex: re.Pattern[str], usernames: Iterable[str]) -> bool:
+    """An ad tagging a crowd through hidden emoji links, not a mention of anyone.
+
+    A tracked name written out in the text is still a real mention, whatever
+    else the message tags.
+    """
+    if hidden_user_links(message) < MASS_TAG_MIN_HIDDEN_LINKS:
+        return False
+    return not mentions_in_text(getattr(message, "raw_text", "") or "", ping_regex, usernames)
+
+
 def local_iso_datetime(value) -> str:
     if not value:
         return ""
@@ -256,6 +301,9 @@ async def message_to_record(client: TelegramClient, message, ping_regex, usernam
         "mentions": mentions,
         "link": build_message_link(chat, message),
         "text": getattr(message, "raw_text", "") or "",
+        # When the post was last edited — wins are usually edited in, and the
+        # detection delay of a win is measured from this (see latency.py).
+        "edited_at": local_iso_datetime(getattr(message, "edit_date", None)) or None,
     }
 
 

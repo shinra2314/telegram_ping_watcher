@@ -18,6 +18,16 @@ python main.py
 .\.venv\Scripts\python.exe main.py
 ```
 
+**Interpreter:** `.venv` is based on `.python\3.12.13\` (git-ignored), a copy of the
+Python the venv was first built from. That original lives in the Codex app's
+`~\.cache\codex-runtimes\codex-primary-runtime`, which Codex replaces on update (the
+`.previous-*` folders next to it) — a minor-version bump there would have left the app
+and both scheduled tasks unable to start. Do not point `.venv\pyvenv.cfg` back at it.
+Rebuilding from scratch: any Python 3.12 → `python -m venv .venv` →
+`pip install -r requirements.txt` (the pinned set is complete; CI installs only that).
+Files written from a sandboxed agent shell outside the project folder (e.g. under
+`%LOCALAPPDATA%`) may be invisible to the real app — keep runtime files in the project.
+
 **Install dev dependencies:**
 ```bash
 uv sync --extra dev
@@ -32,6 +42,13 @@ uv sync --extra dev
 # unittest also works (tests are unittest-style)
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
+
+`tests/conftest.py` points `PULSE_DB_PATH`, `PULSE_LOG_DIR` and `database.BACKUP_DIR`
+at a temp dir and blanks the Obsidian/salary paths before anything imports the config,
+and refuses (and fails the run on) any connection to the live `pulse_desk.db`. Before it
+existed, a test that forgot to patch `DB_PATH` wrote into the owner's database (fake
+«Bot handler failed: nope» events) and competed with the running app for the write lock.
+It is pytest-only: `unittest discover` does not load it, so prefer pytest.
 
 **Syntax validation (no linter configured):**
 ```powershell
@@ -61,11 +78,20 @@ tokens (`ADMIN_TOKEN`, `VIEWER_TOKEN`, `WEB_AUTH_TOKEN`, `PUBLIC_SHARE_MODE`,
 unused, by the same convention that keeps `deadline_*`. Two things did not move and were
 dropped on purpose: the printable HTML report (its job is done by CSV/JSON export and the
 digest cards) and the "Друзьям" share guide (a friend now gets a bot access key, not a
-token). **Do not reintroduce an HTTP UI.**
+token). **Do not reintroduce the web dashboard.**
 
 uvicorn is still the process host and serves exactly one endpoint, `/api/health`:
 `scripts/pulse_watchdog.ps1` and `scripts/start_dashboard.ps1` poll it, so replacing the
 entry point would mean rewriting both Task Scheduler jobs for nothing.
+
+The one web surface that exists is the **Telegram Mini App «🛰 Панель»** (returned
+2026-09-12 at the owner's request; it was pulled on 2026-09-08 over a Telegram client
+crash the owner later attributed to a Telegram bug). It is not a dashboard: it opens
+from the bot's main menu, lives on its own port behind a tunnel, and carries only what
+inline keyboards do badly — a live-typing converter, **logging into a Telegram account**
+(a code typed into a Telegram chat is voided by Telegram; a page field is not), account
+control, giveaways/wins, debts with multi-select and the salary book. The inline bot stays
+complete on its own; the panel is on top, not instead.
 
 Deadline tracking and redeemable-check (чеки) detection were removed in 2026-07 — the
 owner works from the bot only, and both features cost a Telegram `GetFullChannel`
@@ -88,8 +114,37 @@ main.py (~134 lines)
   Entry point only: the startup/shutdown lifespan (DB init, settings load, bot +
   background jobs) and a FastAPI app that serves `/api/health`. No business logic.
 
-routers/                   — what is left of HTTP: `health.py` and nothing else.
-  A new screen belongs in `src/pulse_desk/bot/sections/`, never here.
+routers/                   — `health.py` (main app) and `miniapp/` (panel app only).
+  A new bot screen belongs in `src/pulse_desk/bot/sections/`, never here.
+  routers/miniapp/  — the panel's JSON, one module per area, mounted ONLY on the
+                      separate ASGI app in `miniapp_server.py` (its port is the one
+                      on the internet). `common.py`: every request verifies the
+                      `X-Telegram-Init-Data` header (`miniapp_auth.verify`), then
+                      role + grants come from `bot_membership` — the bot's own
+                      rules. Owner areas depend on `admin_caller`; **every POST**
+                      depends on `fresh_*`, which refuses initData older than
+                      `FRESH_SECONDS` (1 h) so a leaked string cannot drive
+                      accounts for its whole 24 h read life. Modules reuse the
+                      bot sections' helpers instead of re-deriving them: home
+                      (`collect_dashboard`, 15 s cache), giveaways
+                      (`GiveawayFilter`, `visible_accounts`, `apply_ping_meta`),
+                      market (`rate_table`: price of every code in USD, so the page
+                      converts while typing; `/convert?q=` uses `parse_query`),
+                      accounts (+ login, via `account_login`), debts
+                      (`segment_rows`/`total_value`), salary (`sections/salary.visible`,
+                      404 when not visible, like the bot's "Неизвестная команда")
+
+static/app/                — the panel page. Vanilla JS, no build step, one global
+  scope, load order in index.html: icons.js → app.js (App nav stack, api(),
+  Sheet, Store = Telegram CloudStorage w/ localStorage fallback, delegated
+  `data-act` routing to the current screen's `actions`/`inputs`) →
+  screens/*.js (App.register) → boot.js. CSP allows scripts from self and
+  telegram.org only, so no inline scripts. A screen that updates in place
+  (converter typing, debt selection) must not re-render — that steals focus
+  and refetches. Animations move but never fade: a throttled WebView would
+  hold a fading screen at opacity 0.
+  Dev: `scripts/miniapp_dev_link.py` prints a localhost link with initData
+  signed by the real bot token (no auth bypass exists in the server).
 
 src/pulse_desk/
   app_ctx.py        — Shared context: settings/state/logger singletons,
@@ -105,12 +160,45 @@ src/pulse_desk/
   telegram_accounts.py — Account lifecycle: start_client, reconnect/cooldown,
                       auth-session helpers, disconnect
   ping_pipeline.py  — process_ping_message: classify, score,
-                      persist, notify, web-push fanout
+                      persist, notify. Watches **channels and groups**
+                      (`WATCHED_CHAT_TYPES`; groups = supergroups and the
+                      discussion group behind a channel, i.e. comments). In a
+                      group `own_mention` also counts Telegram's
+                      `message.mentioned` flag for the receiving account — a
+                      reply to it has no @ in the text. Messages sent by our own
+                      accounts (`state.connected_user_ids`) are skipped there;
+                      private chats stay out. A tag bot's ad (≥3 hidden user
+                      links on emoji, no tracked name written out —
+                      `telegram_ping_watcher.is_mass_tag`) is stored without a
+                      card or member copy, at the owner's request (16.09).
+                      A chat on the ignore list (`ignored_chats.py`, settings key
+                      `ignored_chats`, `state.ignored_chat_ids`) is skipped before
+                      anything is read; 🔇 on a group card adds it, ⚙️ → 🔔 →
+                      «🔇 Игнор-чаты» (`bot/sections/ignored.py`, `igc:*`) lists
+                      and returns them
+  ping_notify.py    — **a ping card is never lost.** Owner's cards are an outbox
+                      on the `pings` row (schema 24): `notified_at` /
+                      `win_notified_at`, NULL = owed. `notify_detected_ping`:
+                      owner's card first → `before_broadcast` (giveaway analysis,
+                      its score feeds the member filter) → one-time member
+                      broadcast, which edits the owner's card (score line, 🙈,
+                      moderation buttons). `notify-retry` delivers what is owed
+                      (90 s grace, 24 h window; older ones are settled with one
+                      summary). `_inflight` is claimed *before* the row is read,
+                      so a live update and a sweep racing on one post send one
+                      card. A pass that sends no card on purpose (backlog,
+                      `/win`) settles the row itself
   scan_engine.py    — full_history_scan, scan_single_account, mention backfill.
                       A sweep spends no request on a channel whose newest
                       message id (free from the dialog list) is not past its
                       checkpoint; idle channels only get the recent-window
                       (edit) pass once an hour, active ones every sweep.
+                      Groups are never swept (chatter); instead
+                      `catch_up_group_mentions` reads the groups whose dialog
+                      carries `unread_mentions_count` with
+                      `InputMessagesFilterMyMentions` — the nightly gap for
+                      comments costs one request per group that has one, and is
+                      skipped while (unread, newest id) is unchanged.
                       Ends each account with the global-search pass below
   global_search.py  — Mentions reading messages cannot see. A mini-app result
                       card (@Random winner table) arrives as
@@ -127,6 +215,48 @@ src/pulse_desk/
                       a placeholder body, and its win flag comes from
                       intersecting the hit with a second round of global
                       searches over `win_keywords`
+  public_preview.py — The other path for such a card: its public t.me page.
+                      `recover_public_text` caches per post (re-read on a new
+                      edit date or after 30 min, failures 5 min) — every sweep on
+                      every account used to refetch and re-log the same post
+                      several times a minute
+  miniapp_auth.py   — Telegram Mini App initData validation (pure): drop `hash`,
+                      join the rest as sorted `k=v` lines, HMAC-SHA256 under
+                      HMAC(b"WebAppData", bot_token), reject anything older than
+                      `max_age` (24 h). No session — verified on every request
+  miniapp_server.py — The panel's own ASGI app + uvicorn task on MINIAPP_PORT,
+                      bound to 127.0.0.1, docs/OpenAPI off. Adds `no-store` to
+                      `/api/*` and a CSP to the page
+  tunnel.py         — Runs the tunnel agent as a child process and owns
+                      `state.public_url` (`tunnel` job); the «🛰 Панель» button
+                      (`keyboards.webapp_row`) exists only while it is set.
+                      Providers are argv builders + pure URL extractors:
+                      `tailscale` (default, `tailscale funnel <port>`, stable
+                      ts.net host), `ngrok` (quarantined by Defender here),
+                      `cloudflared` (quick tunnel; api.trycloudflare.com blocked here).
+                      **Orphans:** Windows does not kill children with their
+                      parent, and a leftover `tailscale funnel 8010` kept the :443
+                      listener ("listener already exists for port 443", panel
+                      hidden). The agent is now assigned to a kill-on-close job
+                      object (`_bind_to_app_lifetime`), `kill_orphaned_agents`
+                      stops an our-port agent whose parent is gone (scanned on a
+                      fresh start or when the port is busy), and
+                      `restart_app.ps1` uses `taskkill /T`.
+                      **Outages:** after boot tailscaled answers "unexpected
+                      state: NoState" for a few minutes; retries back off
+                      (10 → 120 s) and a repeated cause is logged once
+                      (`TunnelHealth`). Down ≥ 15 min → one owner message, and
+                      one more when the panel is back — the watchdog does not
+                      cover this job (no heartbeat)
+  account_login.py  — Login to a Telegram account from the panel: `request_code`
+                      → `submit_code` → `submit_password` / `cancel`, returning
+                      `LoginResult`. Pending logins hold a connected client in
+                      `state.pending_auths` until `PENDING_AUTH_TTL_SECONDS`
+                      (swept on each new request); a code request per phone is
+                      limited to one per 60 s. On success the temp client is
+                      closed, the session joins `state.session_names` and
+                      `start_client` launches it. Phone, code and password never
+                      reach the log or `app_events` — only the session name
   giveaway_actions.py — Safe giveaway join: analysis, button detection, confirm
   bot_notify.py     — Outbound bot messages: admin notify + member broadcasts
   bot_connection.py — Keeps the bot client connected (`bot-connection` job).
@@ -187,7 +317,21 @@ src/pulse_desk/
                       300 s TTL, swept on every new prompt. A section declares
                       its input kind *with its consumer* (`register_prompt`), so
                       adding "type a value here" is a local change; `admin=True`
-                      is enforced in `consume`
+                      is enforced in `consume`. **Clean chat:** the entry keeps
+                      the ids of the «✍️» prompt and the screen it was armed
+                      from; after the consumer answers, prompt + typed answer +
+                      old screen are deleted (`keep_screen=True` for kinds armed
+                      from notification cards: ping note/tag, roulette time).
+                      A consumer that cannot accept the text **raises
+                      `InputRejected(message)`** instead of answering — the
+                      prompt stays armed, up to `MAX_ATTEMPTS` (3). «✖️ Отмена»
+                      (`st_x`) deletes the prompt and keeps the screen
+  bot/undo.py       — «↩️ Отменить» for 30 s after a status change (debts
+                      claim/scam/mass claim, giveaway status, feed status):
+                      `snapshot` before, `remember(sender, rows, label, back)`,
+                      `undo_row(token)` prepended to the redrawn screen; `ud:<token>`
+                      (sections/undo.py) restores and re-dispatches `back`.
+                      In-memory (`state.bot_undo`), one per sender
   bot/persist.py    — every settings write: save → apply to the live
                       `watch_settings` → audit → publish. A value saved but not
                       applied leaves the running scanner on the old rules
@@ -271,7 +415,47 @@ src/pulse_desk/
                       returns newest first, and printed every rise as a fall)
   analytics.py      — build_analytics (dashboard tiles + bot home/summary) /
                       build_detailed_analytics (bot 📈 Аналитика) / channel_account_stats
-  jobs.py           — Task supervision primitives (start_tracked/supervised_task)
+  jobs.py           — Task supervision primitives (start_tracked/supervised_task),
+                      `EXPECTED_JOBS`, `feature_job_polls` (which feature-gated
+                      jobs this install runs → `watchdog.default_thresholds`)
+  autoclean.py      — Auto-delete of minor notifications (pure): owner choice in
+                      the `autoclean` key (⚙️ → 🔔 «🧹 Удалять мелкие»), member's
+                      in `notification_prefs.autoclean_hours`; kinds mention /
+                      market / system only, wins and giveaways never; ≤47 h
+                      (Telegram's 48 h delete window). Rows in
+                      `bot_ephemeral_messages`, deleted by `bot-janitor`
+  account_health.py — Account problems (pure): unauthorized / banned /
+                      session_ip_conflict / error, stuck reconnecting >30 min,
+                      online but no update 12 h (`last_update_at` set by the
+                      account's update handlers); `spam_verdict` for @SpamBot
+  prize_value.py    — Prize amount from post text via the converter vocabulary
+                      («5 USDT», «4$», «100 грн», «1💵»), priced from the newest
+                      market snapshot; `value_by_account` → «💵 Незабрано» on
+                      the debts board and `db:v` per account
+  manual_win.py     — `/win <link> [@account]`: reads the post with any account
+                      that can, or records from the link alone; saved through
+                      the normal helpers as a claim_prize debt
+  latency.py        — Post → detection and win edit → win flag delays (pure);
+                      📈 Аналитика «Задержка» tab (`an:lat`). Needs
+                      `pings.edited_at` / `win_detected_at` (schema 23)
+  dedupe.py         — Copies of one winners post (same normalised text, a
+                      shared tracked account, 72 h) glued to a primary (channel
+                      > group > private, then earliest) via `pings.duplicate_of`;
+                      the debts board lists primaries, `apply_ping_meta`
+                      propagates statuses to copies. Linked on save
+                      (`ping_pipeline.link_win_copies`), backfilled at startup
+  report.py         — Weekly / monthly report (pure data + text; card in
+                      `render/screens.build_report_card`); `rp:*` (🖼 Отчёт in
+                      the management grid), `/report [месяц]`, sent by
+                      `weekly-report` on Monday / the 1st
+  vacation.py       — Vacation mode (pure routing): owner muted for minor kinds,
+                      optional delegate member raised to `admin` for the period
+                      and copied on owner notifications; `vc:*` (🏖 Отпуск),
+                      ended by `bot-janitor` when the date passes
+  housekeeping.py   — Pure maintenance rules, unit tested: `vacuum_due`
+                      (freelist share / stored interval), backup rotation
+                      (`backups_to_delete`, `backup_needed`), `FILE_RULES`,
+                      `disk_low`, `gap_worth_reporting` (downtime report)
   scan.py           — Scan limit normalisation + sweep-start helpers + sweep
                       pacing (`channel_has_new_messages`, `edit_sweep_due`,
                       `next_scan_delay` — pure, unit tested)
@@ -367,7 +551,11 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 22)
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 24 —
+                pings.notified_at / win_notified_at, the owner-card outbox;
+                23 — bot_ephemeral_messages, bot_access_keys.max_uses,
+                pings.edited_at / win_detected_at / duplicate_of)
+  ping_notifications.py — owed-card queries for ping_notify (mark, list, expire, count)
   schema.py   — init_db + migrations   backups.py  — file backups
   pings.py    — ping CRUD/filters/FTS  checkpoints.py — scan checkpoints
   giveaways.py — candidates/actions/reconcile   boards.py — giveaway/debt boards
@@ -377,6 +565,9 @@ database/                  — SQLite layer (aiosqlite), split per area.
   outbox.py   — SSE outbox             push.py — push subscriptions
   bot_access.py — bot keys/members     stats.py / maintenance.py — stats, cleanup
   access_windows.py — scheduled-access windows (access_schedule) + audit
+  ephemeral.py — auto-clean deletions queue   dedupe.py — duplicate_of links
+  bot_access.py also: max_uses (one-time invites, `/invite`, 🎟 in the key panel;
+  a person already in is not counted against the limit)
   WAL mode + FK enabled + 5 s busy timeout everywhere.
 
 telegram_ping_watcher.py   — Telethon client helpers and message parsing utilities
@@ -407,10 +598,16 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 
 | Job | Purpose | Key env var |
 |-----|---------|-------------|
-| `auto-scan` | Sweeps channels for new messages every `SCAN_INTERVAL_SECONDS` **measured from the start of the cycle** (the sleep is the remainder of the interval, so sweep time no longer stacks on top of it; minimum 30 s gap); also runs retention each sweep: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`/`scan_checkpoints`; `settings_history` is capped **per key** as well as by age, and `scan_checkpoints` drops channels unseen for 90 days), a size cap that evicts oldest non-favorite/non-win pings (archived to `pulse_desk_archive.db` first) + VACUUM, and archive-record pruning (the archive *file* is kept, but its rows older than `ARCHIVE_RETENTION_DAYS` are aged out) | `SCAN_INTERVAL_SECONDS` (default 900 s), `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS` |
-| `daily-digest` | Sends the daily digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 10:00) as a two-image album: a ping treemap (24 h, wins/giveaways/mentions per chat, today-vs-yesterday counter) and a crypto heatmap (all 8 tracked coins, area by market cap, day delta from our own `market_history` snapshots, leader/laggard, UAH line). The caption carries only the win links; if Pillow can't render, the old text digest goes out instead | — |
+| `auto-scan` | Sweeps channels for new messages every `SCAN_INTERVAL_SECONDS` **measured from the start of the cycle** (the sleep is the remainder of the interval, so sweep time no longer stacks on top of it; minimum 30 s gap). Scans only — retention moved to `maintenance`. After the first sweep that follows a long downtime (see `maintenance`) it sends the owner a «⏳ Пропуск наверстан» card: how long nothing was watching and what the sweep found | `SCAN_INTERVAL_SECONDS` (default 900 s) |
+| `maintenance` | Stamps `last_alive_at` every 5 min (the next start compares against it to tell a restart from the nightly shutdown — `loops.detect_downtime`), and once an hour (first pass 10 min after start) runs `run_maintenance_once`: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`/`scan_checkpoints`; `settings_history` capped **per key** as well as by age; `scan_checkpoints` drops channels unseen for 90 days **and** rows of sessions that no longer exist or usernames no longer tracked), the size cap (evicts oldest non-favorite/non-win pings to `pulse_desk_archive.db`), archive-record pruning, daily pruning of broadcast/pending-send/outbox bookkeeping (was startup-only), **VACUUM when ≥20 % and ≥16 MB of the file is free pages** (`housekeeping.vacuum_due`; the old in-memory "every 168 h since start" never fired on a PC that reboots nightly and left 114 MB of free pages in a 136 MB file), a daily backup + rotation, the `housekeeping.FILE_RULES` file prune (render cache, stale login QR files) and a once-per-episode low-disk alert. State in the `maintenance` settings key (`audit=False`), last result on `state.maintenance_stats` (→ `/api/health`, 🩺 Диагностика, 💾 Бэкапы, where «🧹 Уборка сейчас» runs a pass) | `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS`, `VACUUM_INTERVAL_HOURS` (fallback), `DISK_FREE_ALERT_MB`, `BACKUP_*` |
+| `daily-digest` | Ticks every 30 s and sends once per slot (`digest.digest_due`; handled slot date in the `digest_state` key, `audit=False`), so a 10:00 slot the PC was off for still goes out when it boots — within `DIGEST_CATCHUP_HOURS` (4 h). Sends the daily digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 10:00) as a two-image album: a ping treemap (24 h, wins/giveaways/mentions per chat, today-vs-yesterday counter) and a crypto heatmap (all 8 tracked coins, area by market cap, day delta from our own `market_history` snapshots, leader/laggard, UAH line). The caption carries only the win links; if Pillow can't render, the old text digest goes out instead | — |
 | `roulette-reminder` | Daily nudge to spin the yobo-bot roulette from every account. The alarm time *is* the previous day's last-click time, reported back by the owner (button, `/roulette 21:47`, or a bare `21:47` in the bot chat). Ticks every 30 s instead of sleeping to the target, so a time reported mid-day applies at once and a slot missed while the PC was off still fires once on the next tick | settings key `roulette` |
+| `bot-janitor` | Every 60 s: deletes unanswered «✍️» prompts (5 min TTL), closes abandoned Mini App logins (`account_login.sweep_expired` — each held a connected Telethon client), forgets stale feed queries / debt marks / undo snapshots, deletes due auto-clean notifications (`bot_ephemeral_messages`) and ends an expired vacation | — |
+| `account-health` | Every 5 min (first after 3 min): `account_health.account_problem` per account, pages the owner once per problem kind and once on recovery (reported kinds persisted in `account_alerts`, so the morning restart does not re-page); hourly `get_me` probe per online account catches revoked/banned sessions | — |
+| `weekly-report` | Ticks every 60 s; Monday 10:15 sends the previous ISO week, the 1st sends the previous month (catch-up 72 h counted from the period's own slot, so a PC off for the whole Monday / 1st still gets it; sent periods in `report_state`) | — |
 | `bot-connection` | Reconnects the bot client after Telethon gives up, so incoming updates never stall (started only when the bot is configured) | — |
+| `bot-start-retry` | One-off, only when the first `init_bot` failed before the client came up (network not ready at boot — 15.08 the bot was dead 09:25→12:46). `bot_connection.keep_starting_bot` retries with backoff, then tells the owner how long it was down and how many cards are being re-sent | — |
+| `notify-retry` | Every 30 s: delivers owner ping cards still owed (`ping_notify.retry_owed_notifications`) with a «⏳ С опозданием» footer; stops at the first failed send; cards owed > 24 h are settled with one summary message. Count in `/api/health` (`owed_ping_cards`) and 🩺 Диагностика | — |
 | `pending-sends` | Drains `bot_pending_sends`: delivers member copies whose per-key `delay_minutes` elapsed (20 s poll, drops rows older than 24 h). One batch is `loops.drain_pending_sends`, split out so the failure handling is testable. A non-delivery is classified, not counted blindly: `BotOffline` spends no attempt and stops the batch (a minute of downtime used to burn all three attempts and drop every due copy), a FloodWait idles the loop instead of sleeping inside the batch, and `RecipientUnreachable` cancels the row at once | — |
 | `source-scores` | Recalculates channel reliability scores | — |
 | `access-scheduler` | Warms the scheduled-access cache and notifies members when their access window opens/closes (not the source of truth — `bot_role` recomputes on demand) | — |
@@ -418,13 +615,18 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `salary-sync` | Rereads the salary workbook when its mtime/size change (Excel rewrites the file whole on every save, so that pair is enough) and refreshes `state.salary_book`; the parse runs in `asyncio.to_thread`. Newly ticked payout dates are announced to the account's key holders — the set of already-paid `месяц\|аккаунт` pairs lives in the `salary_sync` settings key (`audit=False`), so a restart between two saves neither loses the notice nor repeats it. Started only when `SALARY_XLSX_PATH` is set, and left out of the watchdog for the same reason as the other feature-gated loops | `SALARY_XLSX_PATH`, `SALARY_SYNC_POLL_SECONDS` |
 | `market-monitor` | Fetches crypto prices (+ fiat cross-rates for the bot converter), alerts on volatility | `MARKET_POLL_SECONDS` |
 | `bot-service` | Telegram bot for notifications + inline menus | `TELEGRAM_BOT_TOKEN` (optional) |
+| `miniapp-server` | Serves the panel on `MINIAPP_PORT`, alone on that port (started only when enabled; not in the watchdog, like the other feature-gated jobs) | `MINIAPP_ENABLED`, `MINIAPP_PORT` |
+| `tunnel` | Keeps the tunnel agent up and `state.public_url` current, so the «🛰 Панель» button has an HTTPS origin | `MINIAPP_ENABLED`, `TUNNEL_PROVIDER`, `TAILSCALE_BIN`, `NGROK_DOMAIN`, `NGROK_BIN`, `CLOUDFLARED_BIN` |
 
 ### Data flow for a "ping"
 
-1. `auto-scan` job calls `scan.py` → reads messages via Telethon
+1. Live `NewMessage`/`MessageEdited` handlers, the `auto-scan` sweep (channels), the group
+   unread-mention catch-up and the global-search pass all call `process_ping_message`
 2. `telegram_ping_watcher.py` parses messages, matches tracked usernames + win/giveaway keywords
-3. Matches written to `pings` table; checkpoints updated so next scan is incremental
-4. WebSocket `/api/live` broadcasts events to connected clients in real time
+   (in groups also `message.mentioned` for the receiving account)
+3. Matches written to `pings` (card owed); checkpoints updated so next scan is incremental
+4. `ping_notify` sends the owner's card (silent when muted, never dropped), then the member
+   broadcast; `notify-retry` delivers any card still owed
 
 ## Configuration
 
@@ -455,11 +657,48 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
   whole database**, while still sitting inside the 90-day age cap. An age cap
   bounds nothing when a key is rewritten on a timer, so `cleanup_unbounded_tables`
   also caps history **per key** (`SETTINGS_HISTORY_PER_KEY`).
+- **Startup reconciles must be idempotent.** `startup_maintenance` runs on every
+  start (the PC reboots daily): wins first (`reconcile_win_flags`), then
+  giveaways, then outcomes, then dedupe. Each writes and counts only rows that
+  actually change — a second start must log nothing. Rules that bit: a channel
+  win always keeps `is_giveaway=1` (clearing it wiped `giveaway_status`, even
+  «claimed», and the next sweep undid it); owner decisions (claimed/scam/missed)
+  are never overwritten; wins not judged by text — the global-search placeholder
+  (`TEXTLESS_CARD_PREFIX`) and `/win` rows (`MANUAL_WIN_MARK`) — are never un-won.
+  The scanner must agree with them or every sweep undoes a start: `save_ping` keeps a
+  win's `is_win` and its higher `priority_score` sticky, and `ping_pipeline.apply_priority`
+  applies the same 90 floor to a result post as `outcome_target` (it scored 85, so 17
+  rows flipped 85↔90 between every sweep and every start).
+  `tests/test_core.py::test_startup_reconciles_are_idempotent` pins it.
+- **A mention always reaches the owner (owner's order, 2026-09-16).** Nothing may
+  drop the owner's ping card: quiet hours, the notification switch, filters and
+  rules, vacation mode and the repeat throttle only make it **silent**
+  (`bot_notify.owner_card_silent`); they still decide the *member* broadcast. A
+  card that could not be sent stays owed (`pings.notified_at IS NULL`) and
+  `notify-retry` sends it. Any new code path that stores a ping without meaning
+  to announce it must settle it (`mark_ping_notified`), or a card goes out 90 s
+  later. Account usernames change (MCshinra = session `w3v8f0rm`,
+  Megatronus_praim = `Swight0`, ktkerf427 = `Timofey02513`): match an account by
+  its live `get_me().username`, never by the session file name.
+- **Nothing periodic may be timed from process start.** The PC is switched off
+  every night, so "every N hours since startup" never fires. Store the last-run
+  time in a settings key (`audit=False`) or trigger on the measured condition —
+  see `maintenance` (`last_vacuum_at`, freelist share) and `digest_state`.
+- **Backups are snapshots, not file copies.** `database/backups.py` uses
+  `sqlite3.Connection.backup` (reads through the WAL, safe under writes) and
+  zips the result to `backups/pulse_desk_YYYYmmdd_HHMMSS.db.zip`. `shutil.copy2`
+  of the main file missed everything still in `-wal`, and after a kill
+  mid-checkpoint was not even consistent. Rotation (`housekeeping.backups_to_delete`):
+  3 newest + one per day for 7 days + one per week for 4 weeks, then the oldest
+  go until `BACKUP_MAX_TOTAL_MB` fits; the startup backup is skipped when the
+  newest copy is younger than `BACKUP_MIN_INTERVAL_HOURS`. Old plain `.db`
+  copies are listed and rotated the same way.
 - **Anything blocking goes through `asyncio.to_thread`.** The bot's Telethon
   handlers and uvicorn share one event loop (`init_bot` runs inside the FastAPI
   lifespan), so a synchronous read or a Pillow render freezes the API *and* every
-  bot button. Current users: the digest card render and the `/logs` tail
-  (`common.tail_lines`, which seeks from the end instead of reading the file).
+  bot button. Current users: the digest card render, the `/logs` tail
+  (`common.tail_lines`, which seeks from the end instead of reading the file),
+  backups (snapshot + zip) and the file prune in `maintenance`.
 - **Bot handler errors are visible.** `safe()` wraps every handler: it times it
   (`SLOW_HANDLER_SECONDS`, the early warning for callback-query expiry), counts
   calls/errors/slow runs onto `state`, records an `ERROR` app event, and reports
@@ -490,13 +729,17 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
   empty `permissions` column means "grant everything" for legacy keys, so a new
   feature code would open the admin section for every key issued before it
   existed. Grant codes are for guest-visible sections only.
-- **The Telegram Mini App and its tunnel were removed (2026-09-08)** — the
-  WebApp panel crashed the owner's Telegram client. Gone: `routers/miniapp.py`,
-  `miniapp_server.py`, `miniapp_auth.py`, `tunnel.py`, `static/app/`,
-  `webapp_row`, `state.public_url` and the `MINIAPP_*` / `TUNNEL_*` /
-  `TAILSCALE_*` / `NGROK_*` / `CLOUDFLARED_*` settings. The bot is inline
-  keyboards only. Do not reintroduce a WebApp button.
+- **The panel's port is on the internet.** Nothing but `routers/miniapp` may be
+  mounted on `miniapp_server`; every endpoint depends on `current_caller` (or a
+  stricter dependency), and every state-changing one on `fresh_admin` /
+  `fresh_caller`. `tests/test_miniapp_api.py` pins the gate (forged, stale,
+  guest). Owner areas use `admin_caller`, never a grant code (see below).
+- **The Mini App was removed on 2026-09-08 and returned on 2026-09-12.** The
+  removal was over a Telegram client crash; the owner later put it down to a
+  Telegram bug, not the panel. If a crash comes back, the fastest isolation is
+  `MINIAPP_ENABLED=false` (button and tunnel both disappear, the bot is unchanged).
 - **`cryptg` must stay installed.** Without it Telethon decrypts every MTProto packet with `pyaes`, in pure Python, on the event loop thread. With 8 accounts plus the bot that took ~50 % of the loop and starved everything else: bot callbacks expired (`QueryIdInvalidError`), awaited SQLite calls blew their 5 s busy timeout (`database is locked` storms), and the HTTP server went unreachable long enough for the watchdog to restart the app. If the bot ever "hangs" again, check `import cryptg` first.
 - **Profiling the running app:** `py-spy record --pid <pid of :8000 listener> --duration 120 --format speedscope --threads`. `database/_core.py` also logs a stack for any DB connection held ≥ `PULSE_DB_TRACE_SECONDS` (default 2 s).
-- **There is no frontend.** Node, npm and `node --check` are no longer part of this
-  project's toolchain; the only UI is Telegram inline keyboards.
+- **No frontend toolchain.** Node, npm and `node --check` are not part of this
+  project; the panel's JS is checked by opening it (the dev link above) in a browser
+  and reading the console.

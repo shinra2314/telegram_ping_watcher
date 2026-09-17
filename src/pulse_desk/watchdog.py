@@ -10,6 +10,13 @@ trigger an admin alert exactly once per outage (de-duped via ``diff_health``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
+
+# Jobs started only when their feature is configured. They report a heartbeat
+# every cycle; the window is ten polls (at least ten minutes). The panel server
+# and its tunnel are not here: they block on a server/child process and have no
+# cycle to report, so a heartbeat window would page about a healthy process.
+FEATURE_JOBS = frozenset({"obsidian-sync", "salary-sync"})
 
 
 @dataclass(frozen=True)
@@ -65,14 +72,16 @@ def default_thresholds(
     market_poll_seconds: int,
     flood_wait_max_seconds: int = 1800,
     bot_configured: bool = False,
+    enabled_features: Optional[dict[str, int]] = None,
 ) -> dict[str, int]:
     """Max seconds each monitored job may go without a successful cycle.
 
     Derived from each job's natural cadence × slack + grace, so widening a
     runtime interval (e.g. ``SCAN_INTERVAL_SECONDS``) widens its window too and
-    never produces a false "stale" alert. Only always-on critical jobs are
-    listed — optional/feature-gated loops (digest, obsidian-sync) are excluded
-    to avoid paging about a feature that is simply turned off.
+    never produces a false "stale" alert. Always-on jobs are listed
+    unconditionally; feature-gated loops (``FEATURE_JOBS``) only when
+    ``enabled_features`` names them, mapped to their poll interval in seconds,
+    so a feature that is simply turned off never pages.
 
     ``auto-scan`` reports progress *per channel* while it works (see
     ``scan_engine.scan_single_account``), so the only legitimately silent gaps
@@ -89,7 +98,23 @@ def default_thresholds(
         "market-fetch": max(600, market_poll_seconds * 3 + 120),
         # 20 s poll; a wedged outbox holds every delayed member copy.
         "pending-sends": 300,
+        # 30 s poll; a wedged loop means an owed ping card never goes out.
+        "notify-retry": 300,
+        # Hourly pass; VACUUM plus a zipped backup can take a few minutes.
+        "maintenance": 2 * 3600,
+        # Both tick every 30 s (they no longer sleep to their target time).
+        "daily-digest": 600,
+        "roulette-reminder": 600,
+        # 60 s tick: stale prompts, abandoned logins, scheduled deletions.
+        "bot-janitor": 600,
+        # 5 min tick plus an hourly get_me probe per account (20 s timeout each).
+        "account-health": 1800,
+        # 60 s tick; sends only on Mondays and the 1st.
+        "weekly-report": 600,
     }
+    for name, poll_seconds in (enabled_features or {}).items():
+        if name in FEATURE_JOBS:
+            thresholds[name] = max(600, int(poll_seconds or 0) * 10)
     if bot_configured:
         # The loop ticks at least every BOT_CONNECTION_POLL_SECONDS (15 s), and a
         # reconnect backoff tops out at 300 s, so silence past that means the

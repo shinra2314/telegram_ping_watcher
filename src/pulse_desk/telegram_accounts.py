@@ -33,6 +33,22 @@ except ImportError:  # pragma: no cover
     FloodWaitError = Exception
 
 
+def live_message_key(message: Any, session_name: str, suffix: Any = "") -> str:
+    """Dedupe key for a message every connected account receives.
+
+    Shared by all accounts, so a channel post is processed once — except when
+    Telegram flags it ``mentioned`` for this account: that flag is per account,
+    and the first account to see a reply to another one would otherwise
+    swallow it before the account it mentions got a look.
+    """
+    key = f"{getattr(message, 'chat_id', None)}:{getattr(message, 'id', None)}"
+    if suffix:
+        key += f":{suffix}"
+    if getattr(message, "mentioned", False):
+        key += f"@{session_name}"
+    return key
+
+
 def mark_account_cooldown(session_name: str, seconds: int) -> None:
     if not session_name or seconds <= 0:
         return
@@ -247,23 +263,28 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
 
         @client.on(events.NewMessage())
         async def handler(event):
+            # Proof the account still receives updates (account_health: "silent").
+            account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
                 return
-            if not state.remember_message(f"{event.chat_id}:{event.message.id}"):
+            if not state.remember_message(live_message_key(event.message, clean_name)):
                 return
-            await process_ping_message(client, event.message, account_label=account.get("display", clean_name), notify=True)
+            await process_ping_message(client, event.message, account_label=account.get("display", clean_name),
+                                       account_username=account.get("username") or "", notify=True)
 
         @client.on(events.MessageEdited())
         async def edit_handler(event):
+            account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
                 return
             edit_date = getattr(event.message, "edit_date", None) or getattr(event.message, "date", None) or ""
-            if not state.remember_message(f"edit:{event.chat_id}:{event.message.id}:{edit_date}"):
+            if not state.remember_message("edit:" + live_message_key(event.message, clean_name, edit_date)):
                 return
             await process_ping_message(
                 client,
                 event.message,
                 account_label=account.get("display", clean_name),
+                account_username=account.get("username") or "",
                 notify=True,
                 source="telegram-edit",
             )
@@ -283,7 +304,8 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
         # Capped like every other flood wait: a raw FLOOD_WAIT_86400 here parked
         # the account start for a day with nothing to show for it.
         wait = flood_wait_seconds(exc.seconds)
-        account.update({"status": "rate_limited", "last_error": f"Flood wait {exc.seconds}s"})
+        account.update({"status": "rate_limited", "last_error": f"Flood wait {exc.seconds}s",
+                        "status_since": now_iso()})
         await asyncio.sleep(wait)
         await start_client(session_name, retry_count + 1)
     except Exception as exc:

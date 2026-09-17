@@ -35,11 +35,12 @@ except Exception as _exc:  # missing deps or unloadable settings (e.g. CI w/o .e
 
 
 class FakeMessage:
-    def __init__(self, chat_id=None, message_id=None, raw_text="", date=None):
+    def __init__(self, chat_id=None, message_id=None, raw_text="", date=None, edit_date=None):
         self.chat_id = chat_id
         self.id = message_id
         self.raw_text = raw_text
         self.date = date
+        self.edit_date = edit_date
 
 
 class FakeClient:
@@ -121,6 +122,16 @@ class NotifyAgeTests(unittest.TestCase):
     def test_naive_date_is_read_as_utc(self):
         message = FakeMessage(date=(self.NOW - timedelta(hours=1)).replace(tzinfo=None))
         self.assertTrue(is_notifiable(message, now=self.NOW))
+
+    def test_fresh_edit_of_old_post_notifies(self):
+        # 15.09: a giveaway posted the day before got its winners appended by an
+        # edit; search found it 12 s later and the win arrived with no card.
+        message = FakeMessage(date=self.NOW - timedelta(hours=25), edit_date=self.NOW - timedelta(minutes=1))
+        self.assertTrue(is_notifiable(message, now=self.NOW))
+
+    def test_old_edit_of_old_post_stays_quiet(self):
+        message = FakeMessage(date=self.NOW - timedelta(days=9), edit_date=self.NOW - timedelta(days=8))
+        self.assertFalse(is_notifiable(message, now=self.NOW))
 
     def test_unknown_age_stays_quiet(self):
         self.assertFalse(is_notifiable(FakeMessage(date=None), now=self.NOW))

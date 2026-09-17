@@ -26,6 +26,8 @@ DEFAULT_MEMBER_PREFS = {
     "digest": False,
     # Minimum giveaway candidate score a member wants to see (0 = everything).
     "min_score": 0,
+    # Delete mention notifications after this many hours (0 = keep); see autoclean.py.
+    "autoclean_hours": 0,
 }
 
 # callback scope code -> (settings key, display label)
@@ -57,6 +59,10 @@ def parse_member_prefs(raw: Optional[str]) -> dict:
                     prefs[key] = max(0, min(100, int(data[key])))
                 except (TypeError, ValueError):
                     pass
+            elif key == "autoclean_hours":
+                from .autoclean import clean_hours
+
+                prefs[key] = clean_hours(data[key])
             else:
                 prefs[key] = bool(data[key])
     return prefs
@@ -66,7 +72,7 @@ def toggle_member_pref(prefs: dict, key: str) -> dict:
     """Return a new prefs dict with `key` flipped; unknown key — unchanged copy."""
     updated = dict(DEFAULT_MEMBER_PREFS)
     updated.update(prefs)
-    if key in DEFAULT_MEMBER_PREFS and key != "min_score":
+    if key in DEFAULT_MEMBER_PREFS and key not in ("min_score", "autoclean_hours"):
         updated[key] = not bool(updated.get(key))
     return updated
 
@@ -271,6 +277,9 @@ def render_notification_settings_text(settings: dict, digest_cfg: dict) -> str:
             f"Тихие часы: {quiet_state}{quiet_range}",
             f"Кулдаун: {int(settings.get('cooldown_seconds') or 0)} сек",
             "",
+            "__Упоминания вам приходят всегда: выключенное здесь, тихие часы и кулдаун "
+            "делают их беззвучными. Друзьям эти фильтры по-прежнему не пропускают.__",
+            "",
             f"📰 Дайджест: {_onoff(digest_cfg.get('enabled', True))} в {digest_cfg.get('time', DEFAULT_DIGEST_TIME)}",
         ]
     )
@@ -304,6 +313,9 @@ def render_member_prefs_text(prefs: dict, allowed: Optional[list[str]] = None, a
     else:
         lines.append("__Владелец не открыл ни одного типа уведомлений.__")
     lines.append(score_line)
+    from .autoclean import label as autoclean_label
+
+    lines.append(f"🧹 Удалять упоминания: {autoclean_label(prefs.get('autoclean_hours'))}")
     if accounts:
         lines += ["", "👤 Только по аккаунтам: " + ", ".join(f"@{name.lstrip('@')}" for name in accounts)]
     hidden = [code for code in ALL_NOTIFY if code not in codes]

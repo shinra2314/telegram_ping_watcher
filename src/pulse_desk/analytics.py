@@ -9,9 +9,12 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Optional
 
+from datetime import datetime, timedelta
+
 import aiosqlite
 
 from .app_ctx import state
+from .latency import build_latency
 
 # Seconds an analytics snapshot stays usable. The bot's 📈 section re-runs 24
 # aggregates on every tab switch, and the numbers cannot move between two clicks
@@ -225,9 +228,16 @@ async def _build_detailed_analytics_uncached() -> dict[str, Any]:
             LIMIT 16
             """
         )).fetchall()]
+        since = (datetime.now() - timedelta(days=30)).replace(microsecond=0).isoformat()
+        latency_rows = [dict(row) for row in await (await db.execute(
+            "SELECT chat, date, detected_at, is_win, edited_at, win_detected_at "
+            "FROM pings WHERE detected_at >= ?",
+            (since,),
+        )).fetchall()]
     sources = await get_source_scores(limit=8)
     channels_by_account = channel_account_stats()
     return {
+        "latency": build_latency(latency_rows),
         "heatmap": heatmap,
         "senders": senders,
         "chats": chats,

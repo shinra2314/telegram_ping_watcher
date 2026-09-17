@@ -20,9 +20,15 @@ EXPECTED_JOBS = frozenset({
     "broadcast-approval",
     "access-scheduler",
     "daily-digest",
+    "roulette-reminder",
     "source-scores",
     "market-fetch",
     "pending-sends",
+    "notify-retry",
+    "maintenance",
+    "bot-janitor",
+    "account-health",
+    "weekly-report",
 })
 
 
@@ -37,6 +43,20 @@ def expected_jobs(*, bot_configured: bool) -> set[str]:
     if bot_configured:
         expected.add("bot-connection")
     return expected
+
+
+def feature_job_polls(settings: Any) -> dict[str, int]:
+    """Feature-gated jobs this install actually starts, with their poll seconds.
+
+    Mirrors the conditions in ``main.lifespan``: ``obsidian-sync`` is always
+    started (it checks its own switch each pass and heartbeats either way),
+    ``salary-sync`` only when a workbook path is set. Fed to
+    ``watchdog.default_thresholds(enabled_features=...)``.
+    """
+    polls = {"obsidian-sync": max(5, int(getattr(settings, "obsidian_sync_poll_seconds", 30) or 30))}
+    if (getattr(settings, "salary_xlsx_path", "") or "").strip():
+        polls["salary-sync"] = max(10, int(getattr(settings, "salary_sync_poll_seconds", 60) or 60))
+    return polls
 
 
 def start_tracked_task(state: AppState, logger: logging.Logger, name: str, coro: Awaitable[Any]) -> asyncio.Task:

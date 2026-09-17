@@ -8,12 +8,14 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Optional
 
 from database import (
-    get_giveaway_actions, get_giveaway_board, get_ping_by_id, giveaway_account_counts,
+    get_giveaway_board, get_ping_by_id, giveaway_account_counts,
 )
 
+from ... import watch_settings as ws
 from ...app_ctx import state
 from ...bot_permissions import account_mentioned, accounts_allowed, full_permissions
 from ...giveaway_ops import GiveawayActionError, analyze, cleanup_candidates, leave_channel
@@ -26,6 +28,7 @@ from ..keyboards import (
 )
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
+from ..undo import remember, snapshot, undo_row
 from ..views import DIV, GiveawayFilter, account_label, fmt_dt, paginate, parse_giveaway_filter
 
 FEATURE = "giveaways"
@@ -176,20 +179,24 @@ async def _handle_action(click: Click, view: str) -> None:
         return
     if view == "sv":
         code = click.arg(3)
+        before = await snapshot([target])
         try:
             await apply_ping_meta(target, giveaway_status=code,
                                   action_status=action_for_giveaway(code))
         except UnknownStatus:
             await event.answer("Неизвестный статус", alert=True)
             return
+        token = remember(click.sender_id, before, "статус", f"gw:open:{target}")
         await event.answer("Сохранено")
         res = await open_card(target, click.perms, GiveawayFilter(), is_admin=True)
         if res is not None:
-            await _show(click, res)
+            text, kb = res
+            await _show(click, (text, undo_row(token, "статус") + kb))
         return
     if view == "lv":
         # Выход необратим — сначала подтверждение, как у рестарта и удаления ключа.
-        await safe_edit(event, _leave_confirm_text(target), buttons=leave_confirm_keyboard(target))
+        item = (state.bot_cleanup_cache.get("items") or {}).get(target)
+        await safe_edit(event, leave_confirm_text(target, item), buttons=leave_confirm_keyboard(target))
         return
     try:
         if view == "an":
@@ -202,8 +209,9 @@ async def _handle_action(click: Click, view: str) -> None:
             await skip(target)
             await event.answer("Отмечено: не участвуем")
         elif view == "lvgo":
-            await leave_channel(target)
-            await event.answer("Вышли из канала", alert=True)
+            item = (state.bot_cleanup_cache.get("items") or {}).get(target) or {}
+            left = await leave_channel(target, item.get("accounts") or None)
+            await event.answer(f"Вышли из канала: аккаунтов {left}", alert=True)
             await _show_cleanup(click, 0)
             return
     except GiveawayActionError as exc:
@@ -217,28 +225,52 @@ async def _handle_action(click: Click, view: str) -> None:
         await _show(click, res)
 
 
-def _leave_confirm_text(chat_id: int) -> str:
-    return (
-        "🚪 **Выйти из канала?**\n" + DIV +
-        f"\nКанал: `{chat_id}`\n\n"
-        "__Действие необратимо: вернуться в приватный канал можно только по новой "
-        "ссылке-приглашению.__"
-    )
+def leave_confirm_text(chat_id: int, item: Optional[dict] = None) -> str:
+    item = item or {}
+    lines = ["🚪 **Выйти из канала?**", DIV, f"Канал: **{item.get('title') or chat_id}**"]
+    accounts = item.get("accounts") or []
+    if accounts:
+        lines.append("👤 Выйдут: " + ", ".join(f"`{a}`" for a in accounts))
+    else:
+        lines.append("👤 Выйдет аккаунт действий")
+    if item.get("inactive_days") is not None:
+        lines.append(f"🕐 Молчит: `{item.get('inactive_days')}` дн")
+    if int(item.get("wins") or 0):
+        lines.append(f"🏆 **Побед за 90 дней: {item['wins']}** — канал платил, подумайте ещё раз.")
+    lines.append("\n__Действие необратимо: вернуться в приватный канал можно только по новой "
+                 "ссылке-приглашению.__")
+    return "\n".join(lines)
+
+
+def cleanup_text(data: dict) -> str:
+    items = data.get("candidates") or []
+    safe_count = sum(1 for i in items if not int(i.get("wins") or 0))
+    lines = [
+        "🧹 **Мёртвые каналы**", DIV,
+        f"🛰 Аккаунтов проверено: `{data.get('accounts', 0)}`",
+        f"🕐 Молчат дольше: `{data.get('inactive_days', '—')}` дн",
+        f"📦 Найдено: `{len(items)}` · без побед за {data.get('win_days', 90)} дн: `{safe_count}`",
+    ]
+    if data.get("warning"):
+        lines.append(f"⚠️ {data['warning']}")
+    lines.append("\n__Сначала каналы без побед. 🏆 — канал уже платил. Выход — из всех аккаунтов, что в нём сидят.__")
+    return "\n".join(lines)
 
 
 async def _show_cleanup(click: Click, page: int) -> None:
     """Каналы, которые давно молчат: кандидаты на выход."""
-    data = await cleanup_candidates(limit=200)
+    cache = state.bot_cleanup_cache
+    fresh = cache.get("at") and datetime.now() - cache["at"] < timedelta(minutes=10)
+    if page and fresh:
+        # Paging must not re-walk every account's dialogs.
+        items = sorted(cache["items"].values(),
+                       key=lambda i: (int(i.get("wins") or 0) > 0, -int(i.get("inactive_days") or 0)))
+        data = {"candidates": items, "accounts": len({a for i in items for a in i.get("accounts", [])}),
+                "inactive_days": ws.GIVEAWAY_INACTIVE_CHANNEL_DAYS, "win_days": 90}
+    else:
+        data = await cleanup_candidates()
     items = data.get("candidates") or []
-    lines = [
-        "🧹 **Мёртвые каналы**", DIV,
-        f"👤 Аккаунт действий: `{data.get('action_account')}`",
-        f"🕐 Молчат дольше: `{data.get('inactive_days', '—')}` дн",
-    ]
-    if data.get("warning"):
-        lines.append(f"⚠️ {data['warning']}")
-    lines.append(f"📦 Найдено: `{len(items)}`")
-    await safe_edit(click.event, "\n".join(lines),
+    await safe_edit(click.event, cleanup_text(data),
                     buttons=cleanup_keyboard(items, page), link_preview=False)
 
 

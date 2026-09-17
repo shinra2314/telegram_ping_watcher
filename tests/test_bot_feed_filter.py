@@ -19,7 +19,7 @@ for path in (str(ROOT), str(SRC_DIR)):
 
 from pulse_desk.bot.views import (  # noqa: E402
     FEED_SORTS, FEED_STATUSES, FEED_TYPES, FeedFilter, describe_feed_filter,
-    feed_filter_cb, feed_filter_from_legacy, parse_feed_filter,
+    feed_filter_from_legacy, parse_feed_filter,
 )
 
 CALLBACK_LIMIT = 64

@@ -15,6 +15,7 @@ from database import get_events, get_scan_runs, get_settings_history
 from ...health_report import diagnostics as build_diagnostics, setup_checks, setup_ready
 from ..chrome import dot, empty, header, kv
 from ..reply import safe_edit
+from .backups import maintenance_lines
 from ..router import CallbackRouter, Click
 from ..views import DIV, fmt_dt
 
@@ -31,6 +32,8 @@ def report_card(report: dict[str, Any], checks: list[dict[str, Any]]) -> str:
         f"{kv('🧬', 'Схема', report.get('schema_version'))}",
         f"{kv('⚙️', 'Джобы', len(scan.get('background_tasks') or []))}   "
         f"{kv('📦', 'Копий', db.get('backup_count', 0))}",
+        f"{kv('🔔', 'Не доставлено', report.get('owed_ping_cards', 0))}",
+        *maintenance_lines(report.get("maintenance")),
         DIV,
         "🧾 **Готовность**",
     ]
@@ -99,7 +102,8 @@ async def _show_history(click: Click) -> None:
     if not rows:
         lines.append(empty("Правок не было."))
     for row in rows:
-        lines.append(f"`{fmt_dt(row.get('created_at'))}` · {row.get('key')}")
+        # The column is `changed_at`; reading `created_at` printed «—» for every row.
+        lines.append(f"`{fmt_dt(row.get('changed_at'))}` · {row.get('key')}")
     await safe_edit(click.event, "\n".join(lines), buttons=back_keyboard())
 
 

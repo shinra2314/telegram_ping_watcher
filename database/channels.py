@@ -1,6 +1,7 @@
 """Channel profiles and source reliability scores."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import aiosqlite
@@ -97,3 +98,28 @@ async def get_source_score(chat_id: int) -> Optional[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT * FROM source_scores WHERE chat_id = ?", (chat_id,))).fetchone()
         return dict(row) if row else None
+
+
+async def channel_win_stats(chat_ids: list[int], days: int = 90) -> dict[int, dict]:
+    """Per channel (``pings.chat_id``): pings and wins in the last ``days``, last win."""
+    ids = sorted({int(c) for c in chat_ids})
+    if not ids:
+        return {}
+    since = (datetime.now() - timedelta(days=days)).replace(microsecond=0).isoformat()
+    out: dict[int, dict] = {}
+    async with _connect() as db:
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            rows = await (await db.execute(
+                f"""
+                SELECT chat_id, COUNT(*) AS pings, COALESCE(SUM(is_win), 0) AS wins,
+                       MAX(CASE WHEN is_win = 1 THEN detected_at END) AS last_win_at
+                FROM pings
+                WHERE chat_id IN ({','.join('?' * len(batch))}) AND detected_at >= ?
+                GROUP BY chat_id
+                """,
+                (*batch, since),
+            )).fetchall()
+            for chat_id, pings, wins, last_win_at in rows:
+                out[int(chat_id)] = {"pings": int(pings or 0), "wins": int(wins or 0), "last_win_at": last_win_at}
+    return out

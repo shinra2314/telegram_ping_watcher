@@ -75,18 +75,26 @@ def has_readable_text(message: Any) -> bool:
 def is_notifiable(message: Any, now: Optional[datetime] = None, max_age: float = NOTIFY_MAX_AGE_SECONDS) -> bool:
     """Whether a search hit is fresh enough to be worth pinging the owner about.
 
+    Age is counted from the latest of the post and its last edit. Channels
+    append the winners to the giveaway post itself, often a day or more after
+    posting; judged by ``date`` alone that win was "backlog" and was stored
+    with no card at all — and the sweep that would have announced it then
+    found it already a win.
+
     A message with no usable date stays quiet: an unknown age is far more
     likely to be backlog than breaking news.
     """
-    date = getattr(message, "date", None)
-    if not isinstance(date, datetime):
+    stamps = [
+        stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+        for stamp in (getattr(message, "date", None), getattr(message, "edit_date", None))
+        if isinstance(stamp, datetime)
+    ]
+    if not stamps:
         return False
     reference = now or datetime.now(timezone.utc)
-    if date.tzinfo is None:
-        date = date.replace(tzinfo=timezone.utc)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=timezone.utc)
-    return (reference - date).total_seconds() <= float(max_age)
+    return (reference - max(stamps)).total_seconds() <= float(max_age)
 
 
 def textless_card_text(mentions: list[str], link: str = "") -> str:
@@ -142,6 +150,7 @@ async def scan_global_mentions(
     *,
     account_label: str = "",
     session_name: str = "",
+    account_username: str = "",
 ) -> int:
     """One global-search pass per tracked username for a single account."""
     limit = global_search_limit()
@@ -179,7 +188,8 @@ async def scan_global_mentions(
                 # There is text: let the normal parser decide, it is stricter
                 # than a prefix-matching search query.
                 ping_id = await process_ping_message(
-                    client, message, account_label=account_label, notify=notify, source="global-search",
+                    client, message, account_label=account_label, account_username=account_username,
+                    notify=notify, source="global-search",
                 )
             else:
                 cards += 1
@@ -193,7 +203,8 @@ async def scan_global_mentions(
                         await asyncio.sleep(wait)
                         win_refs = set()
                 ping_id = await process_ping_message(
-                    client, message, account_label=account_label, notify=notify, source="global-search",
+                    client, message, account_label=account_label, account_username=account_username,
+                    notify=notify, source="global-search",
                     search_mentions=[username],
                     search_text=textless_card_text([username]),
                     search_is_win=message_ref(message) in (win_refs or set()),

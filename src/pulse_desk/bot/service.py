@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from telethon import events
-from telethon.errors import FloodWaitError, MessageIdInvalidError, MessageNotModifiedError
+from telethon import Button, events
+from telethon.errors import FloodWaitError
+# Re-exported for tests that build these errors through this module.
+from telethon.errors import MessageIdInvalidError, MessageNotModifiedError  # noqa: F401
 
 from .. import watch_settings as ws
 from ..access_control import find_undoable, plan_undo
@@ -55,7 +58,7 @@ from .sections import (
     scan as scan_section,
     settings as settings_section,
 )
-from .pending import consume as consume_pending, pending_expired, take_pending
+from .pending import consume as consume_pending, delete_quietly, pending_expired, take_pending
 # Re-exported: the message-delivery helpers moved to reply.py so section
 # modules can answer without importing this module back.
 from .reply import (  # noqa: F401
@@ -158,6 +161,7 @@ async def init_bot() -> None:
         logger.info("Telegram bot is not configured.")
         return
     state.bot_init_failed = False
+    bot_client = None
     try:
         bot_client = telegram_client_for_session("pulse_bot")
         await bot_client.start(bot_token=BOT_TOKEN)
@@ -319,6 +323,18 @@ async def init_bot() -> None:
                 + "\n\nВыберите раздел 👇",
                 buttons=await home_section.menu_buttons(event.sender_id, role),
             )
+            if is_new_member:
+                # The owner hears about every new person, and a one-time invite
+                # says it has now been used up.
+                once = int(key.get("max_uses") or 0) == 1
+                who = f"@{uname}" if uname else (name or str(event.sender_id))
+                note = "\n🎟 __Одноразовый ключ использован — ссылка больше не откроет доступ.__" if once else ""
+                from ..bot_notify import send_admin_bot_message
+
+                await send_admin_bot_message(
+                    f"🔑 **Новый участник:** {who}\nКлюч #{key.get('id')} · {key.get('label') or 'без метки'}{note}",
+                    kind="system",
+                )
             if is_new_member and role != "admin":
                 # First-time onboarding: let the member tune notifications right away.
                 prefs = parse_member_prefs(None)
@@ -343,7 +359,7 @@ async def init_bot() -> None:
         async def start_handler(event):
             payload = (event.pattern_match.group(1) or "").strip()
             if payload:
-                key = await get_bot_key_by_secret(payload)
+                key = await get_bot_key_by_secret(payload, event.sender_id)
                 if key:
                     await grant_access(event, key)
                     return
@@ -370,7 +386,7 @@ async def init_bot() -> None:
             if not payload:
                 await event.respond("Использование: `/redeem <ключ>`")
                 return
-            key = await get_bot_key_by_secret(payload)
+            key = await get_bot_key_by_secret(payload, event.sender_id)
             if not key:
                 await event.respond("❌ **Ключ недействителен или отозван.**")
                 return
@@ -516,12 +532,55 @@ async def init_bot() -> None:
                 buttons=logs_keyboard(),
             )
 
-        @bot_client.on(events.NewMessage(pattern="/export"))
+        @bot_client.on(events.NewMessage(pattern=r"/export(?:\s+(\S+))?"))
         @safe
         async def export_bot_handler(event):
             if await deny_non_admin(event):
                 return
-            await event.respond("📤 **Экспорт CSV**\n" + DIV + "\nДоступен в веб-интерфейсе: `/api/export-csv`")
+            # `/export json` for JSON; anything else is CSV. Filtered exports
+            # live on the feed screen's ⬇️ buttons.
+            fmt = "j" if (event.pattern_match.group(1) or "").lower().startswith("j") else "c"
+            file, count = await feed_section.export_all(fmt)
+            if file is None:
+                await event.respond("📭 Выгружать пока нечего.")
+                return
+            await event.respond(
+                f"📤 **Экспорт** · {count} записей\n__С фильтрами — кнопкой ⬇️ в ленте.__",
+                file=file,
+            )
+
+        @bot_client.on(events.NewMessage(pattern=r"/report(?:\s+(\S+))?"))
+        @safe
+        async def report_handler(event):
+            if await deny_non_admin(event):
+                return
+            from .sections import report as report_section
+
+            arg = (event.pattern_match.group(1) or "").lower()
+            code = "m" if arg.startswith(("m", "мес")) else "w"
+            caption, card = await report_section.render(*report_section.VIEWS[code])
+            await event.respond(caption, file=card, buttons=report_section.keyboard(code))
+
+        @bot_client.on(events.NewMessage(pattern=r"/win(?:\s+(.+))?"))
+        @safe
+        async def win_handler(event):
+            if await deny_non_admin(event):
+                return
+            parts = (event.pattern_match.group(1) or "").split()
+            if not parts:
+                await event.respond(
+                    "🏆 **Добавить победу вручную**\n" + DIV + "\n"
+                    "`/win <ссылка на пост> [@аккаунт]`\n\n"
+                    "Для побед, которые бот не поймал: итоги картинкой, ночь с выключенным ПК, "
+                    "результат в личке. Аккаунт можно не указывать, если он упомянут в посте.",
+                    link_preview=False,
+                )
+                return
+            from ..manual_win import record_manual_win
+
+            result = await record_manual_win(parts[0], parts[1:])
+            buttons = [[Button.inline("💰 К долгам", b"menu_debts")]] if result.ok else None
+            await event.respond(result.message, buttons=buttons, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern="/scan"))
         @safe
@@ -566,6 +625,30 @@ async def init_bot() -> None:
             if screen:
                 text, kb = screen
                 await event.respond("⚙️ **Настройте ключ перед отправкой**\n\n" + text, buttons=kb)
+
+        @bot_client.on(events.NewMessage(pattern=r"/invite(?:\s+(.+))?"))
+        @safe
+        async def invite_handler(event):
+            """One-time invite: a viewer key that closes after its first person."""
+            if await deny_non_admin(event):
+                return
+            from database import set_bot_key_max_uses
+
+            label = (event.pattern_match.group(1) or "").strip() or "приглашение"
+            secret = generate_access_key()
+            key = await create_bot_key(label[:40], secret, "viewer", None, dump_permissions(full_permissions()))
+            await set_bot_key_max_uses(int(key["id"]), 1)
+            link = f"https://t.me/{bot_username}?start={secret}" if bot_username else f"`/redeem {secret}`"
+            await event.respond(
+                "🎟 **Одноразовое приглашение**\n" + DIV + "\n"
+                f"🏷 {label}\n🔗 {link}\n\n"
+                "__Сработает для одного человека — потом ссылка закроется. Права — в панели ключа.__",
+                link_preview=False,
+            )
+            screen = await keys_section.render_panel(int(key["id"]))
+            if screen:
+                text, kb = screen
+                await event.respond(text, buttons=kb)
 
         @bot_client.on(events.NewMessage(pattern="/keys"))
         @safe
@@ -761,6 +844,7 @@ async def init_bot() -> None:
                 pending = take_pending(event.sender_id)
                 if pending:
                     if pending_expired(pending):
+                        await delete_quietly(pending.get("chat_id"), pending.get("cleanup") or [])
                         await event.respond(
                             "⌛ Время ввода истекло — поле сброшено.\nОткройте меню заново: /menu",
                             buttons=await home_section.menu_buttons(event.sender_id, role),
@@ -784,7 +868,7 @@ async def init_bot() -> None:
                 await event.respond(notice)
                 return
             # Treat a bare message as a possible access key for non-members.
-            key = await get_bot_key_by_secret((event.message.text or "").strip())
+            key = await get_bot_key_by_secret((event.message.text or "").strip(), event.sender_id)
             if key:
                 await grant_access(event, key)
                 return
@@ -833,9 +917,12 @@ async def init_bot() -> None:
                     BotCommand("export", "CSV выгрузка"),
                     BotCommand("newkey", "Создать ключ"),
                     BotCommand("keys", "Ключи доступа"),
+                    BotCommand("invite", "Одноразовое приглашение"),
                     BotCommand("members", "Пользователи"),
                     BotCommand("access", "Доступ по расписанию"),
                     BotCommand("actions", "История действий по розыгрышам"),
+                    BotCommand("win", "Добавить победу вручную"),
+                    BotCommand("report", "Отчёт за неделю / месяц"),
                     BotCommand("roulette", "Рулетка йобо"),
                     # Только в списке владельца: в общем меню команда выдала бы
                     # существование раздела зарплат ключам без метки.
@@ -856,3 +943,48 @@ async def init_bot() -> None:
         state.bot_init_failed = True
         logger.exception("Bot startup failed")
         await record_app_event("ERROR", "telegram", "Bot startup failed", {"error": str(exc)})
+        if bot_client is not None and state.bot_client is not bot_client:
+            # Never published: close it, or the retry's client would fight it
+            # for the pulse_bot session file.
+            with contextlib.suppress(Exception):
+                await bot_client.disconnect()
+            state.bot_offline_since = state.bot_offline_since or datetime.now()
+
+
+def bot_start_needs_retry() -> bool:
+    """The first ``init_bot`` failed before the client came up."""
+    return bool(BOT_TOKEN) and state.bot_client is None and state.bot_init_failed
+
+
+async def retry_bot_start() -> None:
+    """Keep starting the bot after a failed first try (``bot-start-retry`` task).
+
+    Pings found meanwhile are stored with their card owed, so once the bot is up
+    ``notify-retry`` delivers them; the owner is told how long it was down.
+    """
+    from database import count_owed_ping_notifications
+
+    from ..bot_connection import keep_starting_bot
+    from ..bot_notify import send_admin_bot_message
+
+    if not bot_start_needs_retry():
+        return
+    down_since = state.bot_offline_since or datetime.now()
+
+    async def announce(attempts: int) -> None:
+        minutes = max(1, int((datetime.now() - down_since).total_seconds() // 60))
+        owed = await count_owed_ping_notifications()
+        text = f"🤖 Бот снова на связи: не мог запуститься с {down_since:%H:%M} ({minutes} мин, попыток: {attempts})."
+        if owed:
+            text += f"\nДосылаю пропущенные уведомления: {owed}."
+        await record_app_event("INFO", "telegram", "Bot started after retries",
+                               {"attempts": attempts, "down_minutes": minutes, "owed_cards": owed})
+        await send_admin_bot_message(text)
+
+    await keep_starting_bot(
+        init_bot,
+        is_started=lambda: state.bot_client is not None,
+        should_stop=lambda: state.shutting_down,
+        on_started=announce,
+        logger=logger,
+    )

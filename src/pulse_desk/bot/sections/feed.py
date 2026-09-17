@@ -34,9 +34,10 @@ from ..keyboards import (
     MON_FILTERS, feed_filters_keyboard, feed_keyboard, feed_presets_keyboard, ping_card_keyboard,
     ping_giveaway_keyboard, ping_status_keyboard, ping_tags_keyboard,
 )
-from ..pending import prompt_pending, register_prompt
+from ..pending import InputRejected, prompt_pending, register_prompt
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
+from ..undo import remember, snapshot, undo_row
 from ..views import (
     DIV, FEED_SORT_DB, FEED_STATUS_DB, FEED_TYPE_CODE, FeedFilter, describe_feed_filter,
     feed_filter_from_legacy, feed_state_cb, fmt_dt, giveaway_status_label, parse_feed_filter,
@@ -197,20 +198,20 @@ async def _show_feed(click: Click, state_filter: FeedFilter) -> None:
     await safe_edit(click.event, text, buttons=kb, link_preview=False)
 
 
-async def _show_card(click: Click, ping_id: int, state_filter: FeedFilter) -> None:
+async def _show_card(click: Click, ping_id: int, state_filter: FeedFilter,
+                     undo_token: Optional[str] = None) -> None:
     res = await open_card(ping_id, click.role == "admin", click.perms, state_filter)
     if res is None:
         await click.event.answer(NOT_FOUND, alert=True)
         return
     text, kb = res
-    await safe_edit(click.event, text, buttons=kb, link_preview=False)
+    await safe_edit(click.event, text, buttons=undo_row(undo_token, "статус") + kb, link_preview=False)
 
 
 # ---- свободный ввод -----------------------------------------------------
 async def _consume_search(event, pending: dict, raw: str) -> None:
     if not raw:
-        await event.respond("❌ Пустой запрос.")
-        return
+        raise InputRejected("❌ Пустой запрос.")
     # Поиск открыт всем, у кого есть раздел, поэтому выборка рисуется правами
     # именно этого человека: по ключу, привязанному к одному аккаунту, чужие
     # упоминания не должны находиться поиском.
@@ -237,8 +238,7 @@ async def _consume_tag(event, pending: dict, raw: str) -> None:
     ping_id = int(pending.get("scope") or 0)
     tag = raw.strip().lstrip("#")[:24]
     if not ping_id or not tag:
-        await event.respond("❌ Пустой тег.")
-        return
+        raise InputRejected("❌ Пустой тег.")
     tags = await add_ping_tag(ping_id, tag)
     await event.respond(f"✅ Тег «{tag}» добавлен.",
                         buttons=ping_tags_keyboard(ping_id, tags))
@@ -247,8 +247,7 @@ async def _consume_tag(event, pending: dict, raw: str) -> None:
 async def _consume_preset_name(event, pending: dict, raw: str) -> None:
     name = raw.strip()[:40]
     if not name:
-        await event.respond("❌ Пустое имя.")
-        return
+        raise InputRejected("❌ Пустое имя.")
     state_filter = parse_feed_filter((pending.get("scope") or "").split(":"))
     presets = await _load_presets()
     presets = [p for p in presets if p.get("name") != name]
@@ -260,8 +259,8 @@ async def _consume_preset_name(event, pending: dict, raw: str) -> None:
 
 SEARCH_INPUT = register_prompt(
     "feed_search", "Пришлите текст для поиска по упоминаниям.", _consume_search, admin=False)
-NOTE_INPUT = register_prompt("ping_note", "Пришлите заметку к записи.", _consume_note)
-TAG_INPUT = register_prompt("ping_tag", "Пришлите тег (одно слово).", _consume_tag)
+NOTE_INPUT = register_prompt("ping_note", "Пришлите заметку к записи.", _consume_note, keep_screen=True)
+TAG_INPUT = register_prompt("ping_tag", "Пришлите тег (одно слово).", _consume_tag, keep_screen=True)
 PRESET_INPUT = register_prompt(
     "feed_preset", "Пришлите имя для этой выборки (до 40 символов).", _consume_preset_name)
 
@@ -323,6 +322,21 @@ def _export_bytes(rows: Sequence[dict], fmt: str) -> tuple[bytes, str]:
         writer.writerow({k: row.get(k) for k in EXPORT_COLUMNS})
     # BOM — иначе Excel открывает кириллицу кракозябрами.
     return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8"), "pings.csv"
+
+
+async def export_all(fmt: str = "c") -> tuple[Optional[io.BytesIO], int]:
+    """Вся лента без фильтров, свежие сверху — для команды `/export`.
+
+    Раньше команда отсылала в веб (`/api/export-csv`), которого больше нет.
+    Возвращает (файл, число строк); файла нет, когда выгружать нечего.
+    """
+    rows = await get_pings(limit=EXPORT_LIMIT, sort_by="detected_at", sort_order="DESC")
+    if not rows:
+        return None, 0
+    payload, name = _export_bytes(rows, fmt)
+    buffer = io.BytesIO(payload)
+    buffer.name = name
+    return buffer, len(rows)
 
 
 # ---- обработчики --------------------------------------------------------
@@ -568,13 +582,17 @@ async def _apply(click: Click, ping_id: int, state_filter: FeedFilter, **changes
     if click.role != "admin":
         await click.event.answer("Только владелец", alert=True)
         return
+    status_change = any(key in changes for key in ("status", "giveaway_status", "action_status"))
+    before = await snapshot([ping_id]) if status_change else {}
     try:
         await apply_ping_meta(ping_id, **changes)
     except UnknownStatus:
         await click.event.answer("Неизвестный статус", alert=True)
         return
+    token = (remember(click.sender_id, before, "статус", ping_open_cb(ping_id, state_filter).decode())
+             if status_change else None)
     await click.event.answer("Сохранено")
-    await _show_card(click, ping_id, state_filter)
+    await _show_card(click, ping_id, state_filter, token)
 
 
 async def _show_history(click: Click, ping_id: int, state_filter: FeedFilter) -> None:

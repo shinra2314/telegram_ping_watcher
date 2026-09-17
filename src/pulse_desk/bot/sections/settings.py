@@ -15,6 +15,7 @@ from typing import Any
 
 from telethon import Button
 
+from database import get_setting, set_setting
 from telegram_ping_watcher import normalize_usernames
 
 from ... import watch_settings as ws
@@ -23,7 +24,7 @@ from ...bot_prefs import (
     KEYWORD_SCOPES, parse_hhmm, parse_quiet_hours_input, render_keyword_list_text,
     render_notification_settings_text, render_tracking_text,
 )
-from ..pending import clear_pending, prompt_pending, register_prompt
+from ..pending import InputRejected, cancel_pending, clear_pending, prompt_pending, register_prompt
 from ..persist import (
     save_digest, save_keywords, save_notifications, save_runtime, save_tracking,
 )
@@ -89,8 +90,12 @@ async def keyword_list_menu(code: str) -> tuple[str, list[list[Button]]]:
 
 
 async def notifications_menu() -> tuple[str, list[list[Button]]]:
+    from ...autoclean import SETTINGS_KEY, label, owner_hours
+    from ...ignored_chats import load as ignored_load
+
     notif = await ws.load_notification_settings()
     digest_cfg = await ws.load_digest_settings()
+    autoclean = label(owner_hours(await get_setting(SETTINGS_KEY, None)))
     quiet = notif.get("quiet_hours") or {}
     mark = lambda value: "✅" if value else "❌"  # noqa: E731
     buttons = [
@@ -106,17 +111,21 @@ async def notifications_menu() -> tuple[str, list[list[Button]]]:
         [Button.inline("🕘 Часы тишины…", b"st_n_qt"), Button.inline("⏱ Кулдаун…", b"st_n_cd")],
         [Button.inline(f"{mark(digest_cfg.get('enabled'))} Дайджест", b"st_d_en"),
          Button.inline("🕘 Время дайджеста…", b"st_d_tm")],
+        [Button.inline(f"🧹 Удалять мелкие: {autoclean}", b"st_n_ac")],
+        [Button.inline(f"🔇 Игнор-чаты: {len(await ignored_load())}", b"igc")],
         BACK,
     ]
-    return render_notification_settings_text(notif, digest_cfg), buttons
+    text = render_notification_settings_text(notif, digest_cfg)
+    text += (f"\n🧹 Мелкие уведомления (упоминания, курсы, «восстановилось»): удалять {autoclean}."
+             "\n__Победы и розыгрыши не удаляются никогда.__")
+    return text, buttons
 
 
 # ---- typed input --------------------------------------------------------
 async def _consume_track_add(event, pending: dict, raw: str) -> None:
     additions = normalize_usernames(re.split(r"[\s,;]+", raw))
     if not additions:
-        await event.respond("❌ Не распознал юзернеймы. Откройте меню и попробуйте ещё раз.")
-        return
+        raise InputRejected("❌ Не распознал юзернеймы.")
     merged = list(state.ping_usernames)
     added = [u for u in additions if u not in merged]
     merged.extend(added)
@@ -131,8 +140,7 @@ async def _consume_track_rm(event, pending: dict, raw: str) -> None:
     items = list(state.ping_usernames)
     idx = resolve_removal(items, raw)
     if idx is None:
-        await event.respond("❌ Не нашёл такой юзернейм. Пришлите номер из списка.")
-        return
+        raise InputRejected("❌ Не нашёл такой юзернейм. Пришлите номер из списка.")
     removed = items.pop(idx)
     await save_tracking(items)
     note = f"🗑 Удалён: {removed}"
@@ -154,15 +162,13 @@ async def _consume_keywords(event, pending: dict, raw: str) -> None:
             parts = [p.lower() for p in parts]
         added = [p for p in parts if p not in items]
         if not added:
-            await event.respond("ℹ️ Нечего добавлять — пусто или уже в списке.")
-            return
+            raise InputRejected("ℹ️ Нечего добавлять — пусто или уже в списке.")
         items.extend(added)
         note = "✅ Добавлено: " + ", ".join(added)
     else:
         idx = resolve_removal(items, raw)
         if idx is None:
-            await event.respond("❌ Не нашёл такое слово. Пришлите номер из списка.")
-            return
+            raise InputRejected("❌ Не нашёл такое слово. Пришлите номер из списка.")
         if code in ("w", "g") and len(items) == 1:
             await event.respond("⚠️ Этот список не может быть пустым — удаление отменено.")
             return
@@ -176,8 +182,7 @@ async def _consume_keywords(event, pending: dict, raw: str) -> None:
 async def _consume_quiet(event, pending: dict, raw: str) -> None:
     parsed = parse_quiet_hours_input(raw)
     if not parsed:
-        await event.respond("❌ Формат: `23:00-08:00`. Попробуйте ещё раз через меню.")
-        return
+        raise InputRejected("❌ Формат: `23:00-08:00`.")
     notif = await ws.load_notification_settings()
     notif["quiet_hours"] = {"enabled": True, "from": parsed[0], "to": parsed[1]}
     await save_notifications(notif)
@@ -189,8 +194,7 @@ async def _consume_cooldown(event, pending: dict, raw: str) -> None:
     try:
         value = max(0, min(3600, int(raw)))
     except ValueError:
-        await event.respond("❌ Нужно число секунд (0–3600).")
-        return
+        raise InputRejected("❌ Нужно число секунд (0–3600).")
     notif = await ws.load_notification_settings()
     notif["cooldown_seconds"] = value
     await save_notifications(notif)
@@ -201,8 +205,7 @@ async def _consume_cooldown(event, pending: dict, raw: str) -> None:
 async def _consume_digest_time(event, pending: dict, raw: str) -> None:
     parsed_time = parse_hhmm(raw)
     if not parsed_time:
-        await event.respond("❌ Формат: `09:00`. Попробуйте ещё раз через меню.")
-        return
+        raise InputRejected("❌ Формат: `09:00`.")
     cfg = await ws.load_digest_settings()
     cfg["time"] = parsed_time
     await save_digest(cfg)
@@ -303,8 +306,7 @@ async def _consume_field(event, pending: dict, raw: str) -> None:
         return
     ok, note = await apply_field(index, raw)
     if not ok:
-        await event.respond(note)
-        return
+        raise InputRejected(note)
     text, buttons = field_menu(index, await runtime_values())
     await event.respond(f"{note}\n\n{text}", buttons=buttons)
 
@@ -382,8 +384,7 @@ async def rules_menu() -> tuple[str, list[list[Button]]]:
 async def _consume_rule(event, pending: dict, raw: str) -> None:
     rule, error = parse_rule(raw)
     if error:
-        await event.respond(error)
-        return
+        raise InputRejected(error)
     notif = await ws.load_notification_settings()
     rules = [r for r in (notif.get("rules") or []) if isinstance(r, dict)]
     rules.append(rule)
@@ -402,11 +403,12 @@ async def handle(click: Click) -> None:
     # Cancelling an armed prompt is the one action a member may take here.
     if data in ("st", "st_x"):
         if data == "st_x":
-            clear_pending(click.sender_id)
+            # The prompt message (this button's own) goes away; the screen the
+            # prompt was opened from is still above it, so nothing is re-shown.
             await event.answer("Отменено")
-            if click.role != "admin":
-                return
-        elif click.role != "admin":
+            await cancel_pending(event)
+            return
+        if click.role != "admin":
             await event.answer("Только владелец", alert=True)
             return
         else:
@@ -483,6 +485,15 @@ async def handle(click: Click) -> None:
         return
     if data == "st_d_tm":
         await prompt_pending(event, DIGEST_TIME)
+        return
+    if data == "st_n_ac":
+        from ...autoclean import SETTINGS_KEY, label, next_choice, owner_hours
+
+        hours = next_choice(owner_hours(await get_setting(SETTINGS_KEY, None)))
+        await set_setting(SETTINGS_KEY, {"hours": hours})
+        text, buttons = await notifications_menu()
+        await safe_edit(event, text, buttons=buttons)
+        await event.answer(f"Мелкие уведомления: {label(hours)}")
         return
     if data == "st_n":
         text, buttons = await notifications_menu()

@@ -2,6 +2,9 @@
 migration branch here when the schema changes."""
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import aiosqlite
 
 from ._core import SCHEMA_VERSION, _columns, _connect, _now_iso, _sync_ping_indexes
@@ -9,7 +12,12 @@ from .backups import backup_db_if_present
 
 
 async def init_db() -> None:
-    backup_db_if_present()
+    # A snapshot + zip of the whole file — off the event loop. A failed backup
+    # (full disk, locked file) is logged, never a reason to refuse to start.
+    try:
+        await asyncio.to_thread(backup_db_if_present)
+    except Exception:
+        logging.getLogger("pulse_desk").exception("Startup database backup failed")
     async with _connect() as db:
         await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await db.execute(
@@ -503,6 +511,66 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_key ON bot_members(key_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_source_scores_score ON source_scores(score DESC, total_pings DESC)"
+        )
+
+        # --- schema 23: clean chat + one-time invites -------------------------
+        # Bot messages to delete later: minor notifications (mentions, market
+        # alerts, recovery notices) for whoever switched auto-delete on. Telegram
+        # lets a bot delete a private-chat message only while it is under 48 h
+        # old, so `delete_after` is always set inside that window.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_ephemeral_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                delete_after TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ephemeral_due ON bot_ephemeral_messages(delete_after)"
+        )
+        # 0 = unlimited (every key issued before this column existed).
+        if "max_uses" not in await _columns(db, "bot_access_keys"):
+            await db.execute("ALTER TABLE bot_access_keys ADD COLUMN max_uses INTEGER NOT NULL DEFAULT 0")
+        # Detection latency (latency.py): a win usually arrives as an edit of an
+        # old post, so its delay is edit → the moment the row became a win. Both
+        # stay NULL on rows stored before this, and those are left out of stats.
+        ping_cols = await _columns(db, "pings")
+        if "edited_at" not in ping_cols:
+            await db.execute("ALTER TABLE pings ADD COLUMN edited_at TEXT")
+        if "win_detected_at" not in ping_cols:
+            await db.execute("ALTER TABLE pings ADD COLUMN win_detected_at TEXT")
+        # Copies of one winners post point at the primary row (dedupe.py); the
+        # debts board lists primaries only.
+        if "duplicate_of" not in ping_cols:
+            await db.execute("ALTER TABLE pings ADD COLUMN duplicate_of INTEGER")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pings_duplicate_of ON pings(duplicate_of)")
+
+        # --- schema 24: the owner's ping cards are an outbox -------------------
+        # A card used to be one shot: sent on first detection or never, because
+        # every later pass finds the row already stored. `notified_at` is when the
+        # owner's card went out, `win_notified_at` when a 🏆 card did (a win that
+        # was edited into a known post owes a second card). NULL = still owed;
+        # `ping_notify.retry_owed_notifications` delivers it. Rows stored before
+        # this column are settled here, or the first start would page the owner
+        # with the whole history.
+        if "notified_at" not in ping_cols:
+            await db.execute("ALTER TABLE pings ADD COLUMN notified_at TEXT")
+            await db.execute("UPDATE pings SET notified_at = COALESCE(detected_at, ?)", (_now_iso(),))
+        if "win_notified_at" not in ping_cols:
+            await db.execute("ALTER TABLE pings ADD COLUMN win_notified_at TEXT")
+            await db.execute(
+                "UPDATE pings SET win_notified_at = COALESCE(win_detected_at, detected_at, ?) WHERE is_win = 1",
+                (_now_iso(),),
+            )
+        # Partial: the owed set is a handful of rows, the table is thousands.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pings_notify_owed ON pings(detected_at) "
+            "WHERE notified_at IS NULL OR (is_win = 1 AND win_notified_at IS NULL)"
         )
         await db.commit()
 

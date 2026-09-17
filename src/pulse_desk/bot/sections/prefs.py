@@ -7,15 +7,20 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Optional
 
 from telethon import Button
 
-from database import get_bot_member, set_bot_member_prefs
+from database import (
+    account_win_stats, get_bot_member, member_engagement_since, set_bot_member_prefs,
+)
 
+from ...autoclean import label as autoclean_label, next_choice
 from ...bot_permissions import allowed_pref_keys, full_permissions
 from ...bot_prefs import parse_member_prefs, render_member_prefs_text, toggle_member_pref
-from ..pending import prompt_pending, register_prompt
+from ..cards import member_stats_card
+from ..pending import InputRejected, prompt_pending, register_prompt
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
 
@@ -47,6 +52,9 @@ def menu(prefs: dict, perms: Optional[dict] = None) -> tuple[str, list[list[Butt
     buttons += [toggles[i:i + 2] for i in range(0, len(toggles), 2)]
     if "giveaways" in allowed:
         buttons.append([Button.inline("🎯 Мин. score розыгрышей…", b"pf_sc")])
+    buttons.append([Button.inline(f"🧹 Удалять упоминания: {autoclean_label(prefs.get('autoclean_hours'))}",
+                                  b"pf_ac")])
+    buttons.append([Button.inline("📊 Моя статистика", b"pf_st")])
     buttons.append([Button.inline("⬅️ Меню", b"menu_main")])
     return render_member_prefs_text(prefs, allowed, perms.get("accounts")), buttons
 
@@ -60,8 +68,7 @@ async def _consume_min_score(event, pending: dict, raw: str) -> None:
     try:
         value = max(0, min(100, int(raw)))
     except ValueError:
-        await event.respond("❌ Нужно число 0–100 (0 — показывать все розыгрыши).")
-        return
+        raise InputRejected("❌ Нужно число 0–100 (0 — показывать все розыгрыши).")
     prefs = parse_member_prefs(member.get("notification_prefs"))
     prefs["min_score"] = value
     await set_bot_member_prefs(event.sender_id, prefs)
@@ -77,6 +84,17 @@ MIN_SCORE_INPUT = register_prompt(
 )
 
 
+async def show_my_stats(click: Click) -> None:
+    """«📊 Моя статистика» — свои цифры участника, без чужих аккаунтов."""
+    since = (datetime.now() - timedelta(days=30)).replace(microsecond=0).isoformat()
+    total = await member_engagement_since(click.sender_id)
+    month = await member_engagement_since(click.sender_id, since)
+    accounts = list((click.perms or {}).get("accounts") or [])
+    wins = await account_win_stats(accounts, since) if accounts else None
+    await safe_edit(click.event, member_stats_card(total, month, wins, accounts),
+                    buttons=[[Button.inline("⬅️ Мои уведомления", b"pf_back")]])
+
+
 async def handle(click: Click) -> None:
     event = click.event
     member = await get_bot_member(click.sender_id)
@@ -86,6 +104,16 @@ async def handle(click: Click) -> None:
     prefs = parse_member_prefs(member.get("notification_prefs"))
     if click.data == "pf_sc":
         await prompt_pending(event, MIN_SCORE_INPUT)
+        return
+    if click.data == "pf_st":
+        await show_my_stats(click)
+        return
+    if click.data == "pf_ac":
+        prefs = dict(prefs, autoclean_hours=next_choice(prefs.get("autoclean_hours")))
+        await set_bot_member_prefs(click.sender_id, prefs)
+        text, buttons = menu(prefs, click.perms)
+        await safe_edit(event, text, buttons=buttons)
+        await event.answer(f"Упоминания: {autoclean_label(prefs['autoclean_hours'])}")
         return
     toggled = TOGGLES.get(click.data)
     if toggled:

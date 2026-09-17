@@ -18,7 +18,7 @@ from typing import Any, Optional, Sequence
 import math
 
 from .canvas import (
-    AMBER, CITRON, CYAN, DIM, DOWN, FLAT, H, MUTED, SS, UP, W, WHITE,
+    AMBER, CITRON, CYAN, DIM, DOWN, FLAT, H, MUTED, SS, UP, W, WHITE, Rect,
     canvas, ellipsize, empty_state, fade_rule, fit, font, footer, header, px, progress, save,
     scan_line, sparkline, squarify, stat_row, tile, tracked,
 )
@@ -152,6 +152,68 @@ def build_dashboard_card(summary: dict[str, Any], analytics: dict[str, Any],
         return None
 
 
+# ---------------------------------------------------------------- отчёт
+
+def build_report_card(data: Any, path: Path) -> Optional[str]:
+    """Недельный/месячный отчёт одной картинкой (report.ReportData). Никогда не бросает."""
+    try:
+        from PIL import ImageDraw
+
+        from ...report import pct, short_channel, trend
+
+        img = canvas()
+        title = "Неделя" if data.kind == "week" else "Месяц"
+        header(img, "Pulse Desk", f"{title} · {data.label}", f"PD·04 // {datetime.now():%d.%m.%Y}", AMBER)
+        stat_row(img, [
+            ("побед", group(data.wins), AMBER),
+            ("забрано", pct(data.claim_rate), UP if (data.claim_rate or 0) >= 0.5 else AMBER),
+            ("ждут", group(data.open_wins), CYAN),
+        ], px(190))
+        money = f"${data.unclaimed_usd:,.0f}".replace(",", " ") if data.unclaimed_usd else "—"
+        book = (f"${data.book_won_usd:,.0f}".replace(",", " ") if data.book_won_usd is not None else "—")
+        stat_row(img, [
+            ("незабрано", money, CITRON),
+            ("по книге", book, WHITE),
+            ("розыгрышей", group(data.giveaways), CITRON),
+        ], px(330))
+
+        d = ImageDraw.Draw(img, "RGBA")
+        chart_top = px(470)
+        tracked(d, (px(64), chart_top), "ПОБЕД В ДЕНЬ", font("label", px(15)), px(2.2), MUTED + (255,))
+        note = trend(data.wins, data.prev_wins)
+        if note:
+            face = font("label", px(17))
+            d.text((W * SS - px(64) - d.textlength(note, font=face), chart_top - px(2)),
+                   note, font=face, fill=DIM + (255,))
+        if sum(data.daily_wins) and len(data.daily_wins) > 1:
+            sparkline(img, (px(64), chart_top + px(34), W * SS - px(128), px(170)), data.daily_wins, AMBER)
+        else:
+            d.text((px(64), chart_top + px(60)), "побед за период нет",
+                   font=font("label", px(20)), fill=MUTED + (255,))
+        fade_rule(img, px(64), chart_top + px(224), W * SS - px(128), AMBER)
+
+        list_top = px(740)
+        tracked(d, (px(64), list_top), "КАНАЛЫ, КОТОРЫЕ ПЛАТИЛИ", font("label", px(15)), px(2.2),
+                MUTED + (255,))
+        if data.top_channels:
+            items = [{"title": short_channel(name, 40), "text": "@" + name.split(" (@")[1].rstrip(")") if " (@" in name else "",
+                      "value": f"{count}", "tone": "warn"}
+                     for name, count in data.top_channels[:4]]
+            _attention_rows(img, items, list_top + px(40))
+        else:
+            d.text((px(64), list_top + px(50)), "—", font=font("label", px(22)), fill=MUTED + (255,))
+        payout = ""
+        if data.book_payout_usd is not None:
+            payout = f" · PAYOUT ${data.book_payout_usd:,.0f} / PAID ${(data.book_paid_usd or 0):,.0f}".replace(",", " ")
+        footer(img, f"PD·04 // {data.wins} WINS · {data.claimed} CLAIMED · {data.scam} SCAM{payout}")
+        return save(img, path)
+    except Exception:  # pragma: no cover - рендер best effort
+        from ...app_ctx import logger
+
+        logger.exception("Report card rendering failed; falling back to text")
+        return None
+
+
 # ---------------------------------------------------------------- рынок
 # Перенесено из digest_cards: хитмап — это экран рынка, а он одинаковый и в
 # дайджесте, и в разделе «Курсы». Две копии разошлись бы на первой же правке —
@@ -203,11 +265,12 @@ def damp_weights(tiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     if not tiles:
         return tiles
-    for tile in tiles:
-        tile["weight"] = math.sqrt(max(float(tile["weight"]), 0.0))
+    # `item`, not `tile`: that name is the canvas drawing function imported above.
+    for item in tiles:
+        item["weight"] = math.sqrt(max(float(item["weight"]), 0.0))
     top = max(t["weight"] for t in tiles) or 1.0
-    for tile in tiles:
-        tile["weight"] = max(tile["weight"], top / 15.0)
+    for item in tiles:
+        item["weight"] = max(item["weight"], top / 15.0)
     return tiles
 
 

@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - keeps parser tests independent from opti
     DEFAULT_DB_PATH = Path(os.getenv("PULSE_DB_PATH", BASE_DIR / "pulse_desk.db"))
     DEFAULT_BACKUP_DIR = DEFAULT_DB_PATH.parent / "backups"
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 24
 
 
 def db_path() -> Path:

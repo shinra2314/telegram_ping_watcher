@@ -46,7 +46,14 @@ from .access_windows import (
     set_member_default_policy,
     set_member_timezone,
 )
-from .backups import backup_db_if_present, create_db_backup, list_db_backups
+from .backups import (
+    backup_db_if_present,
+    backups_total_bytes,
+    create_db_backup,
+    list_db_backups,
+    newest_backup_at,
+    prune_db_backups,
+)
 from .boards import (
     get_debt_board,
     get_giveaway_board,
@@ -70,15 +77,18 @@ from .bot_access import (
     save_broadcast_messages,
     set_bot_key_expiry,
     set_bot_key_label,
+    set_bot_key_max_uses,
     set_bot_key_permissions,
     set_bot_key_revoked,
     set_bot_key_role,
     set_bot_member_blocked,
     set_bot_member_prefs,
+    set_bot_member_role,
     touch_bot_member,
     upsert_bot_member,
 )
 from .channels import (
+    channel_win_stats,
     get_channel_profile,
     get_source_score,
     get_source_scores,
@@ -92,11 +102,25 @@ from .checkpoints import (
     save_checkpoint,
     save_checkpoints,
 )
+from .dedupe import (
+    get_duplicates,
+    get_wins_for_dedupe,
+    mark_duplicates,
+    propagate_status_to_duplicates,
+)
 from .engagement import (
+    account_win_stats,
     engagement_summary,
     get_member_engagement,
+    member_engagement_since,
     member_engagement_stats,
     set_member_engagement,
+)
+from .ephemeral import (
+    delete_ephemeral_rows,
+    get_due_ephemeral_messages,
+    prune_ephemeral_messages,
+    schedule_message_deletion,
 )
 from .events import get_events, get_recent_problem_events, record_event
 from .giveaways import (
@@ -117,8 +141,10 @@ from .maintenance import (
     cleanup_archive_db,
     cleanup_old_data,
     cleanup_unbounded_tables,
+    db_page_stats,
     db_size_bytes,
     enforce_db_size_cap,
+    vacuum_main_db,
 )
 from .market import get_market_history, save_market_snapshot
 from .outbox import cleanup_outbox, enqueue_outbox_event, get_outbox_after, get_outbox_stats
@@ -141,6 +167,13 @@ from .pings import (
     search_pings_fts,
     toggle_favorite,
     update_ping_meta,
+)
+from .ping_notifications import (
+    count_owed_ping_notifications,
+    expire_owed_ping_notifications,
+    get_ping_notify_state,
+    list_owed_ping_notifications,
+    mark_ping_notified,
 )
 from .pending_broadcasts import (
     claim_pending_broadcast,

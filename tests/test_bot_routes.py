@@ -37,6 +37,7 @@ VIEWER_ROUTES = {
     "menu_recent": "recent",
     "an:sum": "analytics",
     "an:flow": "analytics",
+    "an:lat": "analytics",
     "mon:feed:all": "recent",
     "mon:feed:win:3": "recent",
     "mon:open:42": "recent",
@@ -64,14 +65,15 @@ VIEWER_ROUTES = {
 ADMIN_ROUTES = [
     "menu_keys", "menu_scan", "menu_logs", "menu_restart", "menu_debts", "menu_obsidian",
     "db:s:a:1", "db:open:42:a:1", "db:m:42:a:1", "db:c:42:a:1", "db:x:42:a:1",
-    "db:go:a:1", "db:clr:a:1",
+    "db:go:a:1", "db:clr:a:1", "db:v:a:1",
     "ob:p:1", "ob:t:0:1", "ob:sync:1", "ob:cfg", "ob:en", "ob:wr", "ob:path",
-    "ac", "ac:off:0",
+    "ac", "ac:off:0", "ac:spam:0",
     "sv", "sv:start:0", "sv:stop:0", "sv:re:0", "sv:log:0", "sv:allup", "sv:alldown",
-    "bk", "bk:new", "bk:get:0",
+    "bk", "bk:new", "bk:get:0", "bk:clean",
+    "lg:err", "lg:file", "ud:a1b2c3", "rp:w", "rp:pm", "vc", "vc:on:7", "vc:d:5",
     "dg", "dg:ev", "dg:sc", "dg:hi",
     "scan:start",
-    "key:12", "key:f:12:_all", "key:e:12:_x", "key:rm:12", "key:delgo:12",
+    "key:12", "key:once:12", "key:f:12:_all", "key:e:12:_x", "key:rm:12", "key:delgo:12",
     "adm:home", "adm:members", "adm:access", "adm:restart:go", "adm:newkey",
     "mem:open:7", "mem:block:7", "mem:access:7",
     "acc:close:7", "acc:open:7", "acc:log:7",
@@ -84,11 +86,12 @@ ADMIN_ROUTES = [
     "revokekey_5", "blockmember_7", "unblockmember_7",
     "accshow_7", "accoff_7", "accon_7",
     "hidebc_tok3n",
+    "igc", "igc:add:42", "igc:del:-1004354427082", "igc:del:-1004354427082:42",
 ]
 
 # Reachable by any member: their own prefs, their own engagement, and the
 # cancel button that clears a stuck prompt.
-MEMBER_ROUTES = ["pf", "pf_mu", "pf_sc", "pf_gw", "bcm:in:42", "bcm:skip:42", "st", "st_x",
+MEMBER_ROUTES = ["pf", "pf_mu", "pf_sc", "pf_gw", "pf_ac", "pf_st", "pf_back", "bcm:in:42", "bcm:skip:42", "st", "st_x",
                  # Настройки сидят на одном семействе `st_`, а роль проверяется
                  # внутри: иначе гость не смог бы отменить свой же ввод.
                  "st_r", "st_f_0", "st_v_0_1", "st_i_0", "st_l", "st_la", "st_ld_0"]

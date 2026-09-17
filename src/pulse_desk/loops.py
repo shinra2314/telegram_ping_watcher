@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from .app_ctx import (
     AUDIT_RETENTION_DAYS,
     DB_ARCHIVE_ENABLED,
     DB_MAX_SIZE_MB,
+    DISK_FREE_ALERT_MB,
     FLOOD_WAIT_MAX_SECONDS,
     MARKET_RETENTION_DAYS,
     PINGS_RETENTION_DAYS,
@@ -34,10 +36,19 @@ from .bot_notify import (
     send_admin_bot_message,
     send_member_bot_message,
 )
+from . import housekeeping
 from .common import flood_wait_seconds, now_iso, record_app_event, start_supervised
 from .converter import BRIDGE_IDS, FIAT_CODES, fiat_block
-from .digest import format_digest, format_digest_caption
+from .digest import (
+    DIGEST_POLL_SECONDS,
+    digest_due,
+    digest_seed_slot,
+    digest_slot,
+    format_digest,
+    format_digest_caption,
+)
 from .digest_cards import build_digest_cards
+from .jobs import feature_job_polls
 from .scan import next_scan_delay
 from .scan_engine import full_history_scan
 from .watchdog import JobHealth, classify_job, default_thresholds, diff_health, format_age
@@ -132,6 +143,7 @@ async def monitor_market_volatility() -> None:
                         if change >= ws.MARKET_ALERT_CHANGE_PCT:
                             await send_admin_bot_message(
                                 f"**Резкое движение {asset.upper()}**\nИзменение: `{change:.2f}%`\nЦена: `${curr_price:,.2f}`",
+                                kind="market",
                             )
         except Exception:
             logger.exception("Market volatility monitor failed")
@@ -218,37 +230,56 @@ async def render_digest(
     return format_digest(pings, period_label=period_label, prev_pings=prev_pings, market=market), []
 
 
-async def digest_loop() -> None:
+DIGEST_STATE_KEY = "digest_state"
+
+
+async def send_digest() -> None:
     from database import get_pings
 
-    from .bot_prefs import seconds_until_hhmm
+    now = datetime.now()
+    since = (now - timedelta(hours=24)).isoformat()
+    pings = await get_pings(limit=200, date_from=since)
+    prev_pings = await get_pings(
+        limit=200,
+        date_from=(now - timedelta(hours=48)).isoformat(),
+        date_to=since,
+    )
+    market = await collect_digest_market(24)
+    message, cards = await render_digest(pings, prev_pings, market)
+    await send_admin_bot_message(message, file=cards or None)
+    await broadcast_member_notification(message, None, file=cards or None, notif_type="digest")
+    await record_app_event("INFO", "digest", "Daily digest sent",
+                           {"pings": len(pings), "cards": len(cards)})
+
+
+async def digest_loop() -> None:
+    """Send the daily digest once per slot, catching up a slot the PC slept through.
+
+    It used to sleep until HH:MM, which lost the day whenever the machine was
+    off at that moment and gave the watchdog nothing to watch. It now ticks
+    like the roulette reminder; the handled slot date lives in ``digest_state``.
+    """
+    from database import get_setting, set_setting
 
     while True:
-        cfg = await ws.load_digest_settings()
-        await asyncio.sleep(seconds_until_hhmm(datetime.now(), cfg["time"]))
         try:
             cfg = await ws.load_digest_settings()
-            if not cfg["enabled"]:
-                await asyncio.sleep(61)
-                continue
             now = datetime.now()
-            since = (now - timedelta(hours=24)).isoformat()
-            pings = await get_pings(limit=200, date_from=since)
-            prev_pings = await get_pings(
-                limit=200,
-                date_from=(now - timedelta(hours=48)).isoformat(),
-                date_to=since,
-            )
-            market = await collect_digest_market(24)
-            message, cards = await render_digest(pings, prev_pings, market)
-            await send_admin_bot_message(message, file=cards or None)
-            await broadcast_member_notification(message, None, file=cards or None, notif_type="digest")
-            await record_app_event("INFO", "digest", "Daily digest sent",
-                                   {"pings": len(pings), "cards": len(cards)})
+            stored = await get_setting(DIGEST_STATE_KEY, None)
+            if not isinstance(stored, dict) or not stored.get("last_slot"):
+                stored = {"last_slot": digest_seed_slot(now, cfg)}
+                await set_setting(DIGEST_STATE_KEY, stored, audit=False)
+            if digest_due(now, cfg, str(stored.get("last_slot") or "")):
+                slot = digest_slot(now, cfg["time"])
+                # The slot is closed before sending: a digest that fails half-way
+                # (bot offline, render error) is logged, not re-sent every 30 s.
+                await set_setting(DIGEST_STATE_KEY, {"last_slot": slot.date().isoformat(),
+                                                     "sent_at": now_iso()}, audit=False)
+                await send_digest()
+            state.heartbeat("daily-digest")
         except Exception:
             logger.exception("Digest loop failed")
-        # Guard against double-fire within the same minute.
-        await asyncio.sleep(61)
+        await asyncio.sleep(DIGEST_POLL_SECONDS)
 
 
 async def roulette_loop() -> None:
@@ -277,6 +308,7 @@ async def roulette_loop() -> None:
             ):
                 await set_setting("roulette", mark_sent(cfg, now))
                 await record_app_event("INFO", "roulette", "Roulette reminder sent", {"time": cfg["time"]})
+            state.heartbeat("roulette-reminder")
         except Exception:
             logger.exception("Roulette loop failed")
         await asyncio.sleep(ROULETTE_POLL_SECONDS)
@@ -369,7 +401,25 @@ async def drain_pending_sends() -> float:
         if token:
             # Same token as the immediate copies, so "hide" still reaches it.
             await save_broadcast_messages(token, [(int(row["tg_id"]), message_id)])
+        await _autoclean_delayed_copy(row, message_id)
     return 0.0
+
+
+async def _autoclean_delayed_copy(row: dict, message_id: int) -> None:
+    """A delayed copy obeys the member's auto-delete choice like an immediate one."""
+    from .autoclean import CLEANABLE_KINDS
+    from .bot_notify import member_autoclean_hours, schedule_autoclean
+
+    kind = str(row.get("notif_type") or "")
+    if kind not in CLEANABLE_KINDS:
+        return
+    try:
+        from database import get_bot_member
+
+        member = await get_bot_member(int(row["tg_id"]))
+        await schedule_autoclean(int(row["tg_id"]), message_id, kind, member_autoclean_hours(member))
+    except Exception:
+        logger.debug("Auto-delete scheduling for a delayed copy failed", exc_info=True)
 
 
 async def _notify_access_flip(tg_id: int, allowed: bool, until) -> None:
@@ -448,6 +498,9 @@ async def obsidian_sync_loop() -> None:
         try:
             if settings.obsidian_sync_enabled and (settings.obsidian_debts_path or "").strip():
                 await sync_once(state, settings)
+            # Every pass, switched on or not: the job always runs, so the
+            # watchdog can tell a live loop from a dead one either way.
+            state.heartbeat("obsidian-sync")
         except Exception:
             logger.exception("Obsidian sync loop failed")
         await asyncio.sleep(interval)
@@ -544,12 +597,11 @@ async def salary_sync_loop() -> None:
 
 
 async def source_score_loop() -> None:
-    from database import cleanup_outbox, recalculate_source_scores
+    from database import recalculate_source_scores
 
     while True:
         try:
             await recalculate_source_scores()
-            await cleanup_outbox(days=2, max_events=2500)
             state.heartbeat("source-scores")
         except Exception:
             logger.exception("Source score recalculation failed")
@@ -557,13 +609,6 @@ async def source_score_loop() -> None:
 
 
 async def auto_scan_loop() -> None:
-    from database import (
-        cleanup_archive_db,
-        cleanup_old_data,
-        cleanup_unbounded_tables,
-        enforce_db_size_cap,
-    )
-
     start_supervised("market-volatility", monitor_market_volatility, backoff_base=60.0, backoff_max=1800.0)
     if ws.STARTUP_SCAN_DELAY_SECONDS:
         await asyncio.sleep(ws.STARTUP_SCAN_DELAY_SECONDS)
@@ -571,7 +616,8 @@ async def auto_scan_loop() -> None:
     while not state.clients and waited < STARTUP_SCAN_WAIT_SECONDS:
         await asyncio.sleep(1)
         waited += 1
-    last_vacuum = datetime.now()
+    # Retention, VACUUM and backups moved to the `maintenance` job: this loop
+    # only scans, so a slow cleanup can no longer stretch the gap between sweeps.
     while True:
         cycle_started = time.monotonic()
         try:
@@ -579,27 +625,7 @@ async def auto_scan_loop() -> None:
                 await full_history_scan()
                 state.last_scan_finished_at = datetime.now()
                 state.last_scan_status = "ok"
-            vacuum_due = (datetime.now() - last_vacuum).total_seconds() >= VACUUM_INTERVAL_HOURS * 3600
-            stats = await cleanup_old_data(
-                days=MARKET_RETENTION_DAYS,
-                pings_retention_days=PINGS_RETENTION_DAYS,
-                vacuum=vacuum_due,
-            )
-            if vacuum_due:
-                last_vacuum = datetime.now()
-            unbounded = await cleanup_unbounded_tables(
-                scan_runs_keep=SCAN_RUNS_RETENTION, audit_days=AUDIT_RETENTION_DAYS
-            )
-            stats.update({key: value for key, value in unbounded.items() if value})
-            cap = await enforce_db_size_cap(DB_MAX_SIZE_MB, archive=DB_ARCHIVE_ENABLED)
-            if cap.get("pings_deleted"):
-                stats["size_cap"] = cap
-            archive = await cleanup_archive_db(ARCHIVE_RETENTION_DAYS, vacuum=vacuum_due)
-            if archive.get("archive_pings"):
-                stats["archive_pings"] = archive["archive_pings"]
-            if any(stats.get(key) for key in ("pings", "market_history", "vacuumed")) \
-                    or any(unbounded.values()) or cap.get("pings_deleted") or archive.get("archive_pings"):
-                await record_app_event("INFO", "maintenance", "Periodic cleanup completed", stats)
+                await report_downtime_catchup()
             state.heartbeat("auto-scan")
         except Exception:
             logger.exception("Automatic scan loop failed")
@@ -610,6 +636,481 @@ async def auto_scan_loop() -> None:
         await asyncio.sleep(next_scan_delay(ws.SCAN_INTERVAL_SECONDS, time.monotonic() - cycle_started))
 
 
+# --------------------------------------------------------------------------- #
+# Maintenance: retention, VACUUM, backups, stray files, disk space            #
+# --------------------------------------------------------------------------- #
+
+MAINTENANCE_KEY = "maintenance"
+MAINTENANCE_TICK_SECONDS = 300
+MAINTENANCE_FIRST_PASS_SECONDS = 600
+MAINTENANCE_INTERVAL_SECONDS = 3600
+DAILY_TASKS_INTERVAL = timedelta(hours=24)
+BACKUP_EVERY = timedelta(hours=24)
+
+_maintenance_lock = asyncio.Lock()
+_maintenance_meta_lock = asyncio.Lock()
+_disk_alerted = False
+
+
+def _prune_files(directory: Path, pattern: str, keep_days: int) -> tuple[int, int]:
+    """Remove files older than ``keep_days``; returns (count, bytes)."""
+    cutoff = time.time() - keep_days * 86400
+    removed = freed = 0
+    if not directory.is_dir():
+        return 0, 0
+    for path in directory.glob(pattern):
+        try:
+            stat = path.stat()
+            if path.is_file() and stat.st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+                freed += stat.st_size
+        except OSError:
+            continue
+    return removed, freed
+
+
+def _parse_stamp(raw) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(raw)) if raw else None
+    except ValueError:
+        return None
+
+
+async def _load_maintenance_meta() -> dict:
+    from database import get_setting
+
+    meta = await get_setting(MAINTENANCE_KEY, None)
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+async def _save_maintenance_meta(**changes) -> None:
+    """Merge into the ``maintenance`` key. Bookkeeping, so never audited.
+
+    Read-modify-write under a lock: the liveness tick and a pass started from
+    the bot would otherwise overwrite each other's fields.
+    """
+    from database import set_setting
+
+    async with _maintenance_meta_lock:
+        meta = await _load_maintenance_meta()
+        meta.update(changes)
+        await set_setting(MAINTENANCE_KEY, meta, audit=False)
+
+
+async def run_maintenance_once(*, force_daily: bool = False) -> dict:
+    """One maintenance pass. Safe to call from the bot while the loop runs.
+
+    Order matters: rows are deleted first, VACUUM then returns their pages to
+    the disk, and only then is a backup taken — so the copy is of the compact
+    file, not of the free pages.
+    """
+    from database import (
+        backups_total_bytes,
+        cleanup_archive_db,
+        cleanup_old_data,
+        cleanup_outbox,
+        cleanup_unbounded_tables,
+        create_db_backup,
+        db_page_stats,
+        db_size_bytes,
+        enforce_db_size_cap,
+        newest_backup_at,
+        prune_broadcast_messages,
+        prune_db_backups,
+        prune_pending_broadcasts,
+        prune_pending_sends,
+        vacuum_main_db,
+    )
+
+    async with _maintenance_lock:
+        now = datetime.now()
+        meta = await _load_maintenance_meta()
+        db_before = db_size_bytes()
+        backups_before = await asyncio.to_thread(backups_total_bytes)
+        removed: dict = {}
+
+        rows = await cleanup_old_data(days=MARKET_RETENTION_DAYS, pings_retention_days=PINGS_RETENTION_DAYS)
+        rows.update(await cleanup_unbounded_tables(
+            scan_runs_keep=SCAN_RUNS_RETENTION,
+            audit_days=AUDIT_RETENTION_DAYS,
+            live_sessions=state.session_names,
+            tracked_usernames=state.ping_usernames,
+        ))
+        removed.update({key: value for key, value in rows.items() if value and key != "vacuumed"})
+        cap = await enforce_db_size_cap(DB_MAX_SIZE_MB, archive=DB_ARCHIVE_ENABLED)
+        if cap.get("pings_deleted"):
+            removed["size_cap_pings"] = cap["pings_deleted"]
+
+        daily_due = force_daily or (now - (_parse_stamp(meta.get("last_daily_at")) or datetime.min)) >= DAILY_TASKS_INTERVAL
+        if daily_due:
+            await cleanup_outbox(days=2, max_events=2500)
+            for label, prune in (
+                ("broadcast_messages", prune_broadcast_messages),
+                ("pending_broadcasts", prune_pending_broadcasts),
+                ("pending_sends", prune_pending_sends),
+            ):
+                count = await prune(days=7)
+                if count:
+                    removed[label] = count
+
+        pages = await db_page_stats()
+        vacuumed = housekeeping.vacuum_due(
+            page_count=pages["page_count"],
+            freelist_count=pages["freelist_count"],
+            page_size=pages["page_size"],
+            last_vacuum_at=_parse_stamp(meta.get("last_vacuum_at")),
+            now=now,
+            interval_hours=VACUUM_INTERVAL_HOURS,
+        )
+        if vacuumed:
+            await vacuum_main_db()
+            meta_vacuum = now_iso()
+            pages = await db_page_stats()
+        archive = await cleanup_archive_db(ARCHIVE_RETENTION_DAYS, vacuum=vacuumed)
+        if archive.get("archive_pings"):
+            removed["archive_pings"] = archive["archive_pings"]
+
+        newest = await asyncio.to_thread(newest_backup_at)
+        backup_name = None
+        if newest is None or now - newest >= BACKUP_EVERY:
+            created = await asyncio.to_thread(create_db_backup)
+            backup_name = (created or {}).get("name")
+        else:
+            await asyncio.to_thread(prune_db_backups)
+
+        files_removed = files_freed = 0
+        for directory, pattern, keep_days in housekeeping.FILE_RULES:
+            count, freed = await asyncio.to_thread(_prune_files, BASE_DIR / directory, pattern, keep_days)
+            files_removed += count
+            files_freed += freed
+        if files_removed:
+            removed["files"] = files_removed
+
+        backups_after = await asyncio.to_thread(backups_total_bytes)
+        db_after = db_size_bytes()
+        disk = await asyncio.to_thread(shutil.disk_usage, BASE_DIR)
+        await _check_disk(disk.free)
+
+        stats = {
+            "finished_at": now_iso(),
+            "db_bytes": db_after,
+            "freelist_pct": round(housekeeping.freelist_ratio(pages["page_count"], pages["freelist_count"]) * 100, 1),
+            "backups_bytes": backups_after,
+            "disk_free_bytes": disk.free,
+            "vacuumed": vacuumed,
+            "backup": backup_name,
+            "removed": removed,
+            "freed_bytes": max(0, db_before - db_after) + max(0, backups_before - backups_after) + files_freed,
+        }
+        state.maintenance_stats = stats
+        changes = {"last_run_at": stats["finished_at"]}
+        if vacuumed:
+            changes["last_vacuum_at"] = meta_vacuum
+        if daily_due:
+            changes["last_daily_at"] = stats["finished_at"]
+        await _save_maintenance_meta(**changes)
+        if removed or vacuumed or backup_name:
+            await record_app_event("INFO", "maintenance", "Maintenance pass completed", {
+                "removed": removed, "vacuumed": vacuumed, "backup": backup_name,
+                "freed_mb": round(stats["freed_bytes"] / housekeeping.MB, 1),
+            })
+        return stats
+
+
+async def _check_disk(free_bytes: int) -> None:
+    """Page the owner once when the disk runs low, and once more when it recovers."""
+    global _disk_alerted
+    low = housekeeping.disk_low(free_bytes, DISK_FREE_ALERT_MB)
+    free_mb = free_bytes // housekeeping.MB
+    if low and not _disk_alerted:
+        _disk_alerted = True
+        await send_admin_bot_message(
+            "⚠️ **Заканчивается место на диске**\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"Свободно: `{free_mb} МБ` (порог `{DISK_FREE_ALERT_MB} МБ`).\n"
+            "База, бэкапы и логи могут перестать записываться. Освободите место на диске."
+        )
+        await record_app_event("WARNING", "maintenance", "Low disk space", {"free_mb": free_mb})
+    elif not low and _disk_alerted:
+        _disk_alerted = False
+        await send_admin_bot_message(f"✅ **Место на диске освободилось**: свободно `{free_mb} МБ`.", kind="system")
+
+
+async def maintenance_loop() -> None:
+    """Hourly housekeeping, plus a liveness stamp every tick.
+
+    ``last_alive_at`` is what the next start compares against to tell a routine
+    restart from the nightly shutdown (see ``detect_downtime``).
+    """
+    # The first pass waits a little: startup already runs a backup, the search
+    # reindex and the first sweep, and VACUUM would compete with all of them.
+    next_pass = time.monotonic() + MAINTENANCE_FIRST_PASS_SECONDS
+    while True:
+        try:
+            await _save_maintenance_meta(last_alive_at=now_iso())
+            if time.monotonic() >= next_pass:
+                # Advanced before the pass, so a failing pass is retried next
+                # hour rather than on every tick.
+                next_pass = time.monotonic() + MAINTENANCE_INTERVAL_SECONDS
+                await run_maintenance_once()
+            state.heartbeat("maintenance")
+        except Exception:
+            logger.exception("Maintenance loop failed")
+        await asyncio.sleep(max(1.0, min(MAINTENANCE_TICK_SECONDS, next_pass - time.monotonic())))
+
+
+async def detect_downtime() -> None:
+    """Remember a long gap before this start; call before ``maintenance`` starts.
+
+    The previous process stamped ``last_alive_at`` every few minutes, so the
+    gap between that stamp and now is how long nothing was watching Telegram.
+    """
+    try:
+        meta = await _load_maintenance_meta()
+        last_alive = _parse_stamp(meta.get("last_alive_at"))
+        now = datetime.now()
+        if housekeeping.gap_worth_reporting(last_alive, now):
+            state.downtime_gap = (last_alive, now.replace(microsecond=0))
+            await record_app_event("INFO", "app", "Downtime before start detected", {
+                "from": last_alive.isoformat(timespec="minutes"),
+                "to": now.isoformat(timespec="minutes"),
+            })
+    except Exception:
+        logger.warning("Could not read the previous liveness stamp", exc_info=True)
+
+
+async def report_downtime_catchup() -> None:
+    """After the first sweep that follows a long downtime, say what it found."""
+    from database import get_pings
+
+    from .bot.cards import downtime_catchup_card
+
+    gap = state.downtime_gap
+    if gap is None:
+        return
+    state.downtime_gap = None
+    gap_from, gap_to = gap
+    try:
+        pings = await get_pings(limit=500, date_from=gap_to.isoformat())
+        await send_admin_bot_message(downtime_catchup_card(gap_from, gap_to, pings))
+    except Exception:
+        logger.exception("Downtime catch-up report failed")
+
+
+# --------------------------------------------------------------------------- #
+# Weekly / monthly report                                                       #
+# --------------------------------------------------------------------------- #
+
+REPORT_TICK_SECONDS = 60
+
+
+async def run_reports_once(now: Optional[datetime] = None) -> list[str]:
+    """Send whichever scheduled report is due (Monday: the week, the 1st: the month)."""
+    from database import get_setting, set_setting
+
+    from .bot.sections.report import render
+    from .report import STATE_KEY, due_reports, week_key
+
+    now = now or datetime.now()
+    stored = await get_setting(STATE_KEY, None)
+    sent_state = dict(stored) if isinstance(stored, dict) else {}
+    sent: list[str] = []
+    for kind in due_reports(now, sent_state):
+        # Closed before sending, like the digest: a failing render is logged,
+        # not retried every minute.
+        sent_state[kind] = week_key(now) if kind == "week" else f"{now:%Y-%m}"
+        await set_setting(STATE_KEY, sent_state, audit=False)
+        caption, card = await render(kind, previous=True)
+        await send_admin_bot_message(caption, file=card)
+        await record_app_event("INFO", "report", "Scheduled report sent", {"kind": kind})
+        sent.append(kind)
+    return sent
+
+
+async def report_loop() -> None:
+    while True:
+        try:
+            await run_reports_once()
+            state.heartbeat("weekly-report")
+        except Exception:
+            logger.exception("Report loop failed")
+        await asyncio.sleep(REPORT_TICK_SECONDS)
+
+
+# --------------------------------------------------------------------------- #
+# Account health: logged out, banned, stuck, deaf                               #
+# --------------------------------------------------------------------------- #
+
+ACCOUNT_HEALTH_TICK_SECONDS = 300
+ACCOUNT_PROBE_INTERVAL_SECONDS = 3600
+ACCOUNT_PROBE_TIMEOUT_SECONDS = 20
+
+ACCOUNT_ALERTS_KEY = "account_alerts"
+
+# Account → problem kind already reported. Persisted (audit=False) so a restart
+# every morning does not re-page about the same logged-out junk session.
+_account_alerts: dict[str, str] = {}
+_account_alerts_loaded = False
+
+
+async def probe_accounts() -> dict[str, str]:
+    """Ask every online account «who am I?» — the cheapest request that fails when
+    the session was revoked or the account banned while the socket stayed up.
+    Returns session → new status for the accounts whose probe proved a problem."""
+    from .account_health import classify_auth_error
+
+    found: dict[str, str] = {}
+    for client in list(state.clients):
+        name = str(getattr(client, "_session_name_custom", "") or "")
+        if not name:
+            continue
+        try:
+            await asyncio.wait_for(client.get_me(), timeout=ACCOUNT_PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            continue
+        except Exception as exc:
+            status = classify_auth_error(exc)
+            if not status:
+                continue
+            found[name] = status
+            account = state.accounts_state.setdefault(name, {"session_name": name})
+            account.update({"status": status, "last_error": type(exc).__name__, "status_since": now_iso()})
+            await record_app_event("ERROR", "telegram", "Account probe failed",
+                                   {"session_name": name, "status": status, "error": type(exc).__name__})
+    return found
+
+
+async def run_account_health_once(now: Optional[datetime] = None) -> tuple[dict[str, str], list[str]]:
+    """Evaluate every account and page the owner about what changed."""
+    from database import get_setting, set_setting
+
+    from .account_health import account_problem, diff_problems
+
+    global _account_alerts_loaded
+    if not _account_alerts_loaded:
+        stored = await get_setting(ACCOUNT_ALERTS_KEY, None)
+        _account_alerts.update({str(k): str(v) for k, v in (stored or {}).items()} if isinstance(stored, dict) else {})
+        _account_alerts_loaded = True
+    now = now or datetime.now()
+    current = {
+        name: problem
+        for name, account in list(state.accounts_state.items())
+        if (problem := account_problem(account, now, app_started_at=state.started_at))
+    }
+    fresh, recovered = diff_problems(_account_alerts, current)
+    # «Recovered» means back online, not «not evaluated yet»: right after a start
+    # every account is still connecting, which is no reason to announce anything.
+    recovered = [name for name in recovered
+                 if (state.accounts_state.get(name) or {}).get("status") == "online"]
+    for name in list(_account_alerts):
+        if name not in current and name not in recovered:
+            current[name] = (_account_alerts[name], "")
+    for name, text in fresh.items():
+        await send_admin_bot_message(
+            "🛰 **Проблема с аккаунтом**\n━━━━━━━━━━━━━━━\n"
+            f"Аккаунт: `{name}`\n{text}\n\n"
+            "Пока это так, аккаунт не видит свои каналы. Подробности — 🛰 Аккаунты."
+        )
+        await record_app_event("WARNING", "telegram", "Account problem", {"session_name": name, "problem": text})
+    for name in recovered:
+        await send_admin_bot_message(f"✅ **Аккаунт снова в строю:** `{name}`", kind="system")
+    reported = {name: kind for name, (kind, _text) in current.items()}
+    if reported != _account_alerts:
+        _account_alerts.clear()
+        _account_alerts.update(reported)
+        await set_setting(ACCOUNT_ALERTS_KEY, reported, audit=False)
+    return fresh, recovered
+
+
+async def account_health_loop() -> None:
+    # Accounts need a few minutes to connect after a start; judging them sooner
+    # would page about «подключается».
+    await asyncio.sleep(180)
+    last_probe = time.monotonic()
+    while True:
+        try:
+            if time.monotonic() - last_probe >= ACCOUNT_PROBE_INTERVAL_SECONDS:
+                last_probe = time.monotonic()
+                await probe_accounts()
+            await run_account_health_once()
+            state.heartbeat("account-health")
+        except Exception:
+            logger.exception("Account health check failed")
+        await asyncio.sleep(ACCOUNT_HEALTH_TICK_SECONDS)
+
+
+# --------------------------------------------------------------------------- #
+# Bot janitor: stale prompts, abandoned logins, per-user leftovers, auto-delete #
+# --------------------------------------------------------------------------- #
+
+JANITOR_TICK_SECONDS = 60
+DEBT_MARKS_TTL = timedelta(hours=1)
+
+
+async def run_janitor_once(now: Optional[datetime] = None) -> dict[str, int]:
+    """One sweep of the bot's short-lived state and scheduled deletions."""
+    from database import delete_ephemeral_rows, get_due_ephemeral_messages, prune_ephemeral_messages
+
+    from .account_login import sweep_expired
+    from .bot.pending import delete_quietly, sweep_pending
+    from .bot.sections.feed import QUERY_TTL
+
+    now = now or datetime.now()
+    stats = {"prompts": 0, "logins": 0, "queries": 0, "marks": 0, "deleted": 0}
+
+    # Armed prompts nobody answered: the entry goes, and so does its «✍️» message.
+    for entry in sweep_pending():
+        stats["prompts"] += 1
+        await delete_quietly(entry.get("chat_id"), entry.get("cleanup") or [])
+
+    # A login abandoned half-way holds a connected Telegram client.
+    stats["logins"] = await sweep_expired()
+
+    for sender, (_text, armed) in list(state.bot_feed_queries.items()):
+        if now - armed > QUERY_TTL:
+            state.bot_feed_queries.pop(sender, None)
+            stats["queries"] += 1
+    from .bot.sections.vacation import check_expiry
+    from .bot.undo import sweep as sweep_undo
+
+    sweep_undo(now)
+    try:
+        await check_expiry(now)
+    except Exception:
+        logger.exception("Vacation expiry check failed")
+    for sender, touched in list(state.bot_debt_marks_touched.items()):
+        if now - touched > DEBT_MARKS_TTL:
+            state.bot_debt_marks_touched.pop(sender, None)
+            if state.bot_debt_marks.pop(sender, None) is not None:
+                stats["marks"] += 1
+
+    # Minor notifications whose auto-delete moment came.
+    due = await get_due_ephemeral_messages(now)
+    by_chat: dict[int, list[int]] = {}
+    for row in due:
+        by_chat.setdefault(int(row["chat_id"]), []).append(int(row["message_id"]))
+    for chat_id, message_ids in by_chat.items():
+        for start in range(0, len(message_ids), 100):
+            stats["deleted"] += await delete_quietly(chat_id, message_ids[start:start + 100])
+    if due:
+        # Whatever happened to the delete (already gone, too old), the row is done.
+        await delete_ephemeral_rows(int(row["id"]) for row in due)
+    await prune_ephemeral_messages(now)
+    return stats
+
+
+async def bot_janitor_loop() -> None:
+    while True:
+        try:
+            if state.bot_client is not None:
+                await run_janitor_once()
+            state.heartbeat("bot-janitor")
+        except Exception:
+            logger.exception("Bot janitor failed")
+        await asyncio.sleep(JANITOR_TICK_SECONDS)
+
+
 def _collect_job_health() -> list[JobHealth]:
     """Snapshot the health of every monitored background job right now."""
     thresholds = default_thresholds(
@@ -617,6 +1118,7 @@ def _collect_job_health() -> list[JobHealth]:
         market_poll_seconds=ws.MARKET_POLL_SECONDS,
         flood_wait_max_seconds=FLOOD_WAIT_MAX_SECONDS,
         bot_configured=state.bot_client is not None,
+        enabled_features=feature_job_polls(settings),
     )
     now = datetime.now()
     healths: list[JobHealth] = []
@@ -651,7 +1153,7 @@ async def _alert_job_unhealthy(health: JobHealth) -> None:
 
 
 async def _alert_job_recovered(health: JobHealth) -> None:
-    await send_admin_bot_message(f"✅ **Задача восстановилась**: `{health.name}` снова отвечает.")
+    await send_admin_bot_message(f"✅ **Задача восстановилась**: `{health.name}` снова отвечает.", kind="system")
     await record_app_event("INFO", "watchdog", f"Background job recovered: {health.name}", None)
 
 
@@ -682,38 +1184,34 @@ async def watchdog_loop() -> None:
 
 async def startup_maintenance() -> None:
     from database import (
-        cleanup_outbox,
-        prune_broadcast_messages,
-        prune_pending_broadcasts,
-        prune_pending_sends,
         rebuild_search_indexes,
         reconcile_giveaway_flags,
         reconcile_giveaway_outcomes,
         reconcile_win_flags,
     )
 
+    # Pruning of broadcast/outbox bookkeeping moved to the daily part of the
+    # `maintenance` job: here it only ever ran on a restart.
+
     try:
         search_reindex = await rebuild_search_indexes()
         await record_app_event("INFO", "search", "Search indexes rebuilt on startup", search_reindex)
-        giveaway_reconcile = await reconcile_giveaway_flags(state.giveaway_keywords)
-        if giveaway_reconcile["enabled"] or giveaway_reconcile["disabled"]:
-            await record_app_event("INFO", "giveaway", "Reconciled stored giveaways with channel keyword rule", giveaway_reconcile)
+        # Wins first: the giveaway pass keeps every win paired with its giveaway
+        # flag, so it has to see the win flags as they will stay.
         win_reconcile = await reconcile_win_flags(state.win_keywords)
         if win_reconcile["enabled"] or win_reconcile["disabled"]:
             await record_app_event("INFO", "giveaway", "Reconciled stored win/result flags", win_reconcile)
+        giveaway_reconcile = await reconcile_giveaway_flags(state.giveaway_keywords)
+        if giveaway_reconcile["enabled"] or giveaway_reconcile["disabled"]:
+            await record_app_event("INFO", "giveaway", "Reconciled stored giveaways with channel keyword rule", giveaway_reconcile)
         outcome_reconcile = await reconcile_giveaway_outcomes()
         if outcome_reconcile["marked"]:
             await record_app_event("INFO", "giveaway", "Marked giveaway result posts as prize claims", outcome_reconcile)
-        await cleanup_outbox(days=2, max_events=2500)
-        pruned_broadcasts = await prune_broadcast_messages(days=7)
-        if pruned_broadcasts:
-            await record_app_event("INFO", "maintenance", "Pruned stale bot broadcast records", {"count": pruned_broadcasts})
-        pruned_pending = await prune_pending_broadcasts(days=7)
-        if pruned_pending:
-            await record_app_event("INFO", "maintenance", "Pruned decided pending broadcasts", {"count": pruned_pending})
-        pruned_sends = await prune_pending_sends(days=7)
-        if pruned_sends:
-            await record_app_event("INFO", "maintenance", "Pruned settled delayed notifications", {"count": pruned_sends})
+        from .ping_pipeline import dedupe_existing_wins
+
+        copies = await dedupe_existing_wins()
+        if copies:
+            await record_app_event("INFO", "giveaway", "Glued copies of the same winners post", {"copies": copies})
     except Exception as exc:
         logger.exception("Startup maintenance failed")
         await record_app_event("ERROR", "app", "Startup maintenance failed", {"error": str(exc)})

@@ -113,6 +113,34 @@ def _fmt_num(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
 
 
+def latency_lines(latency: dict) -> list[str]:
+    """«⏱ Задержка»: how long posts and wins waited before the app noticed them."""
+    from ..latency import SLOW_MINUTES, fmt_minutes
+
+    def block(title: str, stats: dict, hint: str) -> list[str]:
+        if not stats or not stats.get("count"):
+            return [title, empty(hint)]
+        return [
+            title,
+            f"{kv('⏱', 'Медиана', fmt_minutes(stats['median']))}   {kv('📈', '90%', fmt_minutes(stats['p90']))}",
+            kv("⚠️", f"Дольше {SLOW_MINUTES} мин", f"{stats.get('slow', 0)} из {stats['count']}"),
+        ]
+
+    out = block("📨 **Пост → обнаружение** __(30 дней)__", latency.get("posts") or {},
+                "Данных пока нет.")
+    out += [DIV]
+    out += block("🏆 **Победа (правка поста) → флаг**", latency.get("wins") or {},
+                 "Считается для побед, найденных после обновления — накопится со временем.")
+    channels = latency.get("channels") or []
+    out += [DIV, "🐢 **Самые медленные каналы**"]
+    out += [
+        f"`{i}.` **{str(row.get('chat') or '?')[:28]}** · `{fmt_minutes(float(row.get('median') or 0))}` · {row.get('count', 0)} зап"
+        for i, row in enumerate(channels, 1)
+    ] or [empty("Мало данных по каналам.")]
+    out.append("\n__Долгие задержки обычно — ночь с выключенным ПК.__")
+    return out
+
+
 def analytics_card(tab: str, *, analytics: dict, detailed: dict) -> str:
     """One page of the analytics report. `tab` is a code from ANALYTICS_TABS."""
     tab = tab if tab in _ANALYTICS_TAB_LABELS else "sum"
@@ -191,6 +219,9 @@ def analytics_card(tab: str, *, analytics: dict, detailed: dict) -> str:
             value=lambda r: r.get("count") or 0,
             limit=7,
         )
+
+    elif tab == "lat":
+        out += latency_lines(detailed.get("latency") or {})
 
     else:  # flow
         out += ["📈 **Качество по дням**"]
@@ -342,6 +373,9 @@ def key_state_badge(key: dict) -> str:
         return "🚫 отозван"
     if key_expired(key.get("expires_at")):
         return "⌛ истёк"
+    max_uses = int(key.get("max_uses") or 0)
+    if max_uses and int(key.get("member_count") or 0) >= max_uses:
+        return "🎟 использован"
     return "🟢 активен"
 
 
@@ -375,6 +409,9 @@ def key_panel_card(key: dict, perms: dict, accounts: list[str]) -> str:
         DIV,
         render_permissions_summary(perms),
     ]
+    max_uses = int(key.get("max_uses") or 0)
+    if max_uses:
+        out.insert(3, f"🎟 Активаций: `{min(int(key.get('member_count') or 0), max_uses)}/{max_uses}`")
     if key.get("revoked"):
         out.append("\n🚫 __Ссылка отозвана — новые люди войти не смогут. Можно вернуть кнопкой ♻️.__")
     elif key_expired(key.get("expires_at")):
@@ -547,6 +584,63 @@ def roulette_reminder_card(cfg: dict, now: datetime) -> str:
         DIV,
         "__Закончишь — жми кнопку или пришли время последнего аккаунта:__ `21:47`",
     ])
+
+
+def _share(part: int, whole: int) -> str:
+    return f"{round(100 * part / whole)}%" if whole else "—"
+
+
+def member_stats_card(total: dict, month: dict, wins: Optional[dict] = None,
+                      accounts: Optional[list[str]] = None) -> str:
+    """A member's own numbers: engagement with broadcast giveaways and, for a key
+    tied to accounts, how many of those accounts' wins were claimed."""
+    lines = [
+        header("📊", "Моя статистика"),
+        "🎁 **Розыгрыши, которые вам присылали**",
+        kv("✅", "Участвую", f"{total.get('joined', 0)} (30 дн: {month.get('joined', 0)})"),
+        kv("⏭", "Пропустил", f"{total.get('skipped', 0)} (30 дн: {month.get('skipped', 0)})"),
+        kv("🎯", "Участие", _share(int(total.get("joined", 0)),
+                                   int(total.get("joined", 0)) + int(total.get("skipped", 0)))),
+    ]
+    if wins is not None and accounts:
+        lines += [
+            DIV,
+            "🏆 **Победы ваших аккаунтов за 30 дней**",
+            "👤 " + ", ".join(f"@{name.lstrip('@')}" for name in accounts),
+            kv("🏆", "Побед", wins.get("wins", 0)),
+            kv("✅", "Забрано", f"{wins.get('claimed', 0)} · {_share(int(wins.get('claimed', 0)), int(wins.get('wins', 0)))}"),
+        ]
+    if not total.get("joined") and not total.get("skipped"):
+        lines += [DIV, empty("Жмите «✅ Участвую» / «⏭ Пропустил» под розыгрышами — здесь появится статистика.")]
+    return "\n".join(lines)
+
+
+def downtime_catchup_card(gap_from: datetime, gap_to: datetime, pings: list[dict]) -> str:
+    """What the first sweep after a long downtime (the nightly shutdown) found.
+
+    ``pings`` are the rows detected since the app came back up; wins and
+    giveaways are counted separately, mentions are the rest.
+    """
+    from ..housekeeping import format_duration
+
+    wins = sum(1 for p in pings if p.get("is_win"))
+    giveaways = sum(1 for p in pings if p.get("is_giveaway") and not p.get("is_win"))
+    mentions = len(pings) - wins - giveaways
+    same_day = gap_from.date() == gap_to.date()
+    span = (f"{gap_from:%H:%M}–{gap_to:%H:%M}" if same_day
+            else f"{gap_from:%d.%m %H:%M} – {gap_to:%d.%m %H:%M}")
+    lines = [
+        header("⏳", "Пропуск наверстан", gap_to.strftime("%d.%m")),
+        f"Приложение не работало **{span}** ({format_duration(gap_to - gap_from)}).",
+        "Первый проход скана после запуска закончен.",
+        DIV,
+        kv("🏆", "Победы", wins),
+        kv("🎁", "Розыгрыши", giveaways),
+        kv("📌", "Упоминания", mentions),
+    ]
+    if not pings:
+        lines += [DIV, empty("За время простоя ничего не нашлось.")]
+    return "\n".join(lines)
 
 
 # --- зарплаты из книги «Учет розыгрышей» ---------------------------------

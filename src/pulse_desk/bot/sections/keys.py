@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from database import (
     delete_bot_key, get_bot_key, list_bot_key_members, list_bot_keys, set_bot_key_expiry,
-    set_bot_key_label, set_bot_key_permissions, set_bot_key_revoked, set_bot_key_role,
+    set_bot_key_label, set_bot_key_max_uses, set_bot_key_permissions, set_bot_key_revoked,
+    set_bot_key_role,
 )
 
 from ...app_ctx import state
@@ -32,7 +33,7 @@ from ..keyboards import (
     key_expiry_keyboard, key_features_keyboard, key_members_keyboard, key_notify_keyboard,
     key_panel_keyboard, keys_keyboard,
 )
-from ..pending import prompt_pending, register_prompt
+from ..pending import InputRejected, prompt_pending, register_prompt
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
 from ..views import DIV, expiry_from_days, format_expiry, key_expired, parse_expiry_days
@@ -121,8 +122,7 @@ async def _consume_delay(event, pending: dict, raw: str) -> None:
         return
     minutes = parse_delay_input(raw)
     if minutes is None:
-        await event.respond("❌ Нужно целое число минут от 0 до 1440.")
-        return
+        raise InputRejected("❌ Нужно целое число минут от 0 до 1440.")
     grants = set_delay(parse_permissions(key.get("permissions")), minutes)
     await save_permissions(key_id, grants)
     await event.respond(
@@ -137,8 +137,7 @@ async def _consume_label(event, pending: dict, raw: str) -> None:
         return
     label = raw.strip()[:40]
     if not label:
-        await event.respond("❌ Метка не может быть пустой.")
-        return
+        raise InputRejected("❌ Метка не может быть пустой.")
     await set_bot_key_label(key_id, label)
     await record_app_event("INFO", "bot", "Bot key label changed",
                            {"id": key_id, "label": label, "via": "bot"})
@@ -154,8 +153,7 @@ async def _consume_expiry(event, pending: dict, raw: str) -> None:
         return
     days = parse_expiry_days(raw)
     if days is None:
-        await event.respond("❌ Нужно целое число дней от 0 до 365 (`0` — бессрочно).")
-        return
+        raise InputRejected("❌ Нужно целое число дней от 0 до 365 (`0` — бессрочно).")
     expires_at = expiry_from_days(days)
     await set_bot_key_expiry(key_id, expires_at)
     await record_app_event("INFO", "bot", "Bot key expiry changed",
@@ -200,6 +198,15 @@ async def _handle_panel(click: Click) -> None:
 
     if section == "name":
         await prompt_pending(event, LABEL_INPUT, scope=str(key_id))
+        return
+
+    if section == "once":
+        once = int(key.get("max_uses") or 0) != 1
+        await set_bot_key_max_uses(key_id, 1 if once else 0)
+        await record_app_event("INFO", "bot", "Bot key max uses changed",
+                               {"id": key_id, "max_uses": 1 if once else 0, "via": "bot"})
+        await event.answer("🎟 Одноразовый: закроется после первого входа" if once else "Без лимита входов")
+        await render_panel_into(event, key_id)
         return
 
     if section == "role":

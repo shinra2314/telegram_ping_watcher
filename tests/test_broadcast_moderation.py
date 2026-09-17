@@ -209,10 +209,14 @@ class ModeratedEnqueueTests(unittest.TestCase):
 
             self.assertTrue(all(c["premium_only"] is True for c in broadcast_calls),
                             "only the premium fast-path may fire before approval")
-            self.assertEqual(len(fake.sent), 1, "admin gets the moderation card")
+            self.assertEqual(len(fake.sent), 1, "admin gets one card")
             self.assertEqual(fake.sent[0]["target"], 777)
-            self.assertIn("на модерации", fake.sent[0]["message"])
-            flat = [btn for row in (fake.sent[0]["buttons"] or []) for btn in row]
+            # The owner's card goes out first; the moderation footer and buttons
+            # are edited onto it once the hold exists.
+            self.assertEqual(len(fake.edited), 1)
+            self.assertEqual(fake.edited[0]["message_id"], 101)
+            self.assertIn("на модерации", fake.edited[0]["text"])
+            flat = [btn for row in (fake.edited[0]["buttons"] or []) for btn in row]
             datas = {getattr(btn, "data", b"") for btn in flat}
             due = await database.get_due_pending_broadcasts(now_iso=_iso(datetime.now() + timedelta(minutes=10)))
             self.assertEqual(len(due), 1)

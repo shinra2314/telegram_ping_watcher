@@ -177,8 +177,13 @@ src/pulse_desk/
                       (`WATCHED_CHAT_TYPES`; groups = supergroups and the
                       discussion group behind a channel, i.e. comments). In a
                       group `own_mention` also counts Telegram's
-                      `message.mentioned` flag for the receiving account — a
-                      reply to it has no @ in the text. Messages sent by our own
+                      `message.mentioned` flag for the receiving account, but
+                      **not when the message is a reply** (owner's order,
+                      18.09): that flag is set both for a real mention and for
+                      anyone answering the account, and the answers were the
+                      bulk of the group noise. A reply that does name the
+                      account (@name, mention entity, t.me link) still arrives
+                      through `extract_mentions`. Messages sent by our own
                       accounts (`state.connected_user_ids`) are skipped there;
                       private chats stay out. A tag bot's ad (≥3 hidden user
                       links on emoji, no tracked name written out —
@@ -646,7 +651,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 1. Live `NewMessage`/`MessageEdited` handlers, the `auto-scan` sweep (channels), the group
    unread-mention catch-up and the global-search pass all call `process_ping_message`
 2. `telegram_ping_watcher.py` parses messages, matches tracked usernames + win/giveaway keywords
-   (in groups also `message.mentioned` for the receiving account)
+   (in groups also `message.mentioned` for the receiving account, replies excluded)
 3. Matches written to `pings` (card owed); checkpoints updated so next scan is incremental
 4. `ping_notify` sends the owner's card (silent when muted, never dropped), then the member
    broadcast; `notify-retry` delivers any card still owed

@@ -377,6 +377,15 @@ class PureRuleTests(unittest.TestCase):
         self.assertIsNone(ping_pipeline.own_mention(SimpleNamespace(mentioned=True, out=True), "MuverGT", tracked))
         self.assertIsNone(ping_pipeline.own_mention(msg, "", tracked))
 
+    def test_own_mention_ignores_a_reply_to_the_account(self):
+        tracked = ["MuverGT"]
+        reply = SimpleNamespace(mentioned=True, out=False, reply_to=SimpleNamespace(reply_to_msg_id=42))
+        self.assertIsNone(ping_pipeline.own_mention(reply, "MuverGT", tracked))
+        self.assertEqual(
+            ping_pipeline.own_mention(SimpleNamespace(mentioned=True, out=False, reply_to=None), "MuverGT", tracked),
+            "@MuverGT",
+        )
+
     def test_owner_card_muted_covers_every_former_drop(self):
         record = _record()
         self.assertFalse(owner_card_muted(record, {"enabled": True}))

@@ -41,11 +41,18 @@ def own_mention(message: Any, account_username: str, tracked: list[str]) -> Opti
     """The tracked name of the receiving account when Telegram says it was mentioned.
 
     ``message.mentioned`` is Telegram's own flag for "this mentions *you*": an
-    @mention of the account or a reply to its message — the second has no @ in
-    the text at all, so the text parser alone never sees it. Only an account
-    that is itself tracked counts, and its own messages never do.
+    @mention of the account or a reply to its message. Only an account that is
+    itself tracked counts, and its own messages never do.
+
+    A **reply carries no ping** (owner's order, 2026-09-18): someone answering
+    an account in a chat is a conversation, not a mention, and those cards were
+    the bulk of the group noise. A reply that really does name the account —
+    written @name, a hidden mention entity or a t.me link — still arrives, via
+    ``extract_mentions``; this only drops the flag's reply-only meaning.
     """
     if not account_username or not getattr(message, "mentioned", False) or getattr(message, "out", False):
+        return None
+    if getattr(message, "reply_to", None) is not None:
         return None
     wanted = account_username.strip().lstrip("@").lower()
     for name in tracked:
@@ -377,8 +384,9 @@ async def process_ping_message(
     body Telethon cannot decode (see ``global_search``). They are ignored
     whenever the message has real text to parse.
 
-    ``account_username`` is the receiving account's own @username, so a reply
-    to it in a group counts as its mention (see ``own_mention``).
+    ``account_username`` is the receiving account's own @username, so a
+    mention Telegram flags for it in a group counts even when the text parser
+    missed it — a reply to it does not (see ``own_mention``).
     """
     from database import get_ping_by_message_ref, save_ping
 

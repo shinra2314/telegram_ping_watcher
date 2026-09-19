@@ -15,13 +15,16 @@ from typing import Any, Optional
 
 from telethon import Button
 
-from ...analytics import build_analytics
+from ...analytics import build_analytics, build_panel_report
 from ...app_ctx import state
+from ...bot_permissions import has_feature
 from ...dashboard import collect_dashboard
+from ..cards import member_summary_card
 from ..media import cache_key, render_cached, show_screen
-from ..render.screens import build_dashboard_card
+from ..render.screens import build_dashboard_card, build_member_card
 from ..router import CallbackRouter, Click
 from ..views import DIV, FeedFilter
+from .giveaways import visible_accounts
 from .home import render_summary
 
 FEATURE = "stats"
@@ -119,8 +122,44 @@ async def render(is_admin: bool = True) -> tuple[str, list[list[Button]], Option
     return text, keyboard(summary, is_admin), image
 
 
+def member_keyboard(perms: dict) -> list[list[Button]]:
+    """Гостю — переходы в его же разделы, без пультовых фокусов."""
+    nav = [Button.inline("🕐 Лента", FeedFilter().cb())]
+    if has_feature(perms, "giveaways"):
+        nav.append(Button.inline("🎁 Розыгрыши", b"menu_giveaways"))
+    return [
+        nav,
+        [Button.inline("⬅️ Домой", b"menu_main"),
+         Button.inline("🔄 Обновить", b"menu_summary")],
+    ]
+
+
+async def render_member(perms: dict) -> tuple[str, list[list[Button]], Optional[str]]:
+    """Сводка держателя ключа: те же цифры, что в панели, и только его аккаунты.
+
+    Пульт владельца сюда не отдаётся ни в каком виде: он считает всю базу и
+    показывает скан, каналы и проблемы аккаунтов — чужую кухню (правило
+    владельца, 18.09).
+    """
+    scope = list(perms.get("accounts") or [])
+    names = visible_accounts(perms)
+    report = await build_panel_report(scope, names)
+    image = await render_cached(
+        "member-summary", cache_key(",".join(names), *(
+            (report.get("summary") or {}).get(key) for key in
+            ("total", "wins", "giveaways", "last_24h", "last_7d")
+        )),
+        lambda path: build_member_card(report, names, Path(path)),
+    )
+    text = member_summary_card(report, names)
+    return text, member_keyboard(perms), image
+
+
 async def handle(click: Click) -> None:
-    text, kb, image = await render(is_admin=click.role == "admin")
+    if click.role == "admin":
+        text, kb, image = await render(is_admin=True)
+    else:
+        text, kb, image = await render_member(click.perms)
     await show_screen(click.event, text, buttons=kb, image=image)
 
 

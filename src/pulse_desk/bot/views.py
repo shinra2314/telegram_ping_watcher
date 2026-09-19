@@ -399,6 +399,18 @@ ANALYTICS_TABS: list[tuple[str, str]] = [
     ("lat", "Задержка"),
 ]
 
+# Те же страницы для держателя ключа. «Качество» здесь нет: его считает
+# `build_detailed_analytics`, отчёт по всей базе, а гостю показывается
+# `build_panel_report` — только его аккаунты. Вкладка без данных хуже, чем её
+# отсутствие, поэтому список короче, а не с пустой страницей.
+MEMBER_ANALYTICS_TABS: list[tuple[str, str]] = [
+    ("sum", "Обзор"),
+    ("src", "Источники"),
+    ("who", "Люди"),
+    ("time", "Время"),
+    ("lat", "Задержка"),
+]
+
 # home-screen button -> feature code its key must grant
 SECTION_FEATURES = {
     "menu_giveaways": "giveaways",

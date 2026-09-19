@@ -14,9 +14,9 @@ import database
 from database import get_market_history, giveaway_bucket_total
 
 from ... import APP_VERSION
-from ...analytics import build_analytics, build_home_counters
+from ...analytics import build_analytics, build_home_counters, build_panel_report
 from ...app_ctx import state
-from ..cards import home_card, summary_card
+from ..cards import home_card, member_home_card, summary_card
 from ..keyboards import section_nav
 from ..reply import safe_edit
 from ..router import CallbackRouter, Click
@@ -29,7 +29,18 @@ async def menu_buttons(sender_id: int, role: str, perms: Optional[dict] = None):
     return main_menu_buttons(role, perms, salary=await salary_section.visible(sender_id, role))
 
 
-async def render_home(role: str) -> str:
+async def render_home(role: str, perms: Optional[dict] = None) -> str:
+    """Домашняя карточка. Гостю — его счётчики, владельцу — пульт всей базы."""
+    if role != "admin":
+        from .giveaways import visible_accounts
+
+        names = visible_accounts(perms or {})
+        report = await build_panel_report(list((perms or {}).get("accounts") or []), names)
+        return member_home_card(report, names)
+    return await _render_owner_home(role)
+
+
+async def _render_owner_home(role: str) -> str:
     # Home prints three numbers. It used to pay for 16 analytics aggregates
     # plus a whole giveaway board (~33 queries over 3 connections) to get them.
     counters, urgent = await asyncio.gather(
@@ -81,7 +92,7 @@ async def render_summary() -> str:
 
 
 async def handle_main(click: Click) -> None:
-    await safe_edit(click.event, await render_home(click.role),
+    await safe_edit(click.event, await render_home(click.role, click.perms),
                     buttons=await menu_buttons(click.sender_id, click.role, click.perms))
 
 

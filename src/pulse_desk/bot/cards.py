@@ -6,7 +6,7 @@ unit-test without a running bot. Data fetching lives in service.py.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..bot_permissions import (
     ALL_FEATURES,
@@ -21,7 +21,10 @@ from ..bot_permissions import (
 from .. import salary
 from ..roulette import next_fire_at
 from .chrome import bar, chip, empty, header, kv
-from .views import ANALYTICS_TABS, DIV, GiveawayFilter, fmt_dt, format_expiry, key_expired
+from .views import (
+    ANALYTICS_TABS, DIV, MEMBER_ANALYTICS_TABS, GiveawayFilter, fmt_dt, format_expiry,
+    key_expired,
+)
 
 
 def home_card(
@@ -42,6 +45,24 @@ def home_card(
         f"{kv('🆕', 'Новых пингов', new_pings)}   {urgent_cell}",
         f"{kv('🛰', 'Аккаунты', accounts)} {bar(accounts_online, accounts_total)}",
         kv("🔄", "Скан", last_scan),
+        DIV,
+        "Выберите раздел 👇",
+    ])
+
+
+def member_home_card(report: dict, accounts: Sequence[str] = ()) -> str:
+    """Главный экран держателя ключа: его счётчики, без хозяйства владельца.
+
+    Общая карточка печатает очередь действий по всей базе, флот аккаунтов и
+    время скана — то есть ровно то, что гостю видеть незачем (правило
+    владельца, 18.09).
+    """
+    summary = report.get("summary") or {}
+    names = ", ".join(f"@{name}" for name in accounts) if accounts else "все аккаунты"
+    return "\n".join([
+        header("🛰", "Pulse Desk", f"👁 {names}"[:60]),
+        f"{kv('📨', 'Упоминаний', summary.get('total', 0))}   {kv('🏆', 'Побед', summary.get('wins', 0))}",
+        f"{kv('🕐', 'За 24ч', summary.get('last_24h', 0))}   {kv('🎁', 'Розыгрышей', summary.get('giveaways', 0))}",
         DIV,
         "Выберите раздел 👇",
     ])
@@ -245,6 +266,115 @@ def analytics_card(tab: str, *, analytics: dict, detailed: dict) -> str:
             f"• `{r.get('status') or 'unknown'}` → `{r.get('action_status') or 'new'}` · `{r.get('count', 0)}`"
             for r in flow
         ] or [empty("Статусов пока нет.")]
+
+    return "\n".join(out)
+
+
+def member_summary_card(report: dict, accounts: Sequence[str] = ()) -> str:
+    """📊 Сводка держателя ключа: цифры только по его аккаунтам.
+
+    Владельцу этот же экран рисует пульт всей системы — скан, каналы, проблемы
+    аккаунтов. Держателю ключа там нечего смотреть и незачем это видеть, поэтому
+    у него своя карточка поверх `analytics.build_panel_report`, ровно того же
+    отчёта, по которому считает Mini App.
+    """
+    summary = report.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    wins = int(summary.get("wins") or 0)
+    names = ", ".join(f"@{name}" for name in accounts) if accounts else "все аккаунты"
+    out = [
+        header("📊", "Сводка", names[:60]),
+        f"{kv('📨', 'Упоминаний', total)}   {kv('🏆', 'Победы', f'{wins} · {_pct(wins, total)}')}",
+        f"{kv('🎁', 'Розыгрыши', summary.get('giveaways', 0))}   {kv('🕐', 'За 24ч', summary.get('last_24h', 0))}",
+        kv("📅", "За 7 дней", summary.get("last_7d", 0)),
+    ]
+    rows = report.get("accounts") or []
+    if rows:
+        out += [DIV, "🛰 **По аккаунтам**"]
+        out += _rank_lines(
+            rows,
+            title=lambda r: f"@{r.get('name') or '?'}",
+            value=lambda r: r.get("mentions") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед",
+            limit=8,
+        )
+    chats = report.get("chats") or []
+    if chats:
+        out += [DIV, f"💬 **Чаты** __(за {int(report.get('window_days') or 30)} дней)__"]
+        out += _rank_lines(
+            chats,
+            title=lambda r: r.get("chat"),
+            value=lambda r: r.get("count") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед · {r.get('giveaways', 0)} розыгр",
+            limit=5,
+        )
+    if total == 0:
+        out.append(empty("Упоминаний ваших аккаунтов пока нет."))
+    return "\n".join(out)
+
+
+def member_analytics_card(tab: str, report: dict, accounts: Sequence[str] = ()) -> str:
+    """Страница отчёта для держателя ключа — тот же `build_panel_report`."""
+    labels = dict(MEMBER_ANALYTICS_TABS)
+    tab = tab if tab in labels else "sum"
+    names = ", ".join(f"@{name}" for name in accounts) if accounts else "все аккаунты"
+    out = [header("📈", "Аналитика", f"{labels[tab]} · {names[:40]}")]
+    summary = report.get("summary") or {}
+    total = int(summary.get("total") or 0)
+
+    if tab == "sum":
+        wins = int(summary.get("wins") or 0)
+        giveaways = int(summary.get("giveaways") or 0)
+        out += [
+            f"{kv('📨', 'Упоминаний', total)}   {kv('🏆', 'Победы', f'{wins} · {_pct(wins, total)}')}",
+            f"{kv('🎁', 'Розыгрыши', f'{giveaways} · {_pct(giveaways, total)}')}   {kv('🎯', 'Win rate', f"{summary.get('win_rate', 0)}%")}",
+            f"{kv('🕐', 'За 24ч', summary.get('last_24h', 0))}   {kv('📅', 'За 7 дней', summary.get('last_7d', 0))}",
+            DIV,
+            "📅 **По дням**",
+        ]
+        out += _rank_lines(
+            list(reversed(report.get("daily") or []))[:7],
+            title=lambda r: r.get("day"),
+            value=lambda r: r.get("total") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед · {r.get('giveaways', 0)} розыгр",
+            limit=7,
+        )
+
+    elif tab == "src":
+        out += [f"💬 **Чаты** __(за {int(report.get('window_days') or 30)} дней)__"]
+        out += _rank_lines(
+            report.get("chats"),
+            title=lambda r: r.get("chat"),
+            value=lambda r: r.get("count") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед · {r.get('giveaways', 0)} розыгр",
+            limit=8,
+        )
+
+    elif tab == "who":
+        out += ["✍️ **Авторы** __(кто приносит ваши упоминания)__"]
+        out += _rank_lines(
+            report.get("senders"),
+            title=lambda r: r.get("sender"),
+            value=lambda r: r.get("count") or 0,
+            meta=lambda r: f"{r.get('wins', 0)} побед",
+            limit=8,
+        )
+
+    elif tab == "time":
+        hours = [float(v or 0) for v in (report.get("hours") or [0] * 24)]
+        peak_hour = max(range(24), key=lambda h: hours[h]) if any(hours) else None
+        out += [
+            "🕓 **Активность по часам**",
+            f"`{spark(hours)}`",
+            "`00      06      12      18   `",
+        ]
+        if peak_hour is not None:
+            out.append(kv("⏰", "Пик", f"{peak_hour:02d}:00 · {int(hours[peak_hour])} записей"))
+        else:
+            out.append(empty("Данных за период нет."))
+
+    else:  # lat
+        out += latency_lines(report.get("latency") or {})
 
     return "\n".join(out)
 

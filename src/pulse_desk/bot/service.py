@@ -372,7 +372,7 @@ async def init_bot() -> None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
             welcome_banner = BOT_ASSETS_DIR / "welcome.png"
-            home = await home_section.render_home(role)
+            home = await home_section.render_home(role, perms)
             buttons = await home_section.menu_buttons(event.sender_id, role, perms)
             if welcome_banner.exists():
                 try:
@@ -402,7 +402,7 @@ async def init_bot() -> None:
             if role is None:
                 await event.respond(await access_block_notice(event.sender_id) or locked_text)
                 return
-            home = await home_section.render_home(role)
+            home = await home_section.render_home(role, perms)
             buttons = await home_section.menu_buttons(event.sender_id, role, perms)
             banner = BOT_ASSETS_DIR / "welcome.png"
             if banner.exists():
@@ -435,12 +435,13 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/stats"))
         @viewer_only("stats")
         async def stats_handler(event, role, perms):
-            await event.respond(await analytics_section.render_stats(), buttons=section_nav(b"menu_stats"))
+            text = await analytics_section.render_stats(perms, role == "admin")
+            await event.respond(text, buttons=section_nav(b"menu_stats"))
 
         @bot_client.on(events.NewMessage(pattern="/analytics"))
         @viewer_only("analytics")
         async def analytics_handler(event, role, perms):
-            text, kb = await analytics_section.render_report()
+            text, kb = await analytics_section.render_report("sum", perms, role == "admin")
             await event.respond(text, buttons=kb, link_preview=False)
 
         @bot_client.on(events.NewMessage(pattern=r"/salary(?:\s+(\S+))?"))
@@ -459,7 +460,8 @@ async def init_bot() -> None:
         @bot_client.on(events.NewMessage(pattern="/status"))
         @viewer_only("status")
         async def status_handler(event, role, perms):
-            await event.respond(await analytics_section.render_status(), buttons=section_nav(b"menu_status"))
+            text = await analytics_section.render_status(perms, role == "admin")
+            await event.respond(text, buttons=section_nav(b"menu_status"))
 
         @bot_client.on(events.NewMessage(pattern="/giveaways"))
         @viewer_only("giveaways")

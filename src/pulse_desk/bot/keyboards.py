@@ -531,11 +531,16 @@ def leave_confirm_keyboard(chat_id: int) -> list[list[Button]]:
     ]
 
 
-def analytics_keyboard(active: str) -> list[list[Button]]:
-    """Tab strip for the analytics report + home/refresh footer."""
+def analytics_keyboard(active: str, tabs_source: Optional[Sequence[tuple[str, str]]] = None) -> list[list[Button]]:
+    """Tab strip for the analytics report + home/refresh footer.
+
+    ``tabs_source`` is the page list to draw — the owner gets every tab, a key
+    holder gets ``MEMBER_ANALYTICS_TABS``. A button that renders a page nobody
+    built for this role is worse than a missing one.
+    """
     tabs = [
         Button.inline(f"▸{label}" if code == active else label, f"an:{code}".encode())
-        for code, label in ANALYTICS_TABS
+        for code, label in (tabs_source or ANALYTICS_TABS)
     ]
     rows = [tabs[i:i + 3] for i in range(0, len(tabs), 3)]
     rows.append([

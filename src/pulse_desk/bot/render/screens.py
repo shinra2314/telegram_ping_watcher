@@ -152,6 +152,74 @@ def build_dashboard_card(summary: dict[str, Any], analytics: dict[str, Any],
         return None
 
 
+def build_member_card(report: dict[str, Any], accounts: Sequence[str],
+                      path: Path) -> Optional[str]:
+    """Сводка держателя ключа картинкой: только его аккаунты.
+
+    Пульт владельца сюда не годится — там прогресс скана, каналы и проблемы
+    аккаунтов, то есть чужая кухня. Числа берутся из
+    ``analytics.build_panel_report``, того же отчёта, по которому считает панель.
+    """
+    try:
+        summary = report.get("summary") or {}
+        img = canvas()
+        stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+        names = ", ".join(f"@{name}" for name in accounts) or "все аккаунты"
+        from PIL import ImageDraw
+
+        d = ImageDraw.Draw(img, "RGBA")
+        header(img, "Pulse Desk", ellipsize(d, names, font("name", px(28)), W * SS - px(420)),
+               f"PD·05 // {stamp}", CITRON)
+        stat_row(img, [
+            ("упоминаний", group(_num(summary.get("total"))), WHITE),
+            ("побед", group(_num(summary.get("wins"))), CITRON),
+            ("розыгрышей", group(_num(summary.get("giveaways"))), AMBER),
+        ], px(190))
+        stat_row(img, [
+            ("за 24 часа", str(_num(summary.get("last_24h"))), CYAN),
+            ("за 7 дней", str(_num(summary.get("last_7d"))), WHITE),
+            ("win rate", f"{summary.get('win_rate', 0)}%", UP),
+        ], px(330))
+
+        series = [float(_num(row.get("total"))) for row in (report.get("daily") or [])
+                  if isinstance(row, dict)]
+        chart_top = px(470)
+        tracked(d, (px(64), chart_top), "УПОМИНАНИЙ В ДЕНЬ", font("label", px(15)), px(2.2),
+                MUTED + (255,))
+        if any(series):
+            sparkline(img, (px(64), chart_top + px(34), W * SS - px(128), px(170)), series, CITRON)
+        else:
+            d.text((px(64), chart_top + px(60)), "нет данных за период",
+                   font=font("label", px(20)), fill=MUTED + (255,))
+        fade_rule(img, px(64), chart_top + px(224), W * SS - px(128), CITRON)
+
+        # «Что разобрать» у владельца — очередь действий; у гостя такой очереди
+        # нет, поэтому на её месте чаты, где его упоминают чаще всего. Список
+        # начинается сразу под графиком: у владельца между ними стоит полоса
+        # скана, а без неё осталась бы пустая треть карточки.
+        rows = [
+            {"title": str(chat.get("chat") or "?"),
+             "text": f"{_num(chat.get('wins'))} побед · {_num(chat.get('giveaways'))} розыгрышей",
+             "value": group(_num(chat.get("count"))),
+             "tone": "good" if _num(chat.get("wins")) else "info"}
+            for chat in (report.get("chats") or [])[:4]
+        ]
+        if rows:
+            tracked(d, (px(64), px(748)), "ГДЕ УПОМИНАЮТ ЧАЩЕ", font("label", px(15)), px(2.2),
+                    MUTED + (255,))
+            _attention_rows(img, rows, px(790))
+        else:
+            empty_state(img, "Упоминаний ваших аккаунтов пока нет")
+        scope_note = f"{len(accounts)} ACCOUNT" + ("S" if len(accounts) != 1 else "") if accounts else "ALL ACCOUNTS"
+        footer(img, f"PD·05 // {scope_note} · {int(report.get('window_days') or 30)} DAYS")
+        return save(img, path)
+    except Exception:  # pragma: no cover - рендер best effort
+        from ...app_ctx import logger
+
+        logger.exception("Member card rendering failed; falling back to text")
+        return None
+
+
 # ---------------------------------------------------------------- отчёт
 
 def build_report_card(data: Any, path: Path) -> Optional[str]:

@@ -140,9 +140,9 @@ routers/                   — `health.py` (main app) and `miniapp/` (panel app 
                       no member row, and the only endpoint on `fresh_caller`
                       rather than `fresh_admin`), analytics
                       (`analytics.build_panel_report`, counted **only over the
-                      key's accounts** — unlike the bot's 📊/📈, which show a
-                      guest global figures; `stats` gets the summary and the day
-                      chart, `analytics` the rest). `home` adds `me` (role,
+                      key's accounts**; the bot's 🏠/📊/📈/🛰 now call the same
+                      builder for a guest — see the rule below; `stats` gets the
+                      summary and the day chart, `analytics` the rest). `home` adds `me` (role,
                       accounts, notify types, delay, schedule) and `mine` (their
                       accounts' wins, engagement, last wins) for a non-admin
 
@@ -753,6 +753,21 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
   status against `statuses.py`, writes, publishes the live event and mirrors a
   "claimed" into the Obsidian note. When that logic lived in `routers/pings.py`,
   the same action taken from the bot silently skipped the note.
+- **A guest is counted over their own key, never over the base (owner's order,
+  2026-09-18).** A key holder pressed «📊 Сводка» and got the owner's 🛰 Пульт:
+  790 mentions, 588 important, the history-scan progress, 4154 channels. The
+  grant (`stats`) was right; the numbers behind it were everyone's. Every
+  read-only screen now branches on `role`: the owner keeps `collect_dashboard` /
+  `build_analytics` / `build_detailed_analytics`, a guest gets
+  `analytics.build_panel_report(perms["accounts"], visible_accounts(perms))` —
+  the very report the Mini App already served — rendered by `member_home_card`,
+  `member_summary_card`, `member_analytics_card` and `analytics.member_status`.
+  An empty `accounts` whitelist still means "all accounts", exactly as in the
+  panel. Owner infrastructure (scan progress, channel counts, uptime, DB size,
+  job list, account problems, the «Качество» tab that needs the global report)
+  is not scoped down for a guest — it is absent.
+  `tests/test_bot_member_scope.py` pins it: the guest path must never await the
+  global builders.
 - **Owner-only sections gate on `role == "admin"`, never on a grant code.** An
   empty `permissions` column means "grant everything" for legacy keys, so a new
   feature code would open the admin section for every key issued before it

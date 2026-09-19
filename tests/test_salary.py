@@ -50,9 +50,12 @@ def sheet_xml(rows: str) -> bytes:
 
 
 def month_row(row: int, serial: int, account: str, share: float, crypto: float,
-              skins: float, total: float, paid: str = "") -> str:
-    """Одна строка листа «Выплаты по месяцам» в том же виде, что пишет Excel."""
-    paid_cell = f'<c r="I{row}"><v>{paid}</v></c>' if paid else ""
+              skins: float, total: float, paid: str = "", yobo: float = 0.0) -> str:
+    """Одна строка листа «Выплаты по месяцам» в том же виде, что пишет Excel.
+
+    Столбцы H/I — йобо и его выплата, поэтому итог живёт в J, а дата выплаты в K.
+    """
+    paid_cell = f'<c r="K{row}"><v>{paid}</v></c>' if paid else ""
     return (
         f'<row r="{row}">'
         f'<c r="A{row}"><v>{serial}</v></c>'
@@ -62,7 +65,9 @@ def month_row(row: int, serial: int, account: str, share: float, crypto: float,
         f'<c r="E{row}"><v>{crypto * share}</v></c>'
         f'<c r="F{row}"><v>{skins}</v></c>'
         f'<c r="G{row}"><v>{skins * share}</v></c>'
-        f'<c r="H{row}"><v>{total}</v></c>'
+        f'<c r="H{row}"><v>{yobo}</v></c>'
+        f'<c r="I{row}"><v>{yobo * share}</v></c>'
+        f'<c r="J{row}"><v>{total}</v></c>'
         f"{paid_cell}"
         f'</row>'
     )
@@ -78,17 +83,17 @@ def book(months: list[MonthRow] = (), journal: list[Entry] = ()) -> SalaryBook:
 
 
 def row(month: str, account: str, total: float, *, crypto: float = 0.0, skins: float = 0.0,
-        paid: date | None = None, share: float = 0.35) -> MonthRow:
-    if crypto == 0 and skins == 0:
+        yobo: float = 0.0, paid: date | None = None, share: float = 0.35) -> MonthRow:
+    if crypto == 0 and skins == 0 and yobo == 0:
         crypto = total / share if total else 0.0
     if total == 0:
         status = STATUS_NONE
     else:
         status = STATUS_PAID if paid else STATUS_PENDING
     return MonthRow(
-        month=month, account=account, share=share, crypto=crypto, skins=skins,
-        pay_money=crypto * share, pay_skins=skins * share, total=total,
-        paid_at=paid, status=status,
+        month=month, account=account, share=share, crypto=crypto, skins=skins, yobo=yobo,
+        pay_money=crypto * share, pay_skins=skins * share, pay_yobo=yobo * share,
+        total=total, paid_at=paid, status=status,
     )
 
 
@@ -182,6 +187,16 @@ class MonthRowParsingTests(unittest.TestCase):
     def test_month_key_from_serial(self):
         rows = self.rows(month_row(6, 46235, "0", 0.35, 1.0, 0.0, 0.35))
         self.assertEqual(rows[0].month, "2026-08")
+
+    def test_yobo_is_its_own_column(self):
+        # H/I — йобо и его выплата, J — итог, K — дата: месяц, где выиграли
+        # только в йобо, обязан считаться месяцем с деньгами, а не пустым.
+        rows = self.rows(month_row(6, 46204, "0", 0.35, 0.0, 0.0, 0.175, yobo=0.5))
+        self.assertEqual(rows[0].yobo, 0.5)
+        self.assertAlmostEqual(rows[0].pay_yobo, 0.175)
+        self.assertEqual(rows[0].total, 0.175)
+        self.assertEqual(rows[0].status, STATUS_PENDING)
+        self.assertAlmostEqual(rows[0].won, 0.5)
 
 
 class JournalParsingTests(unittest.TestCase):

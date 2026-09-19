@@ -61,7 +61,8 @@ function overview(o) {
         act: 'member', data: { name: r.account },
         lead: '<span class="num" style="font-size:13px;font-weight:700">' + (i + 1) + '</span>', leadCls: i === 0 ? 'on' : '',
         title: esc(r.account),
-        desc: '<span class="badge ' + st[1] + '">' + st[0] + '</span> <span class="faint">крипта ' + money(r.crypto) + ' · скины ' + money(r.skins) + '</span>',
+        desc: '<span class="badge ' + st[1] + '">' + st[0] + '</span> <span class="faint">крипта ' + money(r.crypto)
+          + ' · скины ' + money(r.skins) + ' · йобо ' + money(r.yobo) + '</span>',
         end: '<div class="t num">' + money(r.total) + '</div><div class="progress" style="width:64px;margin-top:6px"><i style="width:'
           + Math.round(100 * (r.total || 0) / top) + '%"></i></div>',
       });
@@ -85,6 +86,14 @@ function accountView(a) {
     + '<div class="cell"><div class="k">Выиграно</div><div class="v">' + money(a.won) + '</div></div>'
     + '<div class="cell"><div class="k">Средний приз</div><div class="v sm">' + money(a.avg) + '</div></div>'
     + '<div class="cell"><div class="k">Лучший</div><div class="v sm">' + (a.best ? money(a.best.value) : '—') + '</div></div>'
+    + '</div>';
+  // Выиграно → начислено по каждому типу: у йобо своя пара столбцов в книге,
+  // и в панели он такой же гражданин, как крипта и скины.
+  html += '<div class="section-label">Начислено</div><div class="kv">'
+    + '<div class="cell"><div class="k">Крипта</div><div class="v sm">' + money(row.crypto) + ' → ' + money(row.pay_money) + '</div></div>'
+    + '<div class="cell"><div class="k">Скины</div><div class="v sm">' + money(row.skins) + ' → ' + money(row.pay_skins) + '</div></div>'
+    + '<div class="cell"><div class="k">йобо</div><div class="v sm">' + money(row.yobo) + ' → ' + money(row.pay_yobo) + '</div></div>'
+    + '<div class="cell"><div class="k">Доля</div><div class="v sm">' + Math.round((row.share || 0) * 100) + '%</div></div>'
     + '</div>';
   const kinds = Object.keys(a.by_kind || {}).sort((x, y) => a.by_kind[y] - a.by_kind[x]);
   if (kinds.length) {

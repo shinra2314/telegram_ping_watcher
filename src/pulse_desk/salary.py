@@ -157,11 +157,18 @@ class MonthRow:
     share: float
     crypto: float         # выиграно криптой за месяц, $
     skins: float          # выиграно скинами за месяц, $
+    yobo: float           # выиграно в йобо за месяц, $
     pay_money: float      # к выплате деньгами
     pay_skins: float      # к выплате скинами
+    pay_yobo: float       # к выплате за йобо
     total: float          # итого к выплате
     paid_at: Optional[date]
     status: str           # STATUS_NONE / STATUS_PENDING / STATUS_PAID
+
+    @property
+    def won(self) -> float:
+        """Сколько выиграно за месяц всеми типами — до доли владельца."""
+        return self.crypto + self.skins + self.yobo
 
 
 @dataclass(frozen=True)
@@ -236,7 +243,13 @@ def parse_workbook(data: bytes) -> SalaryBook:
 
 
 def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
-    """Строки листа «Выплаты по месяцам» — по одной на пару (месяц, аккаунт)."""
+    """Строки листа «Выплаты по месяцам» — по одной на пару (месяц, аккаунт).
+
+    Столбцы: D крипта, E к выплате, F скины, G к выплате, **H йобо, I к выплате**,
+    J итого, K дата выплаты. Пара под йобо появилась 18.09 (до этого тип не
+    считался нигде, и его деньги не доходили ни до кого), и всё правее неё
+    сдвинулось на два столбца — книга и парсер меняются только вместе.
+    """
     rows: list[MonthRow] = []
     for row in range(MONTH_FIRST_ROW, MONTH_MAX_ROW):
         day = serial_to_date(cells.get(f"A{row}"))
@@ -249,8 +262,9 @@ def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
             continue
         crypto = _num(cells.get(f"D{row}"))
         skins = _num(cells.get(f"F{row}"))
-        paid_at = serial_to_date(cells.get(f"I{row}"))
-        if crypto == 0 and skins == 0:
+        yobo = _num(cells.get(f"H{row}"))
+        paid_at = serial_to_date(cells.get(f"K{row}"))
+        if crypto == 0 and skins == 0 and yobo == 0:
             status = STATUS_NONE
         elif paid_at is not None:
             status = STATUS_PAID
@@ -262,9 +276,11 @@ def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
             share=_num(cells.get(f"C{row}")),
             crypto=crypto,
             skins=skins,
+            yobo=yobo,
             pay_money=_num(cells.get(f"E{row}")),
             pay_skins=_num(cells.get(f"G{row}")),
-            total=_num(cells.get(f"H{row}")),
+            pay_yobo=_num(cells.get(f"I{row}")),
+            total=_num(cells.get(f"J{row}")),
             paid_at=paid_at,
             status=status,
         ))

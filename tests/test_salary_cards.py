@@ -41,12 +41,13 @@ MONTHS = ["2026-07", "2026-08", "2026-09"]
 
 
 def row(account: str, total: float, *, month: str = "2026-09", crypto: float = 0.0,
-        skins: float = 0.0, paid: date | None = None, share: float = 0.35) -> MonthRow:
+        skins: float = 0.0, yobo: float = 0.0, paid: date | None = None,
+        share: float = 0.35) -> MonthRow:
     status = STATUS_NONE if total == 0 else (STATUS_PAID if paid else STATUS_PENDING)
     return MonthRow(
-        month=month, account=account, share=share, crypto=crypto, skins=skins,
-        pay_money=crypto * share, pay_skins=skins * share, total=total,
-        paid_at=paid, status=status,
+        month=month, account=account, share=share, crypto=crypto, skins=skins, yobo=yobo,
+        pay_money=crypto * share, pay_skins=skins * share, pay_yobo=yobo * share,
+        total=total, paid_at=paid, status=status,
     )
 
 
@@ -98,6 +99,19 @@ class PersonalCardTests(unittest.TestCase):
         # Крипта и скины показаны и «как выиграно», и «как к выплате».
         self.assertIn("12.71$", text)
         self.assertIn("4.45$", text)
+
+    def test_yobo_has_its_own_line(self):
+        # У йобо своя пара столбцов в книге — и своя строка в карточке, иначе
+        # выигрыш этого типа виден только в общей сумме.
+        only_yobo = SalaryBook(
+            accounts=[Account("Саня", 0.35)],
+            months=[row("Саня", 0.175, yobo=0.5)],
+            journal=[Entry(date(2026, 9, 10), "Саня", "Йобо", "ЙОБО", 0.5, 0.175)],
+            kinds=["Крипта", "Скины", "йобо"],
+        )
+        text = salary_card(account_analytics(only_yobo, "Саня", "2026-09"))
+        self.assertIn("йобо: `0.50$ → 0.17$`", text)
+        self.assertIn("Крипта: `0.00$ → 0.00$`", text)
 
     def test_paid_row_names_the_date(self):
         text = salary_card(account_analytics(book(), "Вова", "2026-09"))

@@ -535,6 +535,15 @@ src/pulse_desk/
                       evaluates a formula. Sheets are found **by name**
                       (`sheet_targets` walks workbook.xml → rels), never by
                       `sheetN.xml`, because that numbering is creation order.
+                      Columns of «Выплаты по месяцам» are positional and the
+                      parser hardcodes them: D крипта, E к выплате, F скины,
+                      G к выплате, **H йобо, I к выплате**, J итого, K дата
+                      выплаты, L статус. The йобо pair was added 18.09 by
+                      `scripts/add_salary_yobo_column.ps1` (the type existed in
+                      «Настройки» and in the journal, but no sheet summed it, so
+                      0.55 $ of owner shares reached nobody); everything right of
+                      it moved two columns, so **the book and `parse_month_rows`
+                      only ever change together**.
                       Dates are 1900-system serials (`serial_to_date`). Everything
                       is pure except `read_book`; the parsed `SalaryBook` snapshot
                       lives on `state.salary_book`.
@@ -614,12 +623,19 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
                              upload_emoji_pack.py (drives @Stickers from a
                              Premium session — stop the app first, ~10 min for
                              the full set), set_bot_profile.py (upload avatar),
-                             fix_salary_yobo_formulas.py (adds the missing
-                             «йобо» term to the salary workbook's monthly
-                             formulas — the reward type existed in Настройки but
-                             no sheet summed it, so such wins reached nobody's
-                             salary; makes a dated backup, needs the book closed,
-                             `--dry-run` reports what it would change)
+                             add_salary_yobo_column.ps1 (gives «йобо» its own
+                             pair of columns — H «йобо за месяц» and I «к
+                             выплате» — on «Выплаты по месяцам» and «Сводка»,
+                             and re-points D at Крипта alone. Drives Excel over
+                             COM rather than editing the XML: Excel is what
+                             shifts every formula, width and merged cell that
+                             pointed past the insert, and it recalculates and
+                             saves, so the cached values the bot reads are fresh.
+                             Refuses while that book is open, makes a dated
+                             backup, closes without saving if anything throws.
+                             It replaced fix_salary_yobo_formulas.py, which
+                             folded йобо into the Крипта column — running that
+                             one now would count йобо twice)
 ```
 
 ### Background jobs (always running)

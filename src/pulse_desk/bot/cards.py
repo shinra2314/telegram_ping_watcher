@@ -821,6 +821,7 @@ def salary_card(data: dict) -> str:
         DIV,
         kv("🪙", "Крипта", f"{money(row.crypto)} → {money(row.pay_money)}"),
         kv("💎", "Скины", f"{money(row.skins)} → {money(row.pay_skins)}"),
+        kv("🎰", "йобо", f"{money(row.yobo)} → {money(row.pay_yobo)}"),
         kv("🧮", "Доля", f"{row.share * 100:.0f}%"),
         DIV,
         kv("🏆", "Место", f"{data['rank']} из {data['of']}"),

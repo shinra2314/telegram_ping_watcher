@@ -823,6 +823,16 @@ def salary_card(data: dict) -> str:
         kv("💎", "Скины", f"{money(row.skins)} → {money(row.pay_skins)}"),
         kv("🎰", "йобо", f"{money(row.yobo)} → {money(row.pay_yobo)}"),
         kv("🧮", "Доля", f"{row.share * 100:.0f}%"),
+    ]
+    # Расходы месяца делятся в той же пропорции, что и приз, поэтому показываем
+    # и сам расход, и что из него легло на долю, и итоговую арифметику: вычет,
+    # который не видно, — это просто другой процент.
+    if row.expenses:
+        lines += [
+            kv("🧾", "Расходы", f"{money(row.expenses)} → −{money(row.withheld)}"),
+            f"`{money(row.gross_pay)}` − `{money(row.withheld)}` = `{money(row.total)}`",
+        ]
+    lines += [
         DIV,
         kv("🏆", "Место", f"{data['rank']} из {data['of']}"),
         kv("📈", "К прошлому месяцу", _signed(data["delta"])),
@@ -856,6 +866,8 @@ def salary_analytics_card(data: dict) -> str:
         kv("⏳", "Ждёт выплаты", money(data["all_time_pending"])),
         kv("🎁", "Выигрышей", data["wins_all_time"]),
     ]
+    if data.get("all_time_withheld"):
+        lines.append(kv("✂️", "Удержано за расходы", money(data["all_time_withheld"])))
     return "\n".join(lines)
 
 
@@ -884,6 +896,13 @@ def salary_owner_card(data: dict) -> str:
         DIV,
         f"{kv('🎁', 'Выиграно', money(data['won']))}   {kv('🧾', 'Организатору', money(data['profit']))}",
     ]
+    # «Организатору» уже за вычетом расходов, поэтому сами расходы показываем
+    # рядом — иначе цифра выглядит просевшей без причины.
+    if data.get("expenses"):
+        lines.append(
+            f"{kv('💳', 'Расходы', money(data['expenses']))}   "
+            f"{kv('✂️', 'Удержано с долей', money(data['withheld']))}"
+        )
     rows = data.get("rows") or []
     if rows:
         width = max(len(row.account) for row in rows)

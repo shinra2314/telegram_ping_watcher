@@ -45,6 +45,10 @@ function overview(o) {
     + '<div class="cell"><div class="k">Ждут</div><div class="v sm">' + money(o.pending) + '</div></div>'
     + '<div class="cell"><div class="k">Выиграно</div><div class="v sm">' + money(o.won) + '</div></div>'
     + '<div class="cell"><div class="k">Побед</div><div class="v sm">' + fmtInt(o.wins) + '</div></div>'
+    // «Прибыль» уже за вычетом расходов месяца — без этих двух ячеек она просто
+    // выглядела бы меньше, чем должна.
+    + (o.expenses ? '<div class="cell"><div class="k">Расходы</div><div class="v sm">' + money(o.expenses) + '</div></div>'
+      + '<div class="cell"><div class="k">Удержано с долей</div><div class="v sm">' + money(o.withheld) + '</div></div>' : '')
     + '</div>';
   if (o.issues && o.issues.length) {
     html += '<div class="err-box" style="margin-top:12px;border-color:rgba(255,190,70,.3);background:rgba(255,190,70,.06)">'
@@ -94,7 +98,16 @@ function accountView(a) {
     + '<div class="cell"><div class="k">Скины</div><div class="v sm">' + money(row.skins) + ' → ' + money(row.pay_skins) + '</div></div>'
     + '<div class="cell"><div class="k">йобо</div><div class="v sm">' + money(row.yobo) + ' → ' + money(row.pay_yobo) + '</div></div>'
     + '<div class="cell"><div class="k">Доля</div><div class="v sm">' + Math.round((row.share || 0) * 100) + '%</div></div>'
-    + '</div>';
+    // Расходы месяца вычитаются до дележа, поэтому на долю ложится своя часть.
+    // Показываем и расход, и удержание, и саму арифметику: невидимый вычет —
+    // это просто другой процент, а он тут написан.
+    + (row.expenses ? '<div class="cell"><div class="k">Расходы</div><div class="v sm">' + money(row.expenses) + '</div></div>'
+      + '<div class="cell"><div class="k">Удержано с доли</div><div class="v sm">−' + money(row.withheld) + '</div></div>' : '')
+    + '</div>'
+    // gross_pay — из самой аналитики: asdict() отдаёт поля строки, но не её
+    // вычисляемые свойства, так что в row его нет.
+    + (row.withheld ? '<div class="faint" style="font-size:12px;margin-top:6px">' + money(a.gross_pay)
+      + ' − ' + money(row.withheld) + ' = ' + money(row.total) + '</div>' : '');
   const kinds = Object.keys(a.by_kind || {}).sort((x, y) => a.by_kind[y] - a.by_kind[x]);
   if (kinds.length) {
     const max = a.by_kind[kinds[0]] || 1;

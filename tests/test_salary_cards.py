@@ -42,12 +42,13 @@ MONTHS = ["2026-07", "2026-08", "2026-09"]
 
 def row(account: str, total: float, *, month: str = "2026-09", crypto: float = 0.0,
         skins: float = 0.0, yobo: float = 0.0, paid: date | None = None,
-        share: float = 0.35) -> MonthRow:
+        share: float = 0.35, expenses: float = 0.0) -> MonthRow:
     status = STATUS_NONE if total == 0 else (STATUS_PAID if paid else STATUS_PENDING)
     return MonthRow(
         month=month, account=account, share=share, crypto=crypto, skins=skins, yobo=yobo,
         pay_money=crypto * share, pay_skins=skins * share, pay_yobo=yobo * share,
         total=total, paid_at=paid, status=status,
+        expenses=expenses, withheld=expenses * share,
     )
 
 
@@ -170,6 +171,43 @@ class OwnerCardTests(unittest.TestCase):
 
     def test_off_card(self):
         self.assertIn("недоступна", salary_off_card())
+
+
+class ExpenseCardTests(unittest.TestCase):
+    """Вычет обязан быть видно. Невидимый вычет — это просто другой процент."""
+
+    def with_expenses(self) -> SalaryBook:
+        return SalaryBook(
+            accounts=[Account("Вова", 0.4)],
+            months=[row("Вова", 8.0, month="2026-11", crypto=25.0, share=0.4, expenses=5.0)],
+            journal=[Entry(date(2026, 11, 3), "Вова", "Крипта", "приз", 25.0, 10.0)],
+            kinds=["Крипта", "Скины", "йобо"],
+        )
+
+    def test_personal_card_shows_the_deduction_and_the_arithmetic(self):
+        text = salary_card(account_analytics(self.with_expenses(), "Вова", "2026-11"))
+        self.assertIn("Расходы", text)
+        self.assertIn("5.00$ → −2.00$", text)
+        self.assertIn("`10.00$` − `2.00$` = `8.00$`", text)
+        # Доля печатается той, что в книге, и остаётся ею: вычет — отдельная
+        # строка, а не подкрученный процент.
+        self.assertIn("40%", text)
+
+    def test_month_without_expenses_looks_exactly_as_before(self):
+        text = salary_card(account_analytics(book(), "Илья", "2026-09"))
+        self.assertNotIn("Расходы", text)
+
+    def test_owner_card_names_expenses_next_to_profit(self):
+        text = salary_owner_card(owner_overview(self.with_expenses(), "2026-11"))
+        self.assertIn("Расходы", text)
+        self.assertIn("5.00$", text)
+        self.assertIn("2.00$", text)    # удержано с долей
+        self.assertIn("12.00$", text)   # организатору: 25 − 8 − 5
+
+    def test_analytics_card_totals_the_withholding(self):
+        text = salary_analytics_card(account_analytics(self.with_expenses(), "Вова", "2026-11"))
+        self.assertIn("Удержано за расходы", text)
+        self.assertIn("2.00$", text)
 
 
 class PaidNoticeTests(unittest.TestCase):

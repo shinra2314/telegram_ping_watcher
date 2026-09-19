@@ -5,6 +5,12 @@
 помесячно, а столбец «Дата выплаты» (ручной) говорит, забрал человек деньги или
 ещё нет. Бот только читает книгу — единственный источник правды остаётся Excel.
 
+Расходы месяца (прокси, подписки, комиссии) вычитаются **до** дележа: ручной
+столбец «Расходы» и считаемое из него «Удержано» = расходы × доля, а «Итого» —
+уже за вычетом. Арифметически это ``(выигрыш − расходы) × доля``, просто
+разложенное так, чтобы столбцы по типам наград остались читаемыми, а вычет был
+виден отдельной строкой, а не спрятан в проценте.
+
 Парсер — на stdlib (``zipfile`` + ``ElementTree``): книга это zip с XML внутри, а
 ``openpyxl`` тянуть в зависимости ради четырёх листов незачем. Читаются
 **закешированные** значения формул (``<v>``), которые Excel пересчитывает при
@@ -35,6 +41,7 @@ SHEET_SUMMARY = "Сводка"
 # мы читаем ровно их — сдвиг строк сломал бы книгу задолго до бота.
 ACCOUNT_ROWS = range(8, 14)      # A8:B13 — аккаунт и доля владельца
 KIND_ROWS = range(16, 19)        # A16:A18 — типы наград
+MONTH_HEADER_ROW = 5             # «Выплаты по месяцам», строка заголовков
 MONTH_FIRST_ROW = 6              # «Выплаты по месяцам», данные ниже шапки
 MONTH_MAX_ROW = 400
 JOURNAL_ROWS = range(4, 504)     # «Журнал» A4:H503 — тот же диапазон, что в SUMIFS
@@ -161,14 +168,26 @@ class MonthRow:
     pay_money: float      # к выплате деньгами
     pay_skins: float      # к выплате скинами
     pay_yobo: float       # к выплате за йобо
-    total: float          # итого к выплате
+    total: float          # итого к выплате — уже за вычетом удержанного
     paid_at: Optional[date]
     status: str           # STATUS_NONE / STATUS_PENDING / STATUS_PAID
+    expenses: float = 0.0  # расходы месяца по этому аккаунту, $ (ручной столбец)
+    withheld: float = 0.0  # сколько расходов легло на долю аккаунта, $
 
     @property
     def won(self) -> float:
         """Сколько выиграно за месяц всеми типами — до доли владельца."""
         return self.crypto + self.skins + self.yobo
+
+    @property
+    def net(self) -> float:
+        """Сколько осталось делить после расходов месяца."""
+        return self.won - self.expenses
+
+    @property
+    def gross_pay(self) -> float:
+        """Доля аккаунта до удержания расходов — то, из чего вычли ``withheld``."""
+        return self.pay_money + self.pay_skins + self.pay_yobo
 
 
 @dataclass(frozen=True)
@@ -242,14 +261,37 @@ def parse_workbook(data: bytes) -> SalaryBook:
     return book
 
 
+def month_columns(cells: dict[str, Any]) -> dict[str, str]:
+    """Буквы столбцов «Выплат по месяцам» — по шапке, а не по вере в порядок.
+
+    Пара «Расходы»/«Удержано» встаёт перед «Итого»
+    (``scripts/add_salary_expenses_column.ps1``), сдвигая итог, дату и статус на
+    два столбца вправо. Правку применяет Excel на машине владельца, а не мы, так
+    что момента «книга уже новая, процесс ещё старый» не избежать — и в этот
+    момент жёсткая разметка прочитала бы «Итого» как расходы и показала бы всем
+    нули. Поэтому разметка берётся из заголовка: пустая шапка (так строят
+    ``cells`` тесты и старые книги) читается как старый лист.
+    """
+    header = _text(cells.get(f"J{MONTH_HEADER_ROW}")).casefold()
+    if "расход" in header:
+        return {"expenses": "J", "withheld": "K", "total": "L", "paid": "M"}
+    return {"expenses": "", "withheld": "", "total": "J", "paid": "K"}
+
+
 def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
     """Строки листа «Выплаты по месяцам» — по одной на пару (месяц, аккаунт).
 
     Столбцы: D крипта, E к выплате, F скины, G к выплате, **H йобо, I к выплате**,
-    J итого, K дата выплаты. Пара под йобо появилась 18.09 (до этого тип не
-    считался нигде, и его деньги не доходили ни до кого), и всё правее неё
-    сдвинулось на два столбца — книга и парсер меняются только вместе.
+    дальше — по ``month_columns``: либо сразу J итого / K дата (книга до расходов),
+    либо **J расходы, K удержано**, L итого, M дата. Пара под йобо появилась 18.09
+    (до этого тип не считался нигде, и его деньги не доходили ни до кого), пара
+    под расходы — 19.09.
     """
+    columns = month_columns(cells)
+    expenses_col = columns["expenses"]
+    withheld_col = columns["withheld"]
+    total_col = columns["total"]
+    paid_col = columns["paid"]
     rows: list[MonthRow] = []
     for row in range(MONTH_FIRST_ROW, MONTH_MAX_ROW):
         day = serial_to_date(cells.get(f"A{row}"))
@@ -263,7 +305,7 @@ def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
         crypto = _num(cells.get(f"D{row}"))
         skins = _num(cells.get(f"F{row}"))
         yobo = _num(cells.get(f"H{row}"))
-        paid_at = serial_to_date(cells.get(f"K{row}"))
+        paid_at = serial_to_date(cells.get(f"{paid_col}{row}"))
         if crypto == 0 and skins == 0 and yobo == 0:
             status = STATUS_NONE
         elif paid_at is not None:
@@ -280,9 +322,11 @@ def parse_month_rows(cells: dict[str, Any]) -> list[MonthRow]:
             pay_money=_num(cells.get(f"E{row}")),
             pay_skins=_num(cells.get(f"G{row}")),
             pay_yobo=_num(cells.get(f"I{row}")),
-            total=_num(cells.get(f"J{row}")),
+            total=_num(cells.get(f"{total_col}{row}")),
             paid_at=paid_at,
             status=status,
+            expenses=_num(cells.get(f"{expenses_col}{row}")) if expenses_col else 0.0,
+            withheld=_num(cells.get(f"{withheld_col}{row}")) if withheld_col else 0.0,
         ))
     return rows
 
@@ -334,6 +378,18 @@ def collect_issues(book: SalaryBook) -> list[str]:
     gap = uncounted_total(book)
     if gap > 0.005:
         issues.append(f"Мимо помесячных выплат: `{gap:.2f}$` — проверьте столбец D")
+
+    # Расходы месяца больше выигрыша — доля уходит в минус. Книгу не подкручиваем
+    # (это были бы выдуманные цифры), но владелец должен увидеть это раньше, чем
+    # человек откроет карточку с отрицательной зарплатой.
+    overspent = [row for row in book.months if row.total < -0.005]
+    if overspent:
+        worst = min(overspent, key=lambda row: row.total)
+        tail = f" и ещё {len(overspent) - 1}" if len(overspent) > 1 else ""
+        issues.append(
+            f"Расходы съели долю: `{worst.account}` за {month_label(worst.month)} — "
+            f"`{worst.total:.2f}$`{tail}"
+        )
     return issues
 
 
@@ -343,6 +399,10 @@ def uncounted_total(book: SalaryBook) -> float:
     Помесячные формулы складывают только перечисленные в них типы наград, так что
     новый тип (как «йобо») тихо выпадает из выплат. Сравнение с «Журналом» ловит
     это без знания о том, какие именно типы попали в формулу.
+
+    Удержанные расходы прибавляются обратно: они не «не досчитаны», а вычтены
+    сознательно, и без этого каждый месяц с расходами кричал бы, что теряет
+    деньги.
     """
     shares = {account.name.casefold(): account.share for account in book.accounts}
     expected: dict[tuple[str, str], float] = {}
@@ -355,7 +415,7 @@ def uncounted_total(book: SalaryBook) -> float:
     counted: dict[tuple[str, str], float] = {}
     for row in book.months:
         key = (row.month, row.account.casefold())
-        counted[key] = counted.get(key, 0.0) + row.total
+        counted[key] = counted.get(key, 0.0) + row.total + row.withheld
     return sum(max(0.0, value - counted.get(key, 0.0)) for key, value in expected.items())
 
 
@@ -493,9 +553,13 @@ def account_analytics(book: SalaryBook, account: str, month: str) -> dict:
         "best": entries[0] if entries else None,
         "avg": (won / len(entries)) if entries else 0.0,
         "by_kind": by_kind,
+        "expenses": row.expenses if row else 0.0,
+        "withheld": row.withheld if row else 0.0,
+        "gross_pay": row.gross_pay if row else 0.0,
         "prev_total": prev_total,
         "delta": total - prev_total,
         "all_time": sum(r.total for r in mine),
+        "all_time_withheld": sum(r.withheld for r in mine),
         "all_time_paid": sum(r.total for r in mine if r.status == STATUS_PAID),
         "all_time_pending": sum(r.total for r in mine if r.status == STATUS_PENDING),
         "wins_all_time": sum(1 for e in book.journal if e.account.casefold() == account.casefold()),
@@ -503,11 +567,17 @@ def account_analytics(book: SalaryBook, account: str, month: str) -> dict:
 
 
 def owner_overview(book: SalaryBook, month: str) -> dict:
-    """Сводка месяца для владельца: кому сколько и что ещё не выплачено."""
+    """Сводка месяца для владельца: кому сколько и что ещё не выплачено.
+
+    ``profit`` — то, что остаётся организатору **после** расходов месяца: доля
+    вычитается из уже уменьшенного банка, а сами расходы организатор платит из
+    своего остатка, поэтому они вычитаются здесь ещё раз, а не «уже учтены».
+    """
     rows = top_for_month(book, month)
     entries = [entry for entry in book.journal if month_key(entry.day) == month]
     payout = sum(row.total for row in rows)
     won = sum(entry.value for entry in entries)
+    expenses = sum(row.expenses for row in rows)
     return {
         "month": month,
         "rows": rows,
@@ -516,7 +586,9 @@ def owner_overview(book: SalaryBook, month: str) -> dict:
         "pending": sum(row.total for row in rows if row.status == STATUS_PENDING),
         "pending_names": [row.account for row in rows if row.status == STATUS_PENDING],
         "won": won,
-        "profit": won - payout,
+        "expenses": expenses,
+        "withheld": sum(row.withheld for row in rows),
+        "profit": won - payout - expenses,
         "wins": len(entries),
         "issues": list(book.issues),
     }

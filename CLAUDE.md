@@ -535,15 +535,34 @@ src/pulse_desk/
                       evaluates a formula. Sheets are found **by name**
                       (`sheet_targets` walks workbook.xml → rels), never by
                       `sheetN.xml`, because that numbering is creation order.
-                      Columns of «Выплаты по месяцам» are positional and the
-                      parser hardcodes them: D крипта, E к выплате, F скины,
-                      G к выплате, **H йобо, I к выплате**, J итого, K дата
-                      выплаты, L статус. The йобо pair was added 18.09 by
+                      Columns of «Выплаты по месяцам» are positional: D крипта,
+                      E к выплате, F скины, G к выплате, **H йобо, I к выплате**,
+                      then **J расходы, K удержано**, L итого, M дата выплаты,
+                      N статус. The йобо pair was added 18.09 by
                       `scripts/add_salary_yobo_column.ps1` (the type existed in
                       «Настройки» and in the journal, but no sheet summed it, so
-                      0.55 $ of owner shares reached nobody); everything right of
-                      it moved two columns, so **the book and `parse_month_rows`
-                      only ever change together**.
+                      0.55 $ of owner shares reached nobody).
+                      **Expenses are deducted before the split** (19.09,
+                      `scripts/add_salary_expenses_column.ps1`): J is the owner's
+                      manual entry, `K = J × доля`, and «Итого» is `E+G+I−K`,
+                      i.e. `(выигрыш − расходы) × доля` arranged so the per-kind
+                      columns keep their meaning and the deduction stays a visible
+                      line. Running the accounts costs money and the book had
+                      nowhere to put it, so the only way to carry a cost was to
+                      quietly shade someone's percentage — a rate that does not
+                      mean what it says is a rate nobody can check. «Сводка» got
+                      the same pair, and its `B17` had to lose `K11`: `C19`
+                      compares `B17` against the monthly total and would otherwise
+                      declare the book broken.
+                      The parser does **not** hardcode where «Итого» sits —
+                      `month_columns` reads the J5 header, because the owner
+                      re-saves the book in Excel and between that save and the
+                      next restart a hardcoded layout would read «Итого» as
+                      expenses and show everyone zeros. An empty expense cell is
+                      0, so every past month stays figure-for-figure the same;
+                      `uncounted_total` adds `withheld` back (it is deducted on
+                      purpose, not lost), and `collect_issues` reports a month
+                      whose expenses ate the whole share instead of clamping it.
                       Dates are 1900-system serials (`serial_to_date`). Everything
                       is pure except `read_book`; the parsed `SalaryBook` snapshot
                       lives on `state.salary_book`.
@@ -635,7 +654,16 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
                              backup, closes without saving if anything throws.
                              It replaced fix_salary_yobo_formulas.py, which
                              folded йобо into the Крипта column — running that
-                             one now would count йобо twice)
+                             one now would count йобо twice),
+                             add_salary_expenses_column.ps1 (same COM approach:
+                             inserts J «Расходы» (manual, carries the «Дата
+                             выплаты» fill so the book's «жёлтое = вписать
+                             руками» convention still reads) and K «Удержано»
+                             before «Итого» on both money sheets, re-points
+                             «Итого» at `E+G+I−K` and «Сводка» `B17` at
+                             `E11+G11+I11−K11`. Refuses unless J5 still says
+                             «Итого» — an insert into an unexpected layout would
+                             land two columns inside someone's data)
 ```
 
 ### Background jobs (always running)

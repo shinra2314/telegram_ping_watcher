@@ -21,6 +21,7 @@ from pulse_desk.salary import (
     collect_issues,
     current_month,
     match_account,
+    month_columns,
     month_key,
     month_keys,
     month_label,
@@ -73,6 +74,36 @@ def month_row(row: int, serial: int, account: str, share: float, crypto: float,
     )
 
 
+def expenses_header(text: str = "Расходы\nза месяц, $") -> str:
+    """Шапка J5 — по ней парсер и узнаёт книгу с расходами."""
+    return f'<row r="5"><c r="J5" t="inlineStr"><is><t>{text}</t></is></c></row>'
+
+
+def month_row_exp(row: int, serial: int, account: str, share: float, crypto: float,
+                  expenses: float, paid: str = "") -> str:
+    """Строка книги с расходами: J расходы, K удержано, L итого, M дата."""
+    withheld = expenses * share
+    total = crypto * share - withheld
+    paid_cell = f'<c r="M{row}"><v>{paid}</v></c>' if paid else ""
+    return (
+        f'<row r="{row}">'
+        f'<c r="A{row}"><v>{serial}</v></c>'
+        f'<c r="B{row}" t="s"><v>{account}</v></c>'
+        f'<c r="C{row}"><v>{share}</v></c>'
+        f'<c r="D{row}"><v>{crypto}</v></c>'
+        f'<c r="E{row}"><v>{crypto * share}</v></c>'
+        f'<c r="F{row}"><v>0</v></c>'
+        f'<c r="G{row}"><v>0</v></c>'
+        f'<c r="H{row}"><v>0</v></c>'
+        f'<c r="I{row}"><v>0</v></c>'
+        f'<c r="J{row}"><v>{expenses}</v></c>'
+        f'<c r="K{row}"><v>{withheld}</v></c>'
+        f'<c r="L{row}"><v>{total}</v></c>'
+        f"{paid_cell}"
+        f'</row>'
+    )
+
+
 def book(months: list[MonthRow] = (), journal: list[Entry] = ()) -> SalaryBook:
     return SalaryBook(
         accounts=[Account("Тимон", 0.35), Account("Илья", 0.35), Account("Вова", 0.4)],
@@ -83,10 +114,12 @@ def book(months: list[MonthRow] = (), journal: list[Entry] = ()) -> SalaryBook:
 
 
 def row(month: str, account: str, total: float, *, crypto: float = 0.0, skins: float = 0.0,
-        yobo: float = 0.0, paid: date | None = None, share: float = 0.35) -> MonthRow:
+        yobo: float = 0.0, paid: date | None = None, share: float = 0.35,
+        expenses: float = 0.0) -> MonthRow:
+    """Строка месяца. ``total`` — итог **после** удержания, как в книге."""
     if crypto == 0 and skins == 0 and yobo == 0:
-        crypto = total / share if total else 0.0
-    if total == 0:
+        crypto = (total + expenses * share) / share if total else 0.0
+    if total == 0 and expenses == 0:
         status = STATUS_NONE
     else:
         status = STATUS_PAID if paid else STATUS_PENDING
@@ -94,6 +127,7 @@ def row(month: str, account: str, total: float, *, crypto: float = 0.0, skins: f
         month=month, account=account, share=share, crypto=crypto, skins=skins, yobo=yobo,
         pay_money=crypto * share, pay_skins=skins * share, pay_yobo=yobo * share,
         total=total, paid_at=paid, status=status,
+        expenses=expenses, withheld=expenses * share,
     )
 
 
@@ -383,6 +417,96 @@ class IssueTests(unittest.TestCase):
             journal=[Entry(date(2026, 9, 3), "Илья", "Крипта", "приз", 10.0, 3.5)],
         )
         self.assertEqual(collect_issues(data), [])
+
+
+class MonthLayoutTests(unittest.TestCase):
+    """Разметка берётся из шапки, потому что книгу пересохраняет владелец.
+
+    Между его сохранением и перезапуском приложения живёт процесс со старым
+    кодом; жёсткие буквы столбцов прочитали бы в этот момент «Итого» как расходы.
+    """
+
+    def test_book_without_the_column_reads_the_old_way(self):
+        self.assertEqual(month_columns({}), {"expenses": "", "withheld": "", "total": "J", "paid": "K"})
+
+    def test_header_switches_the_layout(self):
+        cells = {"J5": "Расходы\nза месяц, $"}
+        self.assertEqual(month_columns(cells),
+                         {"expenses": "J", "withheld": "K", "total": "L", "paid": "M"})
+
+    def test_old_header_is_not_mistaken_for_the_new_one(self):
+        self.assertEqual(month_columns({"J5": "Итого\nк выплате, $"})["total"], "J")
+
+
+class ExpenseParsingTests(unittest.TestCase):
+    def rows(self, xml_rows: str) -> list[MonthRow]:
+        return parse_month_rows(sheet_cells(sheet_xml(xml_rows), ["Тимон", "Вова"]))
+
+    def test_columns_shift_by_two(self):
+        rows = self.rows(expenses_header() + month_row_exp(6, 46327, "1", 0.4, 25.0, 5.0, paid="46344"))
+        self.assertAlmostEqual(rows[0].expenses, 5.0)
+        self.assertAlmostEqual(rows[0].withheld, 2.0)
+        self.assertAlmostEqual(rows[0].total, 8.0)
+        self.assertEqual(rows[0].paid_at, date(2026, 11, 18))
+        self.assertEqual(rows[0].status, STATUS_PAID)
+
+    def test_deduction_happens_before_the_share(self):
+        # Ровно то, ради чего столбец и появился: доля берётся с остатка, а не
+        # спрятана в проценте. 40% от (25 − 5) == 25*0.4 − 5*0.4.
+        rows = self.rows(expenses_header() + month_row_exp(6, 46327, "1", 0.4, 25.0, 5.0))
+        got = rows[0]
+        self.assertAlmostEqual(got.total, got.net * got.share)
+        self.assertAlmostEqual(got.total, got.gross_pay - got.withheld)
+        self.assertAlmostEqual(got.net, 20.0)
+
+    def test_old_book_has_no_expenses(self):
+        rows = parse_month_rows(sheet_cells(
+            sheet_xml(month_row(6, 46204, "0", 0.35, 10.0, 0.0, 3.5)), ["Тимон"]))
+        self.assertEqual(rows[0].expenses, 0.0)
+        self.assertEqual(rows[0].withheld, 0.0)
+        self.assertAlmostEqual(rows[0].total, 3.5)
+
+    def test_empty_expense_cell_is_zero(self):
+        # Столбец ручной: у владельца он пуст во всех месяцах, где расходов не
+        # было, и такой месяц обязан считаться ровно как раньше.
+        rows = self.rows(expenses_header() + month_row_exp(6, 46204, "0", 0.35, 10.0, 0.0))
+        self.assertEqual(rows[0].expenses, 0.0)
+        self.assertAlmostEqual(rows[0].total, 3.5)
+
+
+class ExpenseAggregateTests(unittest.TestCase):
+    def data(self) -> SalaryBook:
+        return book(
+            months=[row("2026-11", "Вова", 8.0, crypto=25.0, share=0.4, expenses=5.0)],
+            journal=[Entry(date(2026, 11, 3), "Вова", "Крипта", "приз", 25.0, 10.0)],
+        )
+
+    def test_withheld_is_not_lost_money(self):
+        # Без возврата удержанного сверка решила бы, что книга потеряла 2$, и
+        # владелец получал бы предупреждение каждый месяц с расходами.
+        self.assertAlmostEqual(uncounted_total(self.data()), 0.0)
+        self.assertEqual(collect_issues(self.data()), [])
+
+    def test_owner_overview_counts_expenses_once_more(self):
+        data = owner_overview(self.data(), "2026-11")
+        self.assertAlmostEqual(data["expenses"], 5.0)
+        self.assertAlmostEqual(data["withheld"], 2.0)
+        self.assertAlmostEqual(data["payout"], 8.0)
+        # 25 выиграно − 8 отдано − 5 потрачено.
+        self.assertAlmostEqual(data["profit"], 12.0)
+
+    def test_account_analytics_carries_the_deduction(self):
+        data = account_analytics(self.data(), "Вова", "2026-11")
+        self.assertAlmostEqual(data["expenses"], 5.0)
+        self.assertAlmostEqual(data["withheld"], 2.0)
+        self.assertAlmostEqual(data["gross_pay"], 10.0)
+        self.assertAlmostEqual(data["all_time_withheld"], 2.0)
+
+    def test_expenses_bigger_than_the_prize_are_reported(self):
+        # Книгу не подкручиваем — минус остаётся минусом, но владелец узнаёт об
+        # этом раньше, чем человек откроет карточку с отрицательной зарплатой.
+        data = book(months=[row("2026-11", "Вова", -1.2, crypto=2.0, share=0.4, expenses=5.0)])
+        self.assertTrue(any("Расходы съели долю" in issue for issue in collect_issues(data)))
 
 
 if __name__ == "__main__":

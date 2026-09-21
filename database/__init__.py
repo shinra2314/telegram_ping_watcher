@@ -107,6 +107,7 @@ from .dedupe import (
     get_wins_for_dedupe,
     mark_duplicates,
     propagate_status_to_duplicates,
+    unglue_same_chat_copies,
 )
 from .engagement import (
     account_win_stats,

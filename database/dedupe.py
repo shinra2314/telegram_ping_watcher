@@ -59,6 +59,25 @@ async def mark_duplicates(primary_id: int, duplicate_ids: Iterable[int]) -> int:
         return cur.rowcount or 0
 
 
+async def unglue_same_chat_copies() -> int:
+    """Release rows glued to a primary in their own chat; returns how many.
+
+    One text twice in one chat is two wins (a reused template), never a copy —
+    the rule said otherwise before 21.09.2026 and hid a live debt. Runs on every
+    start: once released, the rule never glues such a pair again.
+    """
+    async with _connect() as db:
+        cur = await db.execute(
+            """
+            UPDATE pings SET duplicate_of = NULL
+            WHERE duplicate_of IS NOT NULL
+              AND chat_id = (SELECT p.chat_id FROM pings p WHERE p.id = pings.duplicate_of)
+            """
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+
 async def propagate_status_to_duplicates(ping_id: int, giveaway_status: Optional[str],
                                          action_status: Optional[str]) -> int:
     updates, params = [], []

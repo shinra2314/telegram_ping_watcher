@@ -7,9 +7,18 @@ same prize sat on the debts board three or five times (25 such groups, 60 rows
 by 13.09.2026), and claiming one left the rest waiting.
 
 Copies are recognised by the *normalised text* (case and whitespace folded) plus
-at least one shared tracked account, within ``WINDOW``. The primary is the best
-source — a channel post over a group over a private copy, then the earliest —
-and every other copy points to it through ``pings.duplicate_of``. The debts
+at least one shared tracked account, in *another chat*, within ``WINDOW``. The
+same text twice in one chat is two wins: a channel reuses one template for every
+fast giveaway, and the same account can win twice (three such pairs were glued
+and one live debt hidden by 21.09.2026). The window measures detection time, not
+the post date: winners are edited into a post published days earlier, often
+without an edit stamp, and pasted around days later — 7 of 31 real copies by
+21.09 were more than 72 h apart by post date, minutes apart by detection.
+
+The primary is the best source — a channel post over a group over a private
+copy, then the earliest — and every other copy points to it through
+``pings.duplicate_of``; two pastes of one post into another chat are both its
+copies, but a post in the primary's own chat never is. The debts
 board shows primaries only, and a status set on the primary is copied to its
 duplicates.
 """
@@ -52,6 +61,8 @@ def source_rank(row: dict[str, Any]) -> tuple[int, datetime, int]:
 
 
 def same_win(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    if a.get("chat_id") == b.get("chat_id"):
+        return False
     text_a, text_b = normalize_text(a.get("text")), normalize_text(b.get("text"))
     if len(text_a) < MIN_TEXT_LENGTH or text_a != text_b:
         return False
@@ -65,7 +76,11 @@ def group_duplicates(rows: Iterable[dict[str, Any]]) -> list[tuple[int, list[int
     groups: list[list[dict[str, Any]]] = []
     for row in sorted(rows, key=_ts):
         for group in groups:
-            if any(same_win(row, member) for member in group):
+            # A copy elsewhere matches every post of its template; it must not
+            # pull a second post of the primary's chat into the group. Two
+            # pastes of one post into another chat are both copies.
+            primary = min(group, key=source_rank)
+            if row.get("chat_id") != primary.get("chat_id") and any(same_win(row, member) for member in group):
                 group.append(row)
                 break
         else:

@@ -1188,6 +1188,7 @@ async def startup_maintenance() -> None:
         reconcile_giveaway_flags,
         reconcile_giveaway_outcomes,
         reconcile_win_flags,
+        unglue_same_chat_copies,
     )
 
     # Pruning of broadcast/outbox bookkeeping moved to the daily part of the
@@ -1209,6 +1210,12 @@ async def startup_maintenance() -> None:
             await record_app_event("INFO", "giveaway", "Marked giveaway result posts as prize claims", outcome_reconcile)
         from .ping_pipeline import dedupe_existing_wins
 
+        # Before the glue pass: it re-points copies of copies, and would carry
+        # a post glued in its own chat along to the new primary.
+        released = await unglue_same_chat_copies()
+        if released:
+            await record_app_event("INFO", "giveaway", "Released wins glued to a post of their own chat",
+                                   {"released": released})
         copies = await dedupe_existing_wins()
         if copies:
             await record_app_event("INFO", "giveaway", "Glued copies of the same winners post", {"copies": copies})

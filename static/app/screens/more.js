@@ -13,6 +13,11 @@ App.register('more', {
     if (s.prefs) rows.push(item({ act: 'go', data: { to: 'prefs' }, lead: icon('bell', 17), leadCls: 'on', title: 'Уведомления', desc: 'Что присылать и когда удалять' }));
     if (s.accounts) rows.push(item({ act: 'go', data: { to: 'accounts' }, lead: icon('users', 17), leadCls: 'on', title: 'Аккаунты', desc: 'Статус сессий, подключение по номеру' }));
     if (s.debts) rows.push(item({ act: 'go', data: { to: 'debts' }, lead: icon('wallet', 17), leadCls: 'on', title: 'Долги', desc: 'Выигранное, но не забранное' }));
+    if (s.accounts) {
+      rows.push(item({ act: 'go', data: { to: 'system' }, lead: icon('pulse', 17), leadCls: 'on', title: 'Система', desc: 'Бот, джобы, база, бэкап, ошибки' }));
+      rows.push(item({ act: 'go', data: { to: 'keys' }, lead: icon('lock', 17), leadCls: 'on', title: 'Ключи и люди', desc: 'Права, срок, расписание доступа' }));
+      rows.push(item({ act: 'go', data: { to: 'settings' }, lead: icon('grid', 17), leadCls: 'on', title: 'Настройки', desc: 'Уведомления, работа скана, игнор-чаты' }));
+    }
     if (s.accounts) rows.push(item({ act: 'go', data: { to: 'cleanup' }, lead: icon('power', 17), leadCls: 'on', title: 'Уборка каналов', desc: 'Молчащие каналы: выйти всеми аккаунтами' }));
     if (s.salary) rows.push(item({ act: 'go', data: { to: 'salary' }, lead: icon('cash', 17), leadCls: 'on', title: 'Зарплата', desc: 'Книга «Учет розыгрышей»' }));
     let html = rows.length ? '<div class="list">' + rows.join('') + '</div>' : emptyView('grid', 'Здесь пусто', '');

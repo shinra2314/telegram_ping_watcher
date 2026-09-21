@@ -16,7 +16,7 @@ from typing import Optional
 from telethon import Button
 
 from database import (
-    create_bot_key, create_disable_until_window, deactivate_access_window, get_access_audit,
+    create_access_window, create_bot_key, create_disable_until_window, deactivate_access_window, get_access_audit,
     get_bot_member, list_access_windows, list_all_access_windows, list_bot_members,
     member_engagement_stats, record_access_audit, set_access_window_active,
     set_bot_member_blocked, set_member_default_policy,
@@ -151,6 +151,39 @@ async def open_member_access(tg: int, actor_id: int) -> int:
                               {"cancelled_ids": cancelled_ids})
     state.access_cache.pop(tg, None)
     return len(cancelled_ids)
+
+
+async def add_access_window(tg: int, kind: str, frm: str, to: str, days: list[int],
+                            tz: str, actor_id: int) -> dict:
+    """«work» opens the member inside the range (and closes everything else),
+    «mute» closes them inside it. Shared by ``/access … work|mute`` and the panel.
+    """
+    repeat: dict = {"type": "weekly" if days else "daily", "from": frm, "to": to}
+    if days:
+        repeat["days"] = sorted(set(days))
+    enabled = kind == "work"
+    if enabled:
+        # A working-hours window only means something if outside it is closed.
+        await set_member_default_policy(tg, "deny")
+    row = await create_access_window(tg, enabled=enabled, repeat_rule=repeat, timezone=tz,
+                                     priority=200, label=kind, created_by=actor_id)
+    await record_access_audit(tg, int(row["id"]), "create", f"admin:{actor_id}", None, repeat)
+    state.access_cache.pop(tg, None)
+    return row
+
+
+async def remove_access_window(tg: int, window_id: int, actor_id: int) -> None:
+    await deactivate_access_window(window_id)
+    await record_access_audit(tg, window_id, "delete", f"admin:{actor_id}", None, None)
+    state.access_cache.pop(tg, None)
+
+
+async def close_member_access(tg: int, until_iso: Optional[str], actor_id: int) -> dict:
+    """Close now, until a UTC moment or for good (``None``) — ``/access … off``."""
+    row = await create_disable_until_window(tg, until_iso, created_by=actor_id)
+    await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{actor_id}", None, {"until": until_iso})
+    state.access_cache.pop(tg, None)
+    return row
 
 
 async def apply_undo(tg: int, plan: dict) -> None:

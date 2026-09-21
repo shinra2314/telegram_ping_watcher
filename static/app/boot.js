@@ -17,6 +17,7 @@ const SCREEN_SECTION = {
   feed: 'feed', ping: 'feed', converter: 'market', analytics: 'analytics', prefs: 'prefs',
   salary: 'salary', debts: 'debts',
   accounts: 'accounts', login: 'accounts', triage: 'accounts', cleanup: 'accounts',
+  system: 'accounts', keys: 'accounts', key: 'accounts', member: 'accounts', settings: 'accounts',
 };
 
 function opens(name) {

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import accounts, analytics, debts, feed, giveaways, home, market, prefs, pulse, salary, triage, undo, wins
+from . import accounts, analytics, debts, feed, giveaways, home, market, keys, prefs, pulse, salary, settings, system, triage, undo, wins
 
 router = APIRouter()
-for _module in (home, giveaways, feed, market, analytics, prefs, accounts, debts, salary, triage, undo, wins, pulse):
+for _module in (home, giveaways, feed, market, analytics, prefs, accounts, debts, salary, triage, undo, wins, pulse, system, keys, settings):
     router.include_router(_module.router)

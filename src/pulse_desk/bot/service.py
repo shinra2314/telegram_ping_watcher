@@ -151,8 +151,7 @@ def _record_bot_connection(connected: bool, attempt: int) -> None:
 
 async def init_bot() -> None:
     from database import (
-        create_access_window, create_bot_key, create_disable_until_window,
-        deactivate_access_window, get_access_audit, get_bot_key_by_secret, get_bot_member,
+        create_access_window, create_bot_key, get_access_audit, get_bot_key_by_secret, get_bot_member,
         get_recent_giveaway_actions, list_bot_members, record_access_audit,
         set_member_default_policy, upsert_bot_member,
     )
@@ -731,9 +730,7 @@ async def init_bot() -> None:
                             return
                         until_iso = target_local.astimezone(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat()
                         human = f"до {target_local.strftime('%d.%m %H:%M')}"
-                row = await create_disable_until_window(tg, until_iso, created_by=event.sender_id)
-                await record_access_audit(tg, int(row["id"]), "manual_off", f"admin:{event.sender_id}", None, {"until": until_iso})
-                state.access_cache.pop(tg, None)
+                await members_section.close_member_access(tg, until_iso, event.sender_id)
                 await event.respond(f"🔴 Доступ закрыт ({human}).\n\n" + await members_section.render_member_access(member))
                 return
             if sub == "cron":
@@ -759,24 +756,14 @@ async def init_bot() -> None:
                 frm, to = parse_quiet_hours_input(args[1])
                 days = parse_weekday_spec(args[2]) if len(args) >= 3 else []
                 tz = args[3] if len(args) >= 4 else (member.get("timezone") or "UTC")
-                repeat = {"type": "weekly" if days else "daily", "from": frm, "to": to}
-                if days:
-                    repeat["days"] = days
-                enabled = sub == "work"
-                if enabled:
-                    await set_member_default_policy(tg, "deny")
-                row = await create_access_window(tg, enabled=enabled, repeat_rule=repeat, timezone=tz, priority=200, label=sub, created_by=event.sender_id)
-                await record_access_audit(tg, int(row["id"]), "create", f"admin:{event.sender_id}", None, repeat)
-                state.access_cache.pop(tg, None)
+                row = await members_section.add_access_window(tg, sub, frm, to, days, tz, event.sender_id)
                 await event.respond(f"✅ Окно #{row['id']} добавлено (tz=`{tz}`).\n\n" + await members_section.render_member_access(member))
                 return
             if sub == "del":
                 if len(args) < 2 or not args[1].isdigit():
                     await event.respond("❌ Формат: `/access <user> del <id>`")
                     return
-                await deactivate_access_window(int(args[1]))
-                await record_access_audit(tg, int(args[1]), "delete", f"admin:{event.sender_id}", None, None)
-                state.access_cache.pop(tg, None)
+                await members_section.remove_access_window(tg, int(args[1]), event.sender_id)
                 await event.respond(f"🗑 Окно #{args[1]} удалено.\n\n" + await members_section.render_member_access(member))
                 return
             if sub == "undo":

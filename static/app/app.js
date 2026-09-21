@@ -122,6 +122,9 @@ const RETRYABLE = [
   /^\/api\/app\/pings\/\d+\/status$/,
   /^\/api\/app\/debts\/claim$/,
   /^\/api\/app\/feed\/\d+\/meta$/,
+  /^\/api\/app\/feed\/read$/,
+  /^\/api\/app\/keys\/\d+$/,
+  /^\/api\/app\/settings\/(field|notifications)$/,
   /^\/api\/app\/giveaways\/\d+\/engagement$/,
   /^\/api\/app\/prefs$/,
 ];

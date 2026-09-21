@@ -118,6 +118,8 @@ App.register('home', {
       const key = el.dataset.key;
       if (key === 'accounts' && App.sections.accounts) return App.go('accounts');
       if (key === 'giveaway-action' && App.sections.giveaways) return App.tab('giveaways');
+      // Everything else on the list is a system matter: the system screen has it.
+      if (App.sections.accounts) return App.go('system');
       return null;
     },
   },
@@ -141,7 +143,7 @@ function hero(summary) {
   if (items.length) {
     html += '<div class="section-label">Требует внимания</div><div class="list">'
       + items.map((a) => item({
-        act: 'open-attention', data: { key: a.key }, chev: false,
+        act: 'open-attention', data: { key: a.key },
         lead: icon(a.tone === 'bad' ? 'flame' : 'alert', 17), leadCls: a.tone === 'bad' ? 'bad' : 'warn',
         title: esc(a.title), desc: esc(a.text), end: '<span class="num">' + esc(a.value) + '</span>',
       })).join('') + '</div>';

@@ -39,7 +39,7 @@ body {
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
-button, input, select { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
 button { -webkit-appearance: none; appearance: none; }
 .num, .mono { font-variant-numeric: tabular-nums; }
 .dim { color: var(--dim); }
@@ -505,3 +505,11 @@ input.range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; b
 }
 .profile .key-more { display: block; margin: 6px 0 -6px; font-size: 13px; }
 .fact .v.warn { color: var(--amber); }
+
+/* ── Feed, owner side ─────────────────────────────────────────────────── */
+.item.unread .t { font-weight: 750; }
+.item.unread .t::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
+  border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.note-input { height: auto; min-height: 84px; padding: 12px 14px; line-height: 1.45; resize: vertical; font-size: 14.5px; }
+.section-label .more { display: inline-flex; align-items: center; gap: 4px; }
+.search.plain .input { padding-left: 14px; }

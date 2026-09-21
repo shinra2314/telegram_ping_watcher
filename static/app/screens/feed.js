@@ -6,7 +6,8 @@
 // Filters persist (Saved 'feed'), search text does not. Rows are cached like
 // the giveaways queue; «Показать ещё» continues from the last row on screen.
 const FEED = {
-  type: 'a', status: 'a', sort: 'd', asc: false, q: '',
+  type: 'a', status: 'a', sort: 'd', asc: false, q: '', fav: false,
+  picking: false, picked: new Set(),
   rows: null, meta: null, at: 0,
   STALE_MS: 60000,
   keep() { Saved.put('feed', { type: this.type, status: this.status, sort: this.sort, asc: this.asc }); },
@@ -48,7 +49,18 @@ const FEED_STATUSES = [['a', 'Любой статус'], ['n', 'Новые'], ['
 
 function feedQuery() {
   return '/api/app/feed?type=' + FEED.type + '&status=' + FEED.status + '&sort=' + FEED.sort
-    + '&asc=' + FEED.asc + (FEED.q ? '&q=' + encodeURIComponent(FEED.q) : '');
+    + '&asc=' + FEED.asc + (FEED.fav ? '&fav=true' : '') + (FEED.q ? '&q=' + encodeURIComponent(FEED.q) : '');
+}
+
+function feedDock() {
+  const old = document.querySelector('.action-dock');
+  if (old) old.remove();
+  const n = FEED.picked.size;
+  if (!FEED.picking || !n) return;
+  const el = document.createElement('div');
+  el.className = 'action-dock';
+  el.innerHTML = '<button class="btn primary" data-act="read">' + icon('check', 18) + 'Прочитано · ' + n + '</button>';
+  document.body.appendChild(el);
 }
 
 function feedLead(r) {
@@ -68,6 +80,11 @@ App.register('feed', {
   title: 'Лента',
 
   reset: () => FEED.reset(),
+
+  mounted() {
+    feedDock();
+    return () => { const d = document.querySelector('.action-dock'); if (d) d.remove(); };
+  },
 
   async render(params) {
     if (params.force || !FEED.rows || Date.now() - FEED.at > FEED.STALE_MS) await FEED.load();
@@ -94,6 +111,8 @@ App.register('feed', {
       + '<button class="chip" data-act="order" aria-label="Порядок">' + icon(FEED.asc ? 'down' : 'swap', 15) + (FEED.asc ? 'Старые первыми' : 'Новые первыми') + '</button>'
       + (last.can_status
         ? '<button class="chip' + (FEED.status !== 'a' ? ' on' : '') + '" data-act="status">' + esc(labelOf(FEED_STATUSES, FEED.status)) + '</button>'
+          + '<button class="chip' + (FEED.fav ? ' on' : '') + '" data-act="fav">' + icon('star', 15) + 'Избранное</button>'
+          + '<button class="chip' + (FEED.picking ? ' on' : '') + '" data-act="pick">' + icon('check', 15) + (FEED.picking ? 'Готово' : 'Выбрать') + '</button>'
         : '')
       + '</div>';
 
@@ -103,12 +122,13 @@ App.register('feed', {
         : emptyView('list', 'Пока пусто', 'Здесь появятся упоминания ваших аккаунтов.'));
     }
     html += '<div class="list">' + rows.map((r) => {
-      const lead = feedLead(r);
+      const lead = FEED.picking && FEED.picked.has(r.id) ? [icon('check', 16), ''] : feedLead(r);
       const who = r.sender ? esc(r.sender) + ' · ' : '';
+      const cls = [r.deleted ? 'gone' : '', FEED.picked.has(r.id) ? 'selected' : '', r.status === 'new' ? 'unread' : ''].join(' ').trim();
       return item({
-        act: 'open', data: { id: r.id }, chev: false, cls: r.deleted ? 'gone' : '',
+        act: FEED.picking ? 'toggle' : 'open', data: { id: r.id }, chev: false, cls: cls,
         lead: lead[0], leadCls: lead[1],
-        title: esc(r.chat),
+        title: (r.favorite ? icon('star', 13) + ' ' : '') + esc(r.chat),
         desc: who + esc(r.snippet || '—'), wrap: true,
         end: '<div class="d num">' + esc(fmtTime(FEED.sort === 'm' ? r.date : r.detected_at)) + '</div>',
       }).replace('class="d wrap"', 'class="d two"');
@@ -148,6 +168,26 @@ App.register('feed', {
       try { await FEED.more(); } finally { el.disabled = false; }
       return App.render({ quiet: true });
     },
+    fav: () => FEED.set({ fav: !FEED.fav }),
+    pick: () => { FEED.picking = !FEED.picking; FEED.picked.clear(); return App.render({ quiet: true }); },
+    // Selecting repaints the row and the dock only — the list stays put.
+    toggle: (el) => {
+      const id = Number(el.dataset.id);
+      if (FEED.picked.has(id)) FEED.picked.delete(id); else FEED.picked.add(id);
+      el.classList.toggle('selected', FEED.picked.has(id));
+      haptic('select');
+      feedDock();
+    },
+    read: async () => {
+      const ids = Array.from(FEED.picked);
+      if (!ids.length) return;
+      const res = await api('/api/app/feed/read', { ids: ids }, 'прочитано · ' + ids.length);
+      FEED.rows.forEach((r) => { if (FEED.picked.has(r.id)) r.status = 'read'; });
+      FEED.picked.clear();
+      FEED.picking = false;
+      toast('Прочитано: ' + res.count);
+      return App.render({ quiet: true });
+    },
     open: (el) => App.go('ping', { id: el.dataset.id }),
   },
 });
@@ -157,7 +197,11 @@ App.register('ping', {
   title: 'Упоминание',
 
   async render(params) {
-    const p = await api('/api/app/feed/' + encodeURIComponent(params.id));
+    // The owner's edits answer with the whole card: paint that, do not refetch.
+    if (params.force || !PING.card || String(PING.card.id) !== String(params.id)) {
+      PING.card = await api('/api/app/feed/' + encodeURIComponent(params.id));
+    }
+    const p = PING.card;
     App.sub.textContent = p.chat;
     const lead = feedLead(p);
     const kind = p.is_win ? 'Победа' : (p.is_giveaway ? 'Розыгрыш' : 'Упоминание');
@@ -183,17 +227,72 @@ App.register('ping', {
       + '<div class="k">' + esc(c[0]) + '</div><div class="v sm" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
       + esc(c[1]) + '</div></div>').join('') + '</div>';
 
-    if (p.tags && p.tags.length) {
-      html += '<div class="section-label">Теги</div><div class="tags">'
-        + p.tags.map((t) => '<span class="badge">#' + esc(t) + '</span>').join('') + '</div>';
+    if (p.status_code) {
+      html += ownerBlock(p);
+    } else {
+      if (p.tags && p.tags.length) {
+        html += '<div class="section-label">Теги</div><div class="tags">'
+          + p.tags.map((t) => '<span class="badge">#' + esc(t) + '</span>').join('') + '</div>';
+      }
+      if (p.note) html += '<div class="section-label">Заметка владельца</div><div class="note-block">' + esc(p.note) + '</div>';
     }
-    if (p.note) html += '<div class="section-label">Заметка владельца</div><div class="note-block">' + esc(p.note) + '</div>';
     html += '<div class="section-label">Текст</div><div class="text-block">' + esc(p.text || '—') + '</div>';
     if (p.link) {
       html += '<div class="stack" style="margin-top:12px">'
         + '<button class="btn primary" data-act="link" data-url="' + esc(p.link) + '">' + icon('external', 18) + 'Открыть в Telegram</button>'
         + '<button class="btn ghost" data-act="copy" data-text="' + esc(p.link) + '">' + icon('copy', 18) + 'Скопировать ссылку</button></div>';
     }
+    if (p.can_ignore && !p.ignored) {
+      html += '<div style="margin-top:10px"><button class="btn ghost" data-act="ignore">' + icon('bell-off', 18) + 'Не следить за этим чатом</button></div>';
+    }
     return html;
   },
+
+  actions: {
+    st: (el) => pingMeta({ status: el.dataset.v }),
+    fav: () => pingMeta({ favorite: !PING.card.favorite }, PING.card.favorite ? 'Звезда снята' : 'В избранном'),
+    'note-save': () => {
+      const box = document.getElementById('ping-note');
+      return pingMeta({ note: box ? box.value : '' }, 'Заметка сохранена');
+    },
+    'tag-add': () => {
+      const input = document.getElementById('ping-tag');
+      const tag = (input && input.value || '').trim().replace(/^#/, '');
+      if (!tag) return null;
+      return pingMeta({ tag_add: tag }, 'Тег добавлен');
+    },
+    'tag-rm': (el) => pingMeta({ tag_remove: el.dataset.v }),
+    ignore: async () => {
+      if (!(await confirmBox('Больше не следить за «' + PING.card.chat + '»? Вернуть можно в «Настройки» → «Игнор-чаты».'))) return;
+      const res = await api('/api/app/feed/' + PING.card.id + '/ignore', {});
+      PING.card.ignored = true;
+      toast('Не следим: ' + res.title);
+      return App.render({ quiet: true });
+    },
+  },
 });
+
+const PING = { card: null };
+
+async function pingMeta(patch, note) {
+  PING.card = await api('/api/app/feed/' + PING.card.id + '/meta', patch, 'правка записи');
+  // The list shows status and star: its cached rows are stale now.
+  FEED.reset();
+  if (note) toast(note); else haptic('select');
+  return App.render({ quiet: true });
+}
+
+// The owner's inbox controls: status, star, note, tags — the mention card's
+// buttons in the bot, with a real text field for the note.
+function ownerBlock(p) {
+  return '<div class="section-label">Статус<span class="more" data-act="fav">' + icon('star', 14) + (p.favorite ? ' в избранном' : ' в избранное') + '</span></div>'
+    + '<div class="chips" style="margin-top:0">' + p.statuses.map((s) =>
+      '<button class="chip' + (s.code === p.status_code ? ' on' : '') + '" data-act="st" data-v="' + s.code + '">' + esc(s.label) + '</button>').join('') + '</div>'
+    + '<div class="section-label">Теги</div><div class="tags">'
+    + p.tags.map((t) => '<button class="chip on" data-act="tag-rm" data-v="' + esc(t) + '">#' + esc(t) + ' ×</button>').join('')
+    + '</div><div class="search plain" style="margin-top:8px"><input class="input" id="ping-tag" maxlength="32" placeholder="новый тег" data-enter="tag-add" autocomplete="off">'
+    + '<button class="icon-btn" data-act="tag-add" aria-label="Добавить тег">' + icon('plus', 18) + '</button></div>'
+    + '<div class="section-label">Заметка</div>'
+    + '<textarea class="input note-input" id="ping-note" maxlength="1000" rows="3" placeholder="Для себя: что с этим делать">' + esc(p.note || '') + '</textarea>'
+    + '<div style="margin-top:8px"><button class="btn small" data-act="note-save">' + icon('check', 16) + 'Сохранить заметку</button></div>';
+}

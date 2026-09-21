@@ -144,7 +144,26 @@ routers/                   — `health.py` (main app) and `miniapp/` (panel app 
                       builder for a guest — see the rule below; `stats` gets the
                       summary and the day chart, `analytics` the rest). `home` adds `me` (role,
                       accounts, notify types, delay, schedule) and `mine` (their
-                      accounts' wins, engagement, last wins) for a non-admin
+                      accounts' wins, engagement, last wins) for a non-admin.
+                      Added 21.09 (ТЗ «развитие панели», five stages): owner —
+                      `triage` («Разбор»: debts board + need_action + account
+                      problems, one card at a time), `system` (calls
+                      `routers.health.health()` itself + `miniapp` journal),
+                      `keys` (keys and members' access windows through the bot's
+                      setters and `sections.members.add/remove_access_window`),
+                      `settings` (fields from `settings_schema`), card actions and
+                      `cleanup` in `giveaways`, feed meta/read/ignore in `feed`;
+                      guest — `wins` (history, not the queue), `engagement` POST;
+                      both — `pulse` (10 s per-person cache, "anything new?"),
+                      `undo` (the bot's `bot/undo` snapshot: every status change
+                      answers with a token). `common.py` also rate-limits per
+                      `tg_id` (owner 120 GET / 60 POST a minute, guest 60 / 10)
+                      and puts the caller on `request.state` for the journal:
+                      `miniapp_server.journal` writes one `miniapp` app event per
+                      successful POST — path + ids only, never the body.
+                      `/api/app/feed` and `/giveaways` page by `after=<last id>`
+                      (+ `loaded`), a keyset cursor (`get_pings(after=…)`), not by
+                      refetching pages 1..N
 
 static/app/                — the panel page. Vanilla JS, no build step, one global
   scope, load order in index.html: icons.js → app.js (App nav stack, api(),
@@ -156,6 +175,17 @@ static/app/                — the panel page. Vanilla JS, no build step, one gl
   re-render — that steals focus and refetches. A slider reads `input` for its
   label and `changes` for the save, so a drag is one request, not fifty. Animations move but never fade: a throttled WebView would
   hold a fading screen at opacity 0.
+  Per-device state is keyed by Telegram user (`whoami()`): Telegram Desktop
+  shares one WebView's localStorage across accounts, and a guest once landed
+  on the owner's saved screen. `Saved` (filters, open stack — resumed within
+  30 min, dropped when the key no longer opens it), `pd.retry.<id>` (an action
+  a stale session refused, offered after reopening; only `RETRYABLE` paths —
+  never login), `Offline` (last answer of the read-only screens, shown when
+  the PC is off; no post texts, accounts, keys). `/app-sw.js` (static/app/sw.js)
+  is a network-first shell cache so the page opens at all while the PC is off;
+  it never touches /api. `Pulse` polls `/api/app/pulse` every 30 s while
+  visible and only marks tabs/lists as new — lists are never repainted under
+  the reader.
   Dev: `scripts/miniapp_dev_link.py` prints a localhost link with initData
   signed by the real bot token (no auth bypass exists in the server).
 

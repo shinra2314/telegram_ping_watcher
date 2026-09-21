@@ -19,6 +19,7 @@ App.register('settings', {
       + switchRow('notify', 'Розыгрыши', 'Карточки о новых розыгрышах', n.include_giveaways, 'include_giveaways')
       + switchRow('notify', 'Победы', 'Карточки о победах', n.include_wins, 'include_wins')
       + switchRow('notify', 'Модерация рассылок', 'Копии друзьям уходят после вашего «Отправить»', n.moderated, 'moderated')
+      + switchRow('notify', 'Кнопка «В панели»', 'На ваших карточках побед и упоминаний — открыть запись здесь', n.panel_button, 'panel_button')
       + switchRow('notify', 'Тихие часы', n.quiet_from + '–' + n.quiet_to + ' — без звука', n.quiet_enabled, 'quiet_enabled')
       + switchRow('notify', 'Дайджест', 'Каждый день в ' + n.digest_time, n.digest_enabled, 'digest_enabled')
       + '</div>'

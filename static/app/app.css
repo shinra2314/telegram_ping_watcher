@@ -513,3 +513,19 @@ input.range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; b
 .note-input { height: auto; min-height: 84px; padding: 12px 14px; line-height: 1.45; resize: vertical; font-size: 14.5px; }
 .section-label .more { display: inline-flex; align-items: center; gap: 4px; }
 .search.plain .input { padding-left: 14px; }
+
+/* ── Converter: the pair's line ───────────────────────────────────────── */
+.spark-box { padding: 12px 14px; margin-top: 10px; }
+.spark-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.spark-top .seg { width: auto; }
+.spark-top .seg button { padding: 0 12px; height: 30px; font-size: 12.5px; }
+.spark { display: block; width: 100%; height: 64px; margin-top: 10px; }
+.spark polyline { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.spark.up polyline { stroke: var(--green); }
+.spark.down polyline { stroke: var(--red); }
+.spark.up polygon { fill: rgba(94, 224, 142, .10); }
+.spark.down polygon { fill: rgba(255, 107, 107, .10); }
+.spark-foot { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--dim); }
+
+/* Offline: a snapshot is for reading — nothing that writes can be pressed. */
+body.offline .action-dock, body.offline .gw-x, body.offline .tri-card ~ .action-dock { display: none; }

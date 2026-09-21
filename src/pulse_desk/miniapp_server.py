@@ -89,6 +89,12 @@ def build_miniapp() -> FastAPI:
         """The shell. Unauthenticated on purpose: the HTML holds no data."""
         return FileResponse(APP_DIR / "index.html")
 
+    @app.get("/app-sw.js")
+    async def service_worker() -> FileResponse:
+        """At the root so its scope covers /app. It caches the shell only,
+        never /api — see static/app/sw.js."""
+        return FileResponse(APP_DIR / "sw.js", media_type="application/javascript")
+
     app.include_router(miniapp_router.router)
     return app
 

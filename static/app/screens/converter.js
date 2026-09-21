@@ -90,6 +90,7 @@ App.register('converter', {
       + '<button class="swap-btn" data-act="swap" aria-label="Поменять местами">' + icon('swap', 20) + '</button>'
       + '</div>'
       + '<div class="rate-line" id="rate-line"></div>'
+      + '<div class="panel spark-box" id="spark"><div class="skel" style="height:78px"></div></div>'
       + '<div class="chips">' + QUICK_AMOUNTS.map((a) =>
         '<button class="chip" data-act="quick" data-v="' + a + '">' + group(a) + ' ' + esc(Conv.from) + '</button>').join('')
       + '</div>'
@@ -102,6 +103,7 @@ App.register('converter', {
 
   mounted() {
     recompute();
+    drawChart();
   },
 
   inputs: {
@@ -114,6 +116,8 @@ App.register('converter', {
   },
 
   actions: {
+    // The chart repaints alone: the amount field keeps its focus and text.
+    'chart-days': (el) => { Conv.chartDays = Number(el.dataset.v); haptic('select'); return drawChart(); },
     swap: () => {
       const other = document.querySelector('[data-side="to"]');
       Conv.amount = other ? other.value.replace(/[\s ]/g, '') : Conv.amount;
@@ -312,4 +316,55 @@ function pickCurrency(side) {
       });
     });
   });
+}
+
+// ── The pair over time, from our own market_history snapshots ─────────
+const CHARTS = {};
+
+async function drawChart() {
+  const box = document.getElementById('spark');
+  if (!box) return;
+  const days = Conv.chartDays || 7;
+  const key = Conv.from + '-' + Conv.to + '-' + days;
+  let data = CHARTS[key];
+  if (!data || Date.now() - data.at > 300000) {
+    try {
+      data = await api('/api/app/market/history?src=' + Conv.from + '&dst=' + Conv.to + '&days=' + days);
+    } catch (e) {
+      box.innerHTML = '<div class="hint" style="margin:0">График сейчас недоступен.</div>';
+      return;
+    }
+    data.at = Date.now();
+    CHARTS[key] = data;
+  }
+  // The pair may have changed while the answer was on its way.
+  if (!document.getElementById('spark') || key !== Conv.from + '-' + Conv.to + '-' + (Conv.chartDays || 7)) return;
+  box.innerHTML = chartHtml(data, days);
+}
+
+function chartHtml(data, days) {
+  const pts = data.points || [];
+  const head = '<div class="spark-top"><span class="dim">1 ' + esc(data.src) + ' в ' + esc(data.dst) + '</span>'
+    + seg([['1', '24 ч'], ['7', '7 дн']], String(days), 'chart-days') + '</div>';
+  if (pts.length < 2) return head + '<div class="hint" style="margin:6px 0 0">Истории пока мало — курсы копятся с каждым опросом.</div>';
+  const values = pts.map((p) => p.v);
+  const lo = Math.min.apply(null, values);
+  const hi = Math.max.apply(null, values);
+  const span = hi - lo || hi || 1;
+  const W = 300;
+  const H = 64;
+  const xy = pts.map((p, i) => [(i / (pts.length - 1)) * W, H - 4 - ((p.v - lo) / span) * (H - 8)]);
+  const line = xy.map((c) => c[0].toFixed(1) + ',' + c[1].toFixed(1)).join(' ');
+  const area = '0,' + H + ' ' + line + ' ' + W + ',' + H;
+  const first = values[0];
+  const last = values[values.length - 1];
+  const change = first ? (last - first) / first * 100 : 0;
+  const up = change >= 0;
+  const fiat = Conv.isFiat(data.dst);
+  return head
+    + '<svg class="spark ' + (up ? 'up' : 'down') + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="График курса">'
+    + '<polygon points="' + area + '"></polygon><polyline points="' + line + '"></polyline></svg>'
+    + '<div class="spark-foot num"><span>мин ' + esc(fmtAmount(lo, fiat)) + '</span>'
+    + '<span class="' + (up ? 'up' : 'down') + '">' + (up ? '+' : '−') + Math.abs(change).toFixed(2).replace('.', ',') + '%</span>'
+    + '<span>макс ' + esc(fmtAmount(hi, fiat)) + '</span></div>';
 }

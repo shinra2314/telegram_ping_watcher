@@ -274,7 +274,7 @@ class MiniAppApiTests(unittest.TestCase):
             scoped = self.client.get("/api/app/analytics", headers=headers(SCOPED))
             owner = self.client.get("/api/app/analytics", headers=headers(OWNER))
         self.assertEqual(scoped.status_code, 200)
-        self.assertEqual(build.await_args_list[0].args, (["muver"], ["muver"]))
+        self.assertEqual(build.await_args_list[0].args, (["muver"], ["muver"], 30))
         self.assertEqual(build.await_args_list[1].args[0], [])
         # `stats` alone opens the summary, not the breakdowns.
         self.assertNotIn("chats", scoped.json())

@@ -507,7 +507,10 @@ def _member_card_buttons(link: Optional[str], ping_id: Optional[int], notif_type
     return buttons or None
 
 
-def _admin_card_buttons(link: Optional[str], ping_id: Optional[int], chat_type: str = "") -> list[list[Button]]:
+def _admin_card_buttons(link: Optional[str], ping_id: Optional[int], chat_type: str = "",
+                        panel: Optional[str] = None) -> list[list[Button]]:
+    """``panel`` — the panel screen to deep-link (``giveaway`` / ``ping``), or
+    None for no «🛰 В панели» row (see ``panel_card_screen``)."""
     buttons: list[list[Button]] = []
     if link:
         buttons.append([Button.url("🔗 Открыть в Telegram", link)])
@@ -519,7 +522,30 @@ def _admin_card_buttons(link: Optional[str], ping_id: Optional[int], chat_type: 
         if chat_type == "group":
             # Groups are where a nickname in passing is not news (bot/sections/ignored.py).
             buttons.append([Button.inline("🔇 Не следить за чатом", data=f"igc:add:{ping_id}")])
+        if panel:
+            from .bot.keyboards import webapp_row
+
+            # Empty while the tunnel is down: the card is then exactly as before.
+            row = webapp_row("🛰 В панели", f"/app?s={panel}&id={int(ping_id)}")
+            if row:
+                buttons.append(row)
     return buttons
+
+
+async def panel_card_screen(record: dict[str, Any], settings: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Which panel screen the owner's card links to, or None when the owner
+    has not switched «🛰 В панели» on (notification setting ``panel_button``).
+
+    Off by default: the panel was pulled once over a Telegram client crash,
+    and a web_app button on every card is the widest exposure it can have.
+    """
+    try:
+        notif = settings if settings is not None else await load_notification_settings()
+    except Exception:
+        return None
+    if not notif.get("panel_button"):
+        return None
+    return "giveaway" if (record.get("is_win") or record.get("is_giveaway")) else "ping"
 
 
 async def execute_pending_broadcast(row: dict[str, Any]) -> tuple[int, Optional[str]]:
@@ -631,8 +657,8 @@ async def send_owner_ping_card(
     msg, link, header_image = build_ping_card(record)
     if late_since:
         msg += late_card_footer(late_since)
-    sent = await _send_bot_message(ADMIN_ID, msg, buttons=_admin_card_buttons(link, ping_id, record.get("chat_type") or ""),
-                                   file=header_image, silent=silent)
+    buttons = _admin_card_buttons(link, ping_id, record.get("chat_type") or "", await panel_card_screen(record))
+    sent = await _send_bot_message(ADMIN_ID, msg, buttons=buttons, file=header_image, silent=silent)
     if sent is not None:
         # Only a plain mention is minor; wins and giveaways are never auto-deleted.
         await schedule_autoclean(ADMIN_ID, sent, notification_type_of(record), await owner_autoclean_hours())
@@ -676,7 +702,8 @@ async def broadcast_ping(
     notif_type = notification_type_of(record)
     candidate = await get_giveaway_candidate(int(ping_id)) if ping_id and record.get("is_giveaway") else None
     msg, link, header_image = build_ping_card(record, candidate=candidate)
-    owner_buttons = _admin_card_buttons(link, ping_id, record.get("chat_type") or "")
+    owner_buttons = _admin_card_buttons(link, ping_id, record.get("chat_type") or "",
+                                        await panel_card_screen(record, settings))
     owner_text = msg
     changed = candidate is not None
 

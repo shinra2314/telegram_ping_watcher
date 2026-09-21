@@ -8,9 +8,13 @@
 """
 from __future__ import annotations
 
+import time
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+from database import get_market_history
 
 from pulse_desk.bot.sections.market import latest_snapshot
 from pulse_desk.converter import (
@@ -60,6 +64,59 @@ def rate_table(snapshot: Optional[dict[str, Any]]) -> dict[str, Any]:
 async def market(caller: Caller = Depends(current_caller)) -> dict:
     caller.require(FEATURE)
     return rate_table(await latest_snapshot())
+
+
+# Longer would parse thousands of snapshots on the shared event loop.
+HISTORY_DAYS = (1, 7)
+HISTORY_POINTS = 84
+HISTORY_CACHE_SECONDS = 300.0
+_history_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+
+
+def history_points(snapshots: list[dict[str, Any]], src: str, dst: str,
+                   points: int = HISTORY_POINTS) -> list[dict[str, Any]]:
+    """Oldest-first ``[{t, v}]`` of 1 ``src`` in ``dst``, thinned to ``points``.
+
+    Snapshots come newest first from ``get_market_history``. One that cannot
+    price the pair (a coin missing, a snapshot from before ``_fiat``) is
+    skipped rather than drawn as zero. Pure — the endpoint only fetches.
+    """
+    series = []
+    for snap in reversed(snapshots):
+        value = convert(snap, 1.0, src, dst)
+        if value:
+            series.append({"t": snap.get("fetched_at_iso"), "v": value})
+    if len(series) <= points:
+        return series
+    step = len(series) / points
+    thinned = [series[int(i * step)] for i in range(points)]
+    thinned[-1] = series[-1]
+    return thinned
+
+
+@router.get("/api/app/market/history")
+async def market_history(
+    caller: Caller = Depends(current_caller),
+    src: str = Query("BTC", pattern="^[A-Z]{2,6}$"),
+    dst: str = Query("USD", pattern="^[A-Z]{2,6}$"),
+    days: int = Query(7),
+) -> dict:
+    """The pair's line for the converter — from our own ``market_history``
+    snapshots, so drawing it costs no request to CoinGecko."""
+    caller.require(FEATURE)
+    if src not in {*CRYPTO, *FIAT} or dst not in {*CRYPTO, *FIAT}:
+        raise HTTPException(status_code=422, detail="Такой валюты нет")
+    days = days if days in HISTORY_DAYS else 7
+    key = (src, dst, days)
+    now = time.monotonic()
+    hit = _history_cache.get(key)
+    if hit and now - hit[0] < HISTORY_CACHE_SECONDS:
+        return hit[1]
+    since = (datetime.now() - timedelta(days=days)).replace(microsecond=0).isoformat()
+    snapshots = await get_market_history(limit=20000, since_iso=since)
+    body = {"src": src, "dst": dst, "days": days, "points": history_points(snapshots, src, dst)}
+    _history_cache[key] = (now, body)
+    return body
 
 
 @router.get("/api/app/convert")

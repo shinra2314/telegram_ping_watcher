@@ -4,13 +4,15 @@
 'use strict';
 
 const WEEKDAY = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+// The period of the hours / chats / authors / speed breakdowns (remembered).
+const ANA = { days: 30 };
 
 App.register('analytics', {
   tab: 'more',
   title: 'Статистика',
 
   async render() {
-    const r = await api('/api/app/analytics');
+    const r = await api('/api/app/analytics?days=' + ANA.days);
     const s = r.summary || {};
     App.sub.textContent = r.scope.length ? r.scope.map((a) => '@' + a).join(', ') : 'все аккаунты';
 
@@ -22,6 +24,7 @@ App.register('analytics', {
     if (!s.total) {
       return html + emptyView('chart', 'Данных пока нет', 'Статистика появится после первых упоминаний.');
     }
+    if (r.full) html += seg([['7', '7 дней'], ['30', '30 дней'], ['90', '90 дней']], String(ANA.days), 'days') + '<div style="height:12px"></div>';
 
     html += '<div class="kv">'
       + statCell('За сутки', fmtInt(s.last_24h))
@@ -54,6 +57,8 @@ App.register('analytics', {
     if (r.chats && r.chats.length) {
       html += '<div class="section-label">Где упоминают · ' + (r.window_days || 30) + ' дн</div><div class="list">'
         + r.chats.map((c, i) => item({
+          // With the search grant a chat opens the feed narrowed to it.
+          act: App.sections.search ? 'chat' : '', data: { chat: c.chat }, chev: false,
           lead: '<span class="num" style="font-size:13px;font-weight:700">' + (i + 1) + '</span>', leadCls: c.wins ? 'on' : '',
           title: esc(c.chat),
           // A chat with no giveaways of its own (a comment thread, a results
@@ -83,6 +88,18 @@ App.register('analytics', {
         + '</div>';
     }
     return html;
+  },
+
+  actions: {
+    days: (el) => { ANA.days = Number(el.dataset.v); Saved.put('ana_days', ANA.days); return App.render({ quiet: true }); },
+    chat: (el) => {
+      // "Name (@handle)": the handle is what full-text search finds reliably.
+      const name = el.dataset.chat || '';
+      const handle = /\(@([\w\d_]+)\)/.exec(name);
+      FEED.q = handle ? handle[1] : name.replace(/[()"]/g, ' ').trim().slice(0, 60);
+      FEED.reset();
+      return App.tab('feed');
+    },
   },
 });
 

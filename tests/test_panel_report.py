@@ -118,6 +118,13 @@ class PanelReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([a["name"] for a in report["accounts"]], ["other", "mine"])
         self.assertEqual(len(report["daily"]), 14)
 
+    async def test_the_period_widens_the_breakdowns_only(self):
+        wide = await self.build([], ["mine", "other"], 90)
+        self.assertEqual((wide["window_days"], sum(c["count"] for c in wide["chats"])), (90, 4))
+        self.assertEqual(wide["summary"]["total"], 4)
+        # An unlisted period falls back to the default, not to "everything".
+        self.assertEqual((await self.build([], [], 1000))["window_days"], 30)
+
 
 if __name__ == "__main__":
     unittest.main()

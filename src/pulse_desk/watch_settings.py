@@ -70,6 +70,9 @@ def default_notification_settings() -> dict[str, Any]:
         "cooldown_seconds": 120,
         "include_giveaways": True,
         "include_wins": True,
+        # «🛰 В панели» on the owner's cards (bot_notify.panel_card_screen). Off:
+        # a web_app button on every card is the panel's widest exposure.
+        "panel_button": False,
         "moderation_mode": mode if mode in {"auto", "moderated"} else "auto",
         "approval_timeout_seconds": _as_int(settings.broadcast_approval_timeout_seconds, 300, 30, 3600),
     }

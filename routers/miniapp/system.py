@@ -16,7 +16,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from database import create_db_backup, get_recent_problem_events, list_db_backups, record_event
+from database import (
+    create_db_backup, get_events, get_recent_problem_events, list_bot_members, list_db_backups, record_event,
+)
 from pulse_desk.app_ctx import logger, state
 from pulse_desk.bot.sections.scan import start_if_idle
 from pulse_desk.common import start_background_task
@@ -27,6 +29,7 @@ from .common import Caller, admin_caller, fresh_admin
 router = APIRouter()
 
 EVENTS_SHOWN = 40
+JOURNAL_SHOWN = 30
 MAINTENANCE_JOB = "panel-maintenance"
 
 
@@ -39,12 +42,28 @@ def _event(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def journal_rows(limit: int = JOURNAL_SHOWN) -> list[dict[str, Any]]:
+    """What was done from the panel, and by whom — the `miniapp` events the
+    server writes for every action that went through (miniapp_server.journal)."""
+    rows, members = await asyncio.gather(get_events(limit=limit, source="miniapp"), list_bot_members())
+    names = {int(m["tg_id"]): (m.get("name") or m.get("tg_username") or "") for m in members}
+    out = []
+    for row in rows:
+        ctx = row.get("context") or {}
+        tg_id = ctx.get("tg_id")
+        who = "вы" if ctx.get("role") == "admin" else (names.get(int(tg_id)) if tg_id else "") or str(tg_id or "?")
+        out.append({"at": row.get("created_at"), "who": who, "path": ctx.get("path") or "",
+                    "details": {k: v for k, v in ctx.items() if k not in ("path", "tg_id", "role")}})
+    return out
+
+
 @router.get("/api/app/system")
 async def system(caller: Caller = Depends(admin_caller)) -> dict:
-    report, events, backups = await asyncio.gather(
+    report, events, backups, journal = await asyncio.gather(
         health(),
         get_recent_problem_events(limit=EVENTS_SHOWN),
         asyncio.to_thread(list_db_backups, 1),
+        journal_rows(),
     )
     newest = backups[0] if backups else None
     running_maintenance = MAINTENANCE_JOB in state.background_tasks and not state.background_tasks[MAINTENANCE_JOB].done()
@@ -81,6 +100,7 @@ async def system(caller: Caller = Depends(admin_caller)) -> dict:
             "error": state.scan_status.get("last_error"),
         },
         "events": [_event(e) for e in events],
+        "journal": journal,
     }
 
 

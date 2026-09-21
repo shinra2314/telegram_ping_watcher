@@ -18,14 +18,21 @@ async def record_event(level: str, source: str, message: str, context: Optional[
         await db.commit()
 
 
-async def get_events(limit: int = 100, level: Optional[str] = None) -> list[dict[str, Any]]:
+async def get_events(limit: int = 100, level: Optional[str] = None,
+                     source: Optional[str] = None) -> list[dict[str, Any]]:
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM app_events"
         params: list[Any] = []
+        where: list[str] = []
         if level:
-            query += " WHERE level = ?"
+            where.append("level = ?")
             params.append(level.upper())
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        if where:
+            query += " WHERE " + " AND ".join(where)
         query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = await (await db.execute(query, params)).fetchall()

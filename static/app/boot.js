@@ -63,6 +63,18 @@ function resume(saved) {
   return App.render();
 }
 
+// Telegram's own «Настройки» item in the panel's ⋯ menu: the owner's
+// settings, a guest's notifications. Only on clients that have it.
+function nativeButtons() {
+  if (!tg || !tg.SettingsButton || !tg.isVersionAtLeast || !tg.isVersionAtLeast('7.0')) return;
+  const target = App.sections.accounts ? 'settings' : (App.sections.prefs ? 'prefs' : null);
+  if (!target) return;
+  try {
+    tg.SettingsButton.onClick(() => { if (App.current().name !== target) App.go(target); });
+    tg.SettingsButton.show();
+  } catch (e) { /* older clients */ }
+}
+
 (async function boot() {
   document.getElementById('mark').innerHTML = icon('pulse', 16);
   const refresh = document.getElementById('refresh');
@@ -98,7 +110,13 @@ function resume(saved) {
   await Saved.load();
   GW.restore();
   FEED.restore();
+  if ([7, 30, 90].indexOf(Saved.get('ana_days', 30)) !== -1) ANA.days = Saved.get('ana_days', 30);
   if ('achn'.indexOf(Saved.get('debts_seg', 'a')) !== -1) Debts.seg = Saved.get('debts_seg', 'a');
+
+  // Network-first shell cache for the hours the PC is off (static/app/sw.js).
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/app-sw.js').catch(() => { /* WebView without workers */ });
+  }
 
   Session.render();
   setInterval(() => Session.render(), 30000);
@@ -109,6 +127,7 @@ function resume(saved) {
   const previous = Saved.get('stack', null);
   // Home runs first either way: it is what learns which sections the key opens.
   await App.tab('home');
+  nativeButtons();
   const link = deepLink();
   if (link) return openAt(link.name, link.params);
   return resume(previous);

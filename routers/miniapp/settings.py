@@ -62,6 +62,7 @@ async def settings_payload() -> dict[str, Any]:
             "include_giveaways": bool(notif.get("include_giveaways", True)),
             "include_wins": bool(notif.get("include_wins", True)),
             "moderated": notif.get("moderation_mode") == "moderated",
+            "panel_button": bool(notif.get("panel_button")),
             "quiet_enabled": bool(quiet.get("enabled")),
             "quiet_from": quiet.get("from") or "23:00",
             "quiet_to": quiet.get("to") or "08:00",
@@ -101,6 +102,7 @@ class NotifyPatch(BaseModel):
     include_giveaways: Optional[bool] = None
     include_wins: Optional[bool] = None
     moderated: Optional[bool] = None
+    panel_button: Optional[bool] = None
     quiet_enabled: Optional[bool] = None
     quiet_from: Optional[str] = Field(None, max_length=5)
     quiet_to: Optional[str] = Field(None, max_length=5)
@@ -127,11 +129,11 @@ async def set_notifications(body: NotifyPatch, request: Request, caller: Caller 
     if body.autoclean_hours is not None and body.autoclean_hours not in autoclean.CHOICES:
         raise HTTPException(status_code=422, detail="Такого срока автоудаления нет")
 
-    notif_keys = {"enabled", "include_giveaways", "include_wins", "moderated", "quiet_enabled",
-                  "quiet_from", "quiet_to", "cooldown_seconds"}
+    notif_keys = {"enabled", "include_giveaways", "include_wins", "moderated", "panel_button",
+                  "quiet_enabled", "quiet_from", "quiet_to", "cooldown_seconds"}
     if notif_keys & set(patch):
         notif = await ws.load_notification_settings()
-        for key in ("enabled", "include_giveaways", "include_wins"):
+        for key in ("enabled", "include_giveaways", "include_wins", "panel_button"):
             if key in patch:
                 notif[key] = patch[key]
         if body.moderated is not None:

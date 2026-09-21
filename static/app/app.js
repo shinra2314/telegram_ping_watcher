@@ -156,14 +156,26 @@ async function api(path, body, label) {
   try {
     res = await fetch(path, init);
   } catch (e) {
-    throw new ApiError(0, 'Нет связи с Pulse Desk. Компьютер включён?');
+    // The PC is off for the night (or the tunnel is down): show what this
+    // screen last had, read-only. Actions have nothing to fall back on.
+    const hit = body === undefined ? Offline.get(path) : null;
+    if (hit) {
+      Offline.enter(hit.at);
+      return hit.data;
+    }
+    throw new ApiError(0, Offline.on
+      ? 'Pulse Desk выключен — это действие подождёт, пока компьютер включится'
+      : 'Нет связи с Pulse Desk. Компьютер включён?');
   }
+  Offline.leave();
   if (!res.ok) {
     let detail = 'Ошибка ' + res.status;
     try {
       const data = await res.json();
       detail = typeof data.detail === 'string' ? data.detail : detail;
     } catch (e) { /* keep default */ }
+    // Access withdrawn (not merely "this section is closed"): forget the snapshot.
+    if (res.status === 403 && detail === 'Доступ к боту закрыт') Offline.clear();
     if (res.status === 401 && body !== undefined) {
       if (RETRYABLE.some((re) => re.test(path))) {
         try {
@@ -174,8 +186,61 @@ async function api(path, body, label) {
     }
     throw new ApiError(res.status, detail);
   }
-  return res.json();
+  const data = await res.json();
+  if (body === undefined) Offline.keep(path, data);
+  return data;
 }
+
+// ── Offline snapshot ──────────────────────────────────────────────────
+// The last answer of a few read-only screens, on this device only (never
+// CloudStorage: the data has no business on Telegram's servers). Nothing
+// with a post's text, an account, a key or a login is kept — the lists and
+// figures are, so the panel is not a blank page from midnight to 10:00.
+const Offline = {
+  KEY: 'pd.snap.' + whoami(),
+  KEEP: [
+    /^\/api\/app\/home$/,
+    /^\/api\/app\/giveaways(\?(?!.*after=).*)?$/,
+    /^\/api\/app\/wins\?days=\d+$/,
+    /^\/api\/app\/salary(\?.*)?$/,
+    /^\/api\/app\/analytics(\?.*)?$/,
+    /^\/api\/app\/market$/,
+    /^\/api\/app\/market\/history\?.*$/,
+  ],
+  LIMIT: 16,
+  on: false,
+  read() { try { return JSON.parse(localStorage.getItem(this.KEY) || '{}') || {}; } catch (e) { return {}; } },
+  keep(path, data) {
+    if (!this.KEEP.some((re) => re.test(path))) return;
+    const all = this.read();
+    all[path] = { at: Date.now(), data: data };
+    // Newest LIMIT entries: filter combinations must not grow it forever.
+    const keys = Object.keys(all).sort((a, b) => all[b].at - all[a].at);
+    keys.slice(this.LIMIT).forEach((k) => { delete all[k]; });
+    try { localStorage.setItem(this.KEY, JSON.stringify(all)); } catch (e) { /* full or private: no snapshot */ }
+  },
+  get(path) { return this.read()[path] || null; },
+  // A revoked key must not keep showing what it used to open.
+  clear() { try { localStorage.removeItem(this.KEY); } catch (e) { /* ignore */ } },
+  enter(at) {
+    if (this.on) return;
+    this.on = true;
+    document.body.classList.add('offline');
+    const when = new Date(at);
+    const hm = when.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const stamp = when.toDateString() === new Date().toDateString()
+      ? hm : when.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }) + ' ' + hm;
+    Session.show('offline', icon('power', 15) + '<span>Pulse Desk выключен · показано то, что было в ' + esc(stamp)
+      + '</span><button class="link" data-act="app-retry">Проверить</button>');
+  },
+  leave() {
+    if (!this.on) return;
+    this.on = false;
+    document.body.classList.remove('offline');
+    Session.hide('offline');
+    Session.render();
+  },
+};
 
 // ── Session ───────────────────────────────────────────────────────────
 // The server takes actions only from initData younger than an hour (reads

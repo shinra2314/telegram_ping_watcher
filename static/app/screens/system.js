@@ -47,6 +47,13 @@ App.register('system', {
       + '<button class="btn" data-act="resend"' + (s.owed_ping_cards ? '' : ' disabled') + '>' + icon('send', 18) + 'Дослать</button>'
       + '</div>';
 
+    if (s.journal && s.journal.length) {
+      html += '<div class="section-label">Действия в панели</div><div class="list">'
+        + s.journal.map((j) => item({
+          lead: icon(j.who === 'вы' ? 'user' : 'users', 15), leadCls: j.who === 'вы' ? '' : 'on',
+          title: esc(journalWhat(j)), desc: esc(j.who), end: '<div class="d num">' + esc(fmtTime(j.at)) + '</div>',
+        })).join('') + '</div>';
+    }
     if (s.events.length) {
       html += '<div class="section-label">Предупреждения и ошибки</div><div class="list">'
         + s.events.map((e) => item({
@@ -84,6 +91,32 @@ App.register('system', {
     },
   },
 });
+
+// "/api/app/pings/5/status" + {status: "claimed"} → «статус #5: claimed».
+const JOURNAL_WORDS = [
+  [/^\/api\/app\/pings\/(\d+)\/status$/, (m, d) => 'статус #' + m[1] + (d.status ? ': ' + d.status : '')],
+  [/^\/api\/app\/debts\/claim$/, (m, d) => (d.status || 'claimed') + ' · ' + ((d.ids || []).length) + ' шт.'],
+  [/^\/api\/app\/undo$/, () => 'вернул как было'],
+  [/^\/api\/app\/giveaways\/(\d+)\/engagement$/, (m, d) => (d.action === 'joined' ? 'участвую' : 'пропустил') + ' #' + m[1]],
+  [/^\/api\/app\/giveaways\/(\d+)\/(analyze|profile|skip)$/, (m) => ({ analyze: 'разбор', profile: 'профиль канала', skip: 'не участвуем' })[m[2]] + ' #' + m[1]],
+  [/^\/api\/app\/cleanup\/leave$/, (m, d) => 'выход из каналов: ' + ((d.chat_ids || []).length)],
+  [/^\/api\/app\/login\//, () => 'вход в аккаунт'],
+  [/^\/api\/app\/accounts\/([^/]+)\/(\w+)$/, (m) => m[2] + ' · ' + decodeURIComponent(m[1])],
+  [/^\/api\/app\/keys/, () => 'ключи'],
+  [/^\/api\/app\/members\//, () => 'доступ участника'],
+  [/^\/api\/app\/settings/, () => 'настройки'],
+  [/^\/api\/app\/feed/, () => 'лента'],
+  [/^\/api\/app\/prefs$/, () => 'свои уведомления'],
+  [/^\/api\/app\/system\/(\w+)$/, (m) => ({ scan: 'скан', maintenance: 'уборка', backup: 'бэкап', resend: 'досылка карточек' })[m[1]] || m[1]],
+];
+
+function journalWhat(j) {
+  for (const [re, word] of JOURNAL_WORDS) {
+    const m = re.exec(j.path);
+    if (m) return word(m, j.details || {});
+  }
+  return j.path;
+}
 
 function sysRow(tone, title, text) {
   return item({ lead: '<span class="dot ' + tone + '"></span>', title: esc(title), desc: esc(text), wrap: true });

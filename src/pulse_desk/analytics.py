@@ -255,6 +255,8 @@ async def _build_detailed_analytics_uncached() -> dict[str, Any]:
 # when" sections look, and how many rows they list.
 PANEL_DAYS = 14
 PANEL_WINDOW_DAYS = 30
+# Periods the panel's statistics screen offers.
+PANEL_WINDOWS = (7, 30, 90)
 PANEL_TOP = 8
 
 
@@ -283,7 +285,8 @@ def fill_days(rows: list[dict[str, Any]], last_day: date, days: int = PANEL_DAYS
     return result
 
 
-async def _build_panel_report_uncached(scope: list[str], listed: list[str]) -> dict[str, Any]:
+async def _build_panel_report_uncached(scope: list[str], listed: list[str],
+                                       window_days: int = PANEL_WINDOW_DAYS) -> dict[str, Any]:
     """The Mini App's statistics screen, counted only over what a key may see.
 
     ``scope`` is the key's account whitelist: every aggregate is limited to pings
@@ -302,7 +305,7 @@ async def _build_panel_report_uncached(scope: list[str], listed: list[str]) -> d
     now = datetime.now().replace(microsecond=0)
     day_ago = (now - timedelta(days=1)).isoformat()
     week_ago = (now - timedelta(days=7)).isoformat()
-    window = (now - timedelta(days=PANEL_WINDOW_DAYS)).isoformat()
+    window = (now - timedelta(days=window_days)).isoformat()
     first_day = (now - timedelta(days=PANEL_DAYS - 1)).date().isoformat()
 
     async with aiosqlite.connect(database.DB_PATH) as db:
@@ -381,7 +384,7 @@ async def _build_panel_report_uncached(scope: list[str], listed: list[str]) -> d
             "win_rate": round(wins / total * 100, 1) if total else 0,
         },
         "daily": fill_days(daily, now.date()),
-        "window_days": PANEL_WINDOW_DAYS,
+        "window_days": window_days,
         "hours": [by_hour.get(h, 0) for h in range(24)],
         "chats": chats,
         "senders": senders,
@@ -390,16 +393,20 @@ async def _build_panel_report_uncached(scope: list[str], listed: list[str]) -> d
     }
 
 
-async def build_panel_report(scope: Optional[Sequence[str]], listed: Optional[Sequence[str]] = None) -> dict[str, Any]:
+async def build_panel_report(scope: Optional[Sequence[str]], listed: Optional[Sequence[str]] = None,
+                             window_days: int = 0) -> dict[str, Any]:
     """Mini App statistics for one account scope, memoised like the bot's report.
 
     ``scope`` — the key's whitelist (empty: every account); ``listed`` — the
-    accounts to break down in the per-account section.
+    accounts to break down in the per-account section; ``window_days`` — the
+    period of the hour / chat / author / latency breakdowns (one of
+    ``PANEL_WINDOWS``, anything else is the default 30).
     """
     names = clean_names(scope)
     shown = clean_names(listed)
-    key = "panel:" + ",".join(names) + "|" + ",".join(shown)
-    return await _cached(key, lambda: _build_panel_report_uncached(names, shown))
+    days = window_days if window_days in PANEL_WINDOWS else PANEL_WINDOW_DAYS
+    key = f"panel:{days}:" + ",".join(names) + "|" + ",".join(shown)
+    return await _cached(key, lambda: _build_panel_report_uncached(names, shown, days))
 
 
 async def build_analytics() -> dict[str, Any]:

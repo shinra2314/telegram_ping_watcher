@@ -25,11 +25,17 @@ App.register('more', {
       html += '<div class="section-label">Быстро</div><div class="stack">'
         + '<button class="btn" data-act="go" data-to="login">' + icon('plus', 18) + 'Подключить аккаунт</button></div>';
     }
+    // Telegram 8.0+: a shortcut on the phone's home screen that opens the panel.
+    if (tg && tg.addToHomeScreen && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+      html += '<div style="margin-top:12px"><button class="btn ghost" data-act="home-screen">' + icon('phone', 18)
+        + 'На главный экран телефона</button></div>';
+    }
     html += '<div style="margin-top:22px"><button class="btn ghost" data-act="app-close">' + icon('message', 18) + 'Вернуться в бота</button></div>';
     return html;
   },
 
   actions: {
     go: (el) => App.go(el.dataset.to),
+    'home-screen': () => { try { tg.addToHomeScreen(); } catch (e) { toast('Этот Telegram так не умеет', true); } },
   },
 });

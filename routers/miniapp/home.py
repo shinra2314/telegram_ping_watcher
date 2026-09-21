@@ -20,6 +20,7 @@ from database import (
     account_win_stats, get_bot_member, get_debt_board, get_pings, list_access_windows,
     member_engagement_since,
 )
+from pulse_desk.account_health import account_problem
 from pulse_desk.app_ctx import logger, state
 from pulse_desk.bot.sections.giveaways import visible_accounts
 from pulse_desk.bot.sections.debts import BOARD_LIMIT, total_value
@@ -177,6 +178,14 @@ async def home(caller: Caller = Depends(current_caller)) -> dict:
         counters["accounts_online"] = sum(
             1 for a in state.accounts_state.values() if a.get("status") == "online")
         counters["accounts_total"] = len(set(state.session_names) | set(state.accounts_state))
+        # «Разбор»: the same three sources /api/app/triage lists, counted from
+        # what this request already fetched.
+        now = datetime.now()
+        problems = sum(1 for a in state.accounts_state.values()
+                       if account_problem(a, now, app_started_at=state.started_at) is not None)
+        giveaway_rows = results["giveaways"][0] if results.get("giveaways") is not None else []
+        counters["triage"] = (int(counters.get("debts") or 0) + problems
+                              + sum(1 for r in giveaway_rows if not r.get("is_win")))
     payload["counters"] = counters
     if results.get("me"):
         payload["me"] = results["me"]

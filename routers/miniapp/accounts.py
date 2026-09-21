@@ -5,14 +5,17 @@
 """
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from database import account_win_stats
 from pulse_desk import account_login
 from pulse_desk.app_ctx import state
-from pulse_desk.bot.sections.accounts import collect
+from pulse_desk.bot.sections.accounts import check_spam, collect
 from pulse_desk.common import start_background_task
 from pulse_desk.telegram_accounts import (
     account_in_cooldown, disconnect_account, restart_monitoring, start_client,
@@ -41,9 +44,29 @@ def _known(name: str) -> bool:
     return name in state.session_names or name in state.accounts_state
 
 
+WINS_DAYS = 30
+
+
+async def wins_by_account(items: list[dict[str, Any]]) -> dict[str, int]:
+    """Wins in the last 30 days per session, matched by its live username.
+
+    A session file name is not an account (``w3v8f0rm`` is @MCshinra), so a
+    session without a known username simply gets no figure.
+    """
+    since = (datetime.now() - timedelta(days=WINS_DAYS)).replace(microsecond=0).isoformat()
+    named = [(a["session_name"], a["username"]) for a in items if a.get("username")]
+    stats = await asyncio.gather(*(account_win_stats([u], since) for _n, u in named), return_exceptions=True)
+    return {name: int(s.get("wins") or 0) for (name, _u), s in zip(named, stats) if isinstance(s, dict)}
+
+
 @router.get("/api/app/accounts")
 async def accounts(caller: Caller = Depends(admin_caller)) -> dict:
     items = [account_view(a) for a in await collect()]
+    recent = await wins_by_account(items)
+    for item in items:
+        item["wins_30d"] = recent.get(item.get("session_name"))
+    # Problems first: the list is for finding what is wrong.
+    items.sort(key=lambda a: (not a.get("problem") and a.get("status") == "online", str(a.get("session_name"))))
     return {
         "items": items,
         "online": sum(1 for a in items if a.get("status") == "online"),
@@ -69,6 +92,19 @@ async def reconnect(name: str, caller: Caller = Depends(fresh_admin)) -> dict:
         {"manual_disconnect": False, "status": "connecting", "last_error": None})
     start_background_task(f"telegram-start:{name}", start_client(name))
     return {"ok": True, "session_name": name, "message": "Подключаю…"}
+
+
+@router.post("/api/app/accounts/{name}/spam")
+async def spam(name: str, caller: Caller = Depends(fresh_admin)) -> dict:
+    """@SpamBot от имени аккаунта — тот же ``check_spam``, что у «🛡 Спам-блок»."""
+    if not _known(name):
+        raise HTTPException(status_code=404, detail="Нет такой сессии")
+    try:
+        verdict = await check_spam(name)
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail="Аккаунт не в сети") from exc
+    return {"ok": True, "session_name": name, "free": verdict["free"], "summary": verdict["summary"],
+            "text": verdict["text"][:600] if not verdict["free"] else ""}
 
 
 @router.post("/api/app/accounts/restart")

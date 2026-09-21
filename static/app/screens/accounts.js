@@ -37,14 +37,19 @@ App.register('accounts', {
         const online = a.status === 'online';
         const bits = [st[0]];
         if (a.username) bits.push('@' + a.username);
-        if (a.pings_total) bits.push(fmtInt(a.pings_total) + ' упом.');
-        if (a.wins) bits.push(a.wins + ' ' + plural(a.wins, 'победа', 'победы', 'побед'));
+        if (a.wins_30d != null) bits.push(a.wins_30d + ' ' + plural(a.wins_30d, 'победа', 'победы', 'побед') + ' за 30 дн');
+        else if (a.wins) bits.push(a.wins + ' ' + plural(a.wins, 'победа', 'победы', 'побед'));
+        // A problem (banned, stuck, silent for 12 h) outranks the raw error text.
+        const trouble = a.problem || (a.last_error ? String(a.last_error).slice(0, 120) : '');
+        const extra = [];
+        if (trouble) extra.push('<span class="down">' + esc(trouble) + '</span>');
+        if (a.spam_check) extra.push('<span class="dim">' + icon('shield', 12) + ' ' + esc(a.spam_check) + '</span>');
         return item({
           act: 'account', data: { name: a.session_name, online: online ? 1 : 0 },
-          lead: '<span class="dot ' + (st[1] || '') + '"></span>',
+          lead: '<span class="dot ' + (a.problem ? 'bad' : (st[1] || '')) + '"></span>',
           title: esc(a.session_name) + (a.cooldown ? ' <span class="badge warn">пауза</span>' : ''),
-          desc: esc(bits.join(' · ')) + (a.last_error ? '<br><span class="down">' + esc(String(a.last_error).slice(0, 120)) + '</span>' : ''),
-          wrap: Boolean(a.last_error),
+          desc: esc(bits.join(' · ')) + (extra.length ? '<br>' + extra.join('<br>') : ''),
+          wrap: Boolean(extra.length),
           end: a.last_ping_at ? '<div class="d num">' + esc(fmtTime(a.last_ping_at)) + '</div>' : '',
         });
       }).join('') + '</div>'
@@ -62,8 +67,20 @@ App.register('accounts', {
         + (online
           ? '<button class="btn danger" data-act="disconnect" data-name="' + esc(name) + '">' + icon('power', 18) + 'Отключить</button>'
           : '<button class="btn primary" data-act="reconnect" data-name="' + esc(name) + '">' + icon('plug', 18) + 'Подключить</button>')
+        + (online ? '<button class="btn" data-act="spam" data-name="' + esc(name) + '">' + icon('shield', 18) + 'Проверить спам-блок</button>' : '')
         + '<button class="btn ghost" data-act="relogin" data-name="' + esc(name) + '">' + icon('lock', 18) + 'Войти заново по номеру</button>'
         + '</div>');
+    },
+    spam: async (el) => {
+      Sheet.close();
+      const name = el.dataset.name;
+      toast('Спрашиваю @SpamBot от ' + name + '…');
+      const res = await api('/api/app/accounts/' + encodeURIComponent(name) + '/spam', {});
+      Sheet.open('@SpamBot · ' + name, '<div class="panel pad" style="font-size:14px">'
+        + '<span class="badge ' + (res.free ? 'good' : 'bad') + '">' + esc(res.summary) + '</span>'
+        + (res.text ? '<div class="dim" style="margin-top:10px;white-space:pre-wrap;font-size:13px">' + esc(res.text) + '</div>' : '')
+        + '</div>');
+      return App.render({ quiet: true });
     },
     disconnect: async (el) => {
       Sheet.close();

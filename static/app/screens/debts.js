@@ -1,22 +1,32 @@
 // Debts: wins not yet claimed. Tap selects, the dock claims the selection.
 'use strict';
 
-const Debts = { seg: 'a', selected: new Set(), open: null };
+// `account` and `sort` are per-visit lenses; the segment is remembered.
+const Debts = { seg: 'a', sort: 'd', account: '', selected: new Set(), open: null };
 
 App.register('debts', {
   tab: 'more',
   title: 'Долги',
 
   async render() {
-    const data = await api('/api/app/debts?seg=' + Debts.seg);
+    const data = await api('/api/app/debts?seg=' + Debts.seg + '&sort=' + Debts.sort
+      + (Debts.account ? '&account=' + encodeURIComponent(Debts.account) : ''));
     const ids = new Set(data.items.map((r) => r.id));
     Debts.selected.forEach((id) => { if (!ids.has(id)) Debts.selected.delete(id); });
     const stats = data.stats || {};
     let html = '<div class="kv">'
-      + cell('В очереди', fmtInt(data.count)) + cell('Оценка', data.value ? fmtUsd(data.value) : '—')
+      + cell('В очереди', fmtInt(data.count))
+      + cell('Незабрано', (data.value ? fmtUsd(data.value) : '—')
+        + (data.unpriced ? '<small class="of">+ ' + data.unpriced + ' без оценки</small>' : ''))
       + cell('Критичных', fmtInt(stats.critical)) + cell('Новых', fmtInt(stats.new))
       + '</div><div style="margin-top:12px">'
-      + seg(data.segments.map((s) => [s.code, s.label]), data.segment, 'seg') + '</div>';
+      + seg(data.segments.map((s) => [s.code, s.label]), data.segment, 'seg') + '</div>'
+      + '<div class="chips">'
+      + '<button class="chip" data-act="sort">' + icon(Debts.sort === 'v' ? 'cash' : 'flame', 15)
+      + (Debts.sort === 'v' ? 'Сначала дорогие' : 'Сначала горячие') + '</button>'
+      + (data.accounts || []).map((a) => '<button class="chip' + (Debts.account === a.name ? ' on' : '') + '" data-act="account" data-v="'
+        + esc(a.name) + '">@' + esc(a.name) + ' <span class="num dim">' + (a.usd ? fmtUsd(a.usd) : a.count) + '</span></button>').join('')
+      + '</div>';
     if (!data.items.length) {
       return html + emptyView('wallet', 'Долгов нет', 'Под этот сегмент ничего не попало.');
     }
@@ -48,6 +58,12 @@ App.register('debts', {
 
   actions: {
     seg: (el) => { Debts.seg = el.dataset.v; Saved.put('debts_seg', Debts.seg); return App.render({ quiet: true }); },
+    sort: () => { Debts.sort = Debts.sort === 'v' ? 'd' : 'v'; return App.render({ quiet: true }); },
+    account: (el) => {
+      Debts.account = Debts.account === el.dataset.v ? '' : el.dataset.v;
+      Debts.selected.clear();
+      return App.render({ quiet: true });
+    },
     // Selecting is local: repaint the row and the dock, never refetch the board.
     toggle: (el) => {
       const id = Number(el.dataset.id);
@@ -112,8 +128,11 @@ async function settle(status) {
   if (!ids.length) return;
   const word = status === 'claimed' ? 'забранными' : 'скамом';
   if (!(await confirmBox('Отметить ' + ids.length + ' ' + plural(ids.length, 'запись', 'записи', 'записей') + ' ' + word + '?'))) return;
-  const res = await api('/api/app/debts/claim', { ids: ids, status: status });
+  const res = await api('/api/app/debts/claim', { ids: ids, status: status },
+    (status === 'claimed' ? 'забрал' : 'скам') + ' · ' + ids.length);
   Debts.selected.clear();
-  toast((status === 'claimed' ? 'Забрано: ' : 'Скам: ') + res.count);
+  GW.reset();
+  undoToast((status === 'claimed' ? 'Забрано: ' : 'Скам: ') + res.count, res.undo,
+    () => (App.current().name === 'debts' ? App.render({ quiet: true }) : null));
   return App.render({ quiet: true });
 }

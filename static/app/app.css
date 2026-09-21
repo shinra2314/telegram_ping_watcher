@@ -474,3 +474,18 @@ input.range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; b
 .notice span { flex: 1; min-width: 0; }
 .notice .link { padding: 0 2px; font-size: 13px; font-weight: 650; color: var(--accent); white-space: nowrap; }
 .notice .icon-btn { width: 44px; height: 44px; margin: -10px -10px -10px 0; background: none; border: 0; }
+
+/* ── Разбор: one card at a time ─────────────────────────────────────── */
+.tri-progress { display: flex; align-items: center; gap: 10px; margin: 2px 2px 12px; font-size: 12.5px; color: var(--dim); }
+.tri-progress .progress { flex: 1; margin: 0; }
+.tri-kind { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.tri-kind .badge .ic { margin-right: 4px; }
+.tri-title { font-size: 18px; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.tri-meta { margin-top: 4px; color: var(--dim); font-size: 14px; }
+.tri-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 12px; font-size: 13px; color: var(--dim); }
+.tri-facts span { display: inline-flex; align-items: center; gap: 5px; }
+.tri-card .text-block { margin-top: 2px; }
+.action-dock.tri { flex-direction: column; }
+.action-dock.tri .btn-row .btn { height: 42px; font-size: 14px; padding: 0 8px; }
+.action-dock.tri .btn.primary { height: 50px; font-size: 16px; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 9; -webkit-box-orient: vertical; overflow: hidden; }

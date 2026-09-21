@@ -65,6 +65,13 @@ App.register('home', {
     // An odd tile would leave a hole in the two-column grid; widen the last one.
     if (tiles.length % 2 === 1) tiles[tiles.length - 1] = tiles[tiles.length - 1].replace('class="tile', 'class="tile wide');
 
+    if (c.triage !== undefined) {
+      // The owner's first stop: everything waiting on a decision, one card at a time.
+      html += '<div class="tiles" style="margin-top:12px">' + tile({
+        act: 'open-triage', icon: c.triage ? 'check' : 'spark', label: 'Разобрать',
+        value: fmtInt(c.triage), small: c.triage ? 'ждут решения' : 'всё решено', hot: c.triage > 0,
+      }).replace('class="tile', 'class="tile wide') + '</div>';
+    }
     if (tiles.length) {
       html += '<div class="section-label">Разделы</div><div class="tiles">' + tiles.join('') + '</div>';
     } else {
@@ -102,6 +109,7 @@ App.register('home', {
     'open-feed': () => App.tab('feed'),
     'open-analytics': () => App.go('analytics'),
     'open-prefs': () => App.go('prefs'),
+    'open-triage': () => { Triage.reset(); return App.go('triage'); },
     'open-win': (el) => App.go('giveaway', { id: el.dataset.id }),
     'open-wins': () => { GW.wins = true; GW.keep(); GW.reset(); return App.tab('giveaways'); },
     'open-attention': (el) => {

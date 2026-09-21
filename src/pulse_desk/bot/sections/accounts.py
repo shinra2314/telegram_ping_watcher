@@ -154,13 +154,15 @@ async def ask_spambot(client) -> str:
     return str(getattr(reply, "raw_text", "") or "")
 
 
-async def _spam_check(click: Click) -> None:
-    name, client = await _target(click)
-    if not name or client is None:
-        await click.event.answer("Аккаунт не в сети — откройте список заново", alert=True)
-        return
-    # Answer now: the conversation can outlive the callback query.
-    await click.event.answer(f"Спрашиваю @SpamBot от {name}…")
+async def check_spam(name: str) -> dict[str, Any]:
+    """Ask @SpamBot for one online account and remember the verdict on its state.
+
+    Shared by «🛡 Спам-блок» here and the panel's account sheet. Raises
+    ``LookupError`` when the account has no connected client.
+    """
+    client = next((c for c in state.clients if getattr(c, "_session_name_custom", "") == name), None)
+    if client is None:
+        raise LookupError(name)
     try:
         text = await ask_spambot(client)
     except asyncio.TimeoutError:
@@ -174,10 +176,25 @@ async def _spam_check(click: Click) -> None:
     )
     await record_app_event("INFO" if free else "WARNING", "telegram", "SpamBot check",
                            {"session_name": name, "free": free})
+    return {"free": free, "summary": summary, "text": text}
+
+
+async def _spam_check(click: Click) -> None:
+    name, client = await _target(click)
+    if not name or client is None:
+        await click.event.answer("Аккаунт не в сети — откройте список заново", alert=True)
+        return
+    # Answer now: the conversation can outlive the callback query.
+    await click.event.answer(f"Спрашиваю @SpamBot от {name}…")
+    try:
+        verdict = await check_spam(name)
+    except LookupError:
+        await click.event.respond("Аккаунт успел отключиться — проверка не прошла")
+        return
     accounts = await collect()
-    note = f"🛡 **@SpamBot · {name}:** {summary}"
-    if text and not free:
-        note += f"\n__{text[:600]}__"
+    note = f"🛡 **@SpamBot · {name}:** {verdict['summary']}"
+    if verdict["text"] and not verdict["free"]:
+        note += f"\n__{verdict['text'][:600]}__"
     await safe_edit(click.event, note + "\n\n" + card(accounts), buttons=keyboard(accounts))
 
 

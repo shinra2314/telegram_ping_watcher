@@ -373,6 +373,21 @@ function toast(message, bad, action) {
   haptic(bad ? 'error' : 'ok');
 }
 
+// «Вернуть» for a status change: the server answered with an undo token
+// (bot/undo — the same 30-second snapshot the bot's «↩️ Отменить» uses).
+function undoToast(message, token, after) {
+  if (!token) { toast(message); return; }
+  toast(message, false, {
+    label: 'Вернуть',
+    run: async () => {
+      await api('/api/app/undo', { token: token });
+      toast('Вернули как было');
+      if (after) return after();
+      return null;
+    },
+  });
+}
+
 function confirmBox(message) {
   return new Promise((resolve) => {
     if (tg && tg.showConfirm && tg.isVersionAtLeast && tg.isVersionAtLeast('6.2')) {

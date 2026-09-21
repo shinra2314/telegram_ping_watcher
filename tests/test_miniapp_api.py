@@ -157,7 +157,7 @@ class MiniAppApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 403)
 
     def test_claim_applies_each_id_once(self):
-        with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()) as apply:
+        with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()) as apply,                 patch("routers.miniapp.debts.snapshot", AsyncMock(return_value={5: {}, 7: {}})):
             res = self.client.post("/api/app/debts/claim", headers=headers(OWNER),
                                    json={"ids": [5, 7, 5]})
         self.assertEqual(res.status_code, 200)
@@ -391,7 +391,7 @@ class LimitsAndJournalTests(unittest.TestCase):
         self.assertNotIn("380671234567", json.dumps(context))
 
     def test_journal_carries_the_ids_from_the_body(self):
-        with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()):
+        with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()),                 patch("routers.miniapp.debts.snapshot", AsyncMock(return_value={})):
             self.client.post("/api/app/debts/claim", headers=headers(OWNER), json={"ids": [5, 7]})
         context = self.journal.await_args.args[3]
         self.assertEqual((context["ids"], context["status"]), ([5, 7], "claimed"))

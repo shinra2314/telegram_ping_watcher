@@ -179,3 +179,19 @@ async def refresh_profile(chat_id: int) -> Optional[dict[str, Any]]:
     await record_app_event("INFO", "channels", "Channel profile refreshed manually",
                            {"chat_id": chat_id})
     return profile
+
+
+async def refresh_profile_for_ping(ping_id: int) -> Optional[dict[str, Any]]:
+    """Профиль канала, из которого пришла запись.
+
+    Кнопка карточки знает только id записи. Раньше он уходил в
+    ``refresh_profile`` как id канала: Telegram такого канала не находил, и
+    ``refresh_channel_profile`` записывал в ``channel_profiles`` строку-ошибку
+    под номером записи, а профиль настоящего канала не обновлялся никогда.
+    """
+    ping = await get_ping_by_id(ping_id)
+    if not ping:
+        raise GiveawayActionError("Запись не найдена", "not_found")
+    if ping.get("chat_id") is None:
+        raise GiveawayActionError("У записи нет канала", "not_found")
+    return await refresh_profile(int(ping["chat_id"]))

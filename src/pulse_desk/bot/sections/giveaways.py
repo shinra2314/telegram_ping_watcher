@@ -19,7 +19,7 @@ from ... import watch_settings as ws
 from ...app_ctx import state
 from ...bot_permissions import account_mentioned, accounts_allowed, full_permissions
 from ...giveaway_ops import GiveawayActionError, analyze, cleanup_candidates, leave_channel
-from ...giveaway_ops import refresh_profile, skip
+from ...giveaway_ops import refresh_profile_for_ping, skip
 from ...ping_actions import UnknownStatus, action_for_giveaway, apply_ping_meta
 from ..cards import feed_badge, giveaway_accounts_card, giveaway_card, giveaways_header
 from ..keyboards import (
@@ -218,7 +218,7 @@ async def _handle_action(click: Click, view: str) -> None:
             candidate = await analyze(target)
             await event.answer(f"Разобрано · score {candidate.get('score', '—')}")
         elif view == "pr":
-            await refresh_profile(target)
+            await refresh_profile_for_ping(target)
             await event.answer("Профиль канала обновлён")
         elif view == "sk":
             await skip(target)

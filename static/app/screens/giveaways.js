@@ -105,25 +105,21 @@ App.register('giveaways', {
       try { await GW.more(); } finally { el.disabled = false; }
       return App.render({ quiet: true });
     },
-    // Убрать из очереди = статус «Закрыт»; «Вернуть» кладёт прежние значения обратно.
+    // Убрать из очереди = статус «Закрыт»; «Вернуть» — серверный откат по токену.
     dismiss: async (el) => {
       const id = el.dataset.id;
-      const path = '/api/app/pings/' + id + '/status';
-      const prev = { status: el.dataset.status || '', action: el.dataset.action || 'new' };
       const repaint = () => (App.current().name === 'giveaways' ? App.render({ quiet: true }) : null);
       GW.drop(id);
       repaint();
+      let res;
       try {
-        await api(path, { status: 'closed' }, 'убрать из очереди');
+        res = await api('/api/app/pings/' + id + '/status', { status: 'closed' }, 'убрать из очереди');
       } catch (err) {
         GW.reset();
         repaint();
         throw err;
       }
-      toast('Убрано из очереди', false, {
-        label: 'Вернуть',
-        run: async () => { await api(path, prev, 'вернуть в очередь'); toast('Вернули в очередь'); GW.reset(); return repaint(); },
-      });
+      undoToast('Убрано из очереди', res.undo, () => { GW.reset(); return repaint(); });
     },
     open: (el) => App.go('giveaway', { id: el.dataset.id }),
     account: () => {
@@ -150,13 +146,26 @@ function priorityLabel(label) {
   return { critical: 'критично', high: 'высокий приоритет', normal: 'обычный', low: 'низкий' }[label] || (label || 'обычный');
 }
 
+// A win nobody has marked is not "waiting for results" — it is a prize owed.
+function cardBadge(g) {
+  if (g.is_win && (!g.status || g.status === 'pending')) return ['не забрано', 'warn'];
+  const s = GW_STATUS[g.status];
+  return s ? [s[0], s[2]] : (g.status ? [g.status, ''] : null);
+}
+
+// The owner's card as last drawn: the analysis and channel blocks repaint
+// from it after «Разобрать» / «Профиль» without refetching the post.
+let GW_CARD = null;
+
 App.register('giveaway', {
   tab: 'giveaways',
   title: 'Карточка',
 
   async render(params) {
     const g = await api('/api/app/giveaways/' + encodeURIComponent(params.id));
+    GW_CARD = g;
     App.sub.textContent = g.chat;
+    const badge = cardBadge(g);
     let html = '<div class="panel pad' + (g.is_win ? ' keyed' : '') + '" style="display:flex;gap:12px;align-items:center">'
       + '<div class="lead" style="width:44px;height:44px;border-radius:14px;display:grid;place-items:center;'
       + 'background:' + (g.is_win ? 'var(--accent-soft);color:var(--accent)' : 'var(--card-2);color:var(--dim)') + '">'
@@ -164,8 +173,7 @@ App.register('giveaway', {
       + '<div style="flex:1;min-width:0"><div style="font-weight:650;font-size:16px">' + (g.is_win ? 'Победа' : 'Розыгрыш') + '</div>'
       + '<div class="dim" style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
       + esc(g.chat) + ' · ' + esc(fmtTime(g.detected_at)) + '</div></div>'
-      + (g.status ? '<span class="badge ' + ((GW_STATUS[g.status] || [])[2] || '') + '">'
-        + esc((GW_STATUS[g.status] || [g.status])[0]) + '</span>' : '')
+      + (badge ? '<span class="badge ' + badge[1] + '">' + esc(badge[0]) + '</span>' : '')
       + '</div>';
     if (g.mentions || g.estimated_value) {
       html += '<div class="kv" style="margin-top:10px">'
@@ -186,6 +194,7 @@ App.register('giveaway', {
             + '" data-act="status" data-v="' + code + '" data-id="' + g.id + '">' + icon(s[1], 18) + esc(s[0]) + '</button>';
         }).join('') + '</div>';
     }
+    if (g.can_edit) html += '<div id="gw-extra">' + extraBlocks(g) + '</div>';
     return html;
   },
 
@@ -194,10 +203,88 @@ App.register('giveaway', {
       const code = el.dataset.v;
       if (code === 'scam' && !(await confirmBox('Отметить как скам?'))) return;
       const word = (GW_STATUS[code] || [code])[0];
-      await api('/api/app/pings/' + el.dataset.id + '/status', { status: code }, 'отметка «' + word + '»');
+      const res = await api('/api/app/pings/' + el.dataset.id + '/status', { status: code }, 'отметка «' + word + '»');
       GW.drop(el.dataset.id);
-      toast('Сохранено: ' + word);
+      undoToast('Сохранено: ' + word, res.undo, () => {
+        GW.reset();
+        return App.current().name === 'giveaways' ? App.render({ quiet: true }) : null;
+      });
+      return App.back();
+    },
+    // Разбор and the channel profile repaint their own block only: the post
+    // above stays where the owner was reading it.
+    analyze: (el) => extraAction(el, 'analyze', 'Разбираю…', (res) => { GW_CARD.candidate = res.candidate; return 'Разобрано'; }),
+    profile: (el) => extraAction(el, 'profile', 'Читаю канал…', (res) => { GW_CARD.channel = res.channel; return 'Профиль обновлён'; }),
+    skip: async (el) => {
+      const id = el.dataset.id;
+      const res = await api('/api/app/giveaways/' + id + '/skip', {}, 'не участвуем');
+      GW.drop(id);
+      undoToast('Не участвуем', res.undo, () => { GW.reset(); return null; });
       return App.back();
     },
   },
 });
+
+async function extraAction(el, kind, busyText, apply) {
+  const id = App.current().params.id;
+  el.disabled = true;
+  const label = el.innerHTML;
+  el.innerHTML = icon('refresh', 18) + busyText;
+  try {
+    const res = await api('/api/app/giveaways/' + id + '/' + kind, {});
+    if (!GW_CARD || String(GW_CARD.id) !== String(id)) return;
+    const done = apply(res);
+    const box = document.getElementById('gw-extra');
+    if (box) box.innerHTML = extraBlocks(GW_CARD);
+    toast(done);
+  } finally {
+    if (el.isConnected) { el.disabled = false; el.innerHTML = label; }
+  }
+}
+
+// Owner-only: what the analysis found, the channel, and the buttons that
+// spend Telegram requests (same functions as the bot's gw:an / gw:pr / gw:sk).
+function extraBlocks(g) {
+  const c = g.candidate;
+  const ch = g.channel;
+  let html = '<div class="section-label">Разбор</div>';
+  if (c) {
+    // External requirements usually repeat a reason word for word.
+    const warn = [].concat(c.blocked ? [c.blocked] : [], c.external || [])
+      .filter((w) => !c.reasons.some((r) => r.indexOf(w) !== -1));
+    html += '<div class="panel pad">'
+      + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+      + (c.score != null ? '<span class="badge on">score ' + esc(c.score) + '</span>' : '')
+      + (c.status ? '<span class="badge">' + esc(c.status) + '</span>' : '')
+      + (c.join_buttons ? '<span class="badge">кнопок участия: ' + c.join_buttons + '</span>' : '')
+      + (c.analyzed_at ? '<span class="dim num" style="margin-left:auto;font-size:12px">' + esc(fmtTime(c.analyzed_at)) + '</span>' : '')
+      + '</div>'
+      + (c.reasons.length ? '<div class="dim" style="font-size:13px;margin-top:8px">' + c.reasons.map((r) => '• ' + esc(r)).join('<br>') + '</div>' : '')
+      + (c.required_channels.length ? '<div style="font-size:13px;margin-top:8px"><span class="dim">Подписаться:</span> ' + esc(c.required_channels.join(', ')) + '</div>' : '')
+      + (warn.length ? '<div style="font-size:13px;margin-top:8px;color:var(--amber)">' + warn.map((r) => '⚠ ' + esc(r)).join('<br>') + '</div>' : '')
+      + '</div>';
+  } else {
+    html += '<div class="hint" style="margin:0 4px 4px">Ещё не разбирали: условия, кнопки участия и оценка появятся после разбора.</div>';
+  }
+  if (ch) {
+    html += '<div class="section-label">Канал</div><div class="panel pad" style="font-size:14px">'
+      + '<div style="display:flex;gap:8px;align-items:center">'
+      + (ch.username ? '<b>@' + esc(ch.username) + '</b>' : '<span class="dim">без username</span>')
+      + '</div>'
+      + (ch.wins || ch.giveaways || ch.noise
+        ? '<div class="dim num" style="font-size:12.5px;margin-top:6px">побед ' + ch.wins + ' · розыгрышей ' + ch.giveaways
+          + (ch.noise ? ' · <span style="color:var(--red)">скам и шум ' + ch.noise + '</span>' : '') + '</div>'
+        : '')
+      + (ch.description ? '<div class="dim" style="font-size:13px;margin-top:6px;white-space:pre-wrap">' + esc(ch.description) + '</div>' : '')
+      + (ch.error ? '<div style="font-size:12.5px;margin-top:6px;color:var(--amber)">' + esc(ch.error) + '</div>' : '')
+      + '</div>';
+  }
+  html += '<div class="btn-row" style="margin-top:10px">'
+    + '<button class="btn" data-act="analyze">' + icon('search', 18) + 'Разобрать</button>'
+    + '<button class="btn" data-act="profile">' + icon('scan', 18) + 'Профиль</button></div>';
+  if (!g.is_win) {
+    html += '<div style="margin-top:10px"><button class="btn ghost" data-act="skip" data-id="' + esc(g.id) + '">'
+      + icon('x', 18) + 'Не участвуем</button></div>';
+  }
+  return html;
+}

@@ -299,7 +299,10 @@ class MiniAppApiTests(unittest.TestCase):
         self.assertFalse(data["sections"]["giveaways"])
         self.assertEqual((data["me"]["role"], data["me"]["accounts"], data["me"]["muted"]),
                          ("premium", ["muver"], True))
-        self.assertEqual(data["me"]["access"], {"scheduled": False, "until": None})
+        self.assertEqual(data["me"]["access"], {"scheduled": False, "until": None, "windows": []})
+        # What the key opens, in words, and no expiry for a key without one.
+        self.assertEqual(data["me"]["sections"], ["Сводка", "Последние", "Поиск"])
+        self.assertIsNone(data["me"]["expires_at"])
         self.assertEqual(data["mine"]["wins"], {"wins": 3, "claimed": 1})
         self.assertEqual(wins.await_args.args[0], ["muver"])
         self.assertEqual(data["mine"]["recent_wins"], [])

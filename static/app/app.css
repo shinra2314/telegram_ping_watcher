@@ -489,3 +489,19 @@ input.range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; b
 .action-dock.tri .btn-row .btn { height: 42px; font-size: 14px; padding: 0 8px; }
 .action-dock.tri .btn.primary { height: 50px; font-size: 16px; }
 .clamp { display: -webkit-box; -webkit-line-clamp: 9; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ── Pulse: something new since the list was loaded ─────────────────── */
+.tab { position: relative; }
+.tab.fresh::after {
+  content: ""; position: absolute; top: 8px; right: calc(50% - 17px);
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 3px var(--ground);
+}
+.pulse-pill {
+  display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%;
+  margin: 0 0 10px; padding: 10px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--keyline); background: var(--accent-soft); color: var(--accent);
+  font-size: 13.5px; font-weight: 650;
+}
+.profile .key-more { display: block; margin: 6px 0 -6px; font-size: 13px; }
+.fact .v.warn { color: var(--amber); }

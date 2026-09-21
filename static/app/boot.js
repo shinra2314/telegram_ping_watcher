@@ -10,11 +10,24 @@ const DEEP_PARAMS = {
 };
 // A reopen within this long lands on the screen that was open.
 const RESUME_MS = 30 * 60 * 1000;
+// Which section of /api/app/home a screen lives in. A saved screen or a
+// link to one the key does not open is dropped, not shown as an error.
+const SCREEN_SECTION = {
+  giveaways: 'giveaways', giveaway: 'giveaways', wins: 'giveaways',
+  feed: 'feed', ping: 'feed', converter: 'market', analytics: 'analytics', prefs: 'prefs',
+  salary: 'salary', debts: 'debts',
+  accounts: 'accounts', login: 'accounts', triage: 'accounts', cleanup: 'accounts',
+};
+
+function opens(name) {
+  const section = SCREEN_SECTION[name];
+  return !section || Boolean(App.sections[section]);
+}
 
 function deepLink() {
   const query = new URLSearchParams(location.search);
   const name = query.get('s');
-  if (!name || name === 'home' || !App.screens[name]) return null;
+  if (!name || name === 'home' || !App.screens[name] || !opens(name)) return null;
   const rules = DEEP_PARAMS[name] || {};
   const params = {};
   Object.keys(rules).forEach((key) => {
@@ -41,6 +54,7 @@ function resume(saved) {
   if (!saved || !saved.at || Date.now() - saved.at > RESUME_MS || !Array.isArray(saved.stack)) return null;
   const stack = saved.stack.filter((e) => e && App.screens[e.name] && e.name !== 'login');
   if (!stack.length || (stack.length === 1 && stack[0].name === 'home')) return null;
+  if (!stack.every((e) => opens(e.name))) return null;
   // The key may have lost a section since: then the old tab is not offered.
   const tabs = App.tabs().map((t) => t[0]);
   if (tabs.indexOf(stack[0].name) === -1) return null;
@@ -88,6 +102,7 @@ function resume(saved) {
   Session.render();
   setInterval(() => Session.render(), 30000);
   Session.offerRetry();
+  Pulse.start();
 
   // Read before the first render: rendering home already overwrites it.
   const previous = Saved.get('stack', null);

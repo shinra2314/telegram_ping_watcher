@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 import database
 from pulse_desk.app_ctx import state
+from pulse_desk.common import record_app_event
 from pulse_desk.bot.sections.giveaways import visible_accounts
 from pulse_desk.bot.undo import remember, snapshot
 from pulse_desk.bot.views import ALL_ACCOUNTS, GiveawayFilter
@@ -30,7 +31,7 @@ from pulse_desk.giveaway_ops import (
 )
 from pulse_desk.ping_actions import UnknownStatus, action_for_giveaway, apply_ping_meta
 
-from .common import Caller, admin_caller, audit, current_caller, fresh_admin
+from .common import Caller, admin_caller, audit, current_caller, fresh_admin, fresh_caller
 
 router = APIRouter()
 
@@ -93,24 +94,41 @@ async def giveaways(
     page: int = Query(1, ge=1, le=200),
     after: Optional[int] = Query(None, ge=1),
     loaded: int = Query(0, ge=0, le=PAGE_SIZE * 200),
+    unanswered: bool = Query(False),
 ) -> dict:
     """``after`` / ``loaded`` — как в ленте: следующая порция идёт от последней
     строки на экране. Очередь собирается на Python, так что курсор — это просто
-    позиция той строки в списке; если её уже нет (забрана в боте), — счётчик."""
+    позиция той строки в списке; если её уже нет (забрана в боте), — счётчик.
+
+    Гостю каждая строка несёт его ответ («участвую / пропустил»), а
+    ``unanswered`` оставляет только те, на которые он ещё не ответил."""
     caller.require(FEATURE)
+    guest = not caller.is_admin
+    unanswered = unanswered and guest
     filt = GiveawayFilter(sort=sort, wins=wins, account=account, page=page)
     accounts = visible_accounts(caller.perms)
     start = loaded if after is not None else PAGE_SIZE * (page - 1)
     # С запасом на новые строки сверху: курсор должен остаться в окне.
     window = start + (2 * PAGE_SIZE if after is not None else PAGE_SIZE) + 1
-    rows, total = await need_action(caller, filt, limit=window * (8 if is_narrowed(caller, filt) else 1))
+    narrowed = is_narrowed(caller, filt) or unanswered
+    rows, total = await need_action(caller, filt, limit=window * (8 if narrowed else 1))
+    answers: dict[int, str] = {}
+    if guest:
+        answers = await database.member_engagement_for(caller.tg_id, [int(r["id"]) for r in rows])
+        if unanswered:
+            rows = [r for r in rows if int(r["id"]) not in answers]
+            total = len(rows)
     if after is not None:
         ids = [int(r["id"]) for r in rows]
         if after in ids:
             start = ids.index(after) + 1
     chunk = rows[start:start + PAGE_SIZE + 1]
+    items = [feed_row(r) for r in chunk[:PAGE_SIZE]]
+    if guest:
+        for item in items:
+            item["answer"] = answers.get(item["id"])
     return {
-        "items": [feed_row(r) for r in chunk[:PAGE_SIZE]],
+        "items": items,
         "has_more": len(chunk) > PAGE_SIZE,
         "page": page,
         "total": total,
@@ -118,7 +136,9 @@ async def giveaways(
         "account": account,
         "sort": sort,
         "wins": wins,
+        "unanswered": unanswered,
         "can_edit": caller.is_admin,
+        "can_answer": guest,
     }
 
 
@@ -143,7 +163,37 @@ async def giveaway_card(ping_id: int, caller: Caller = Depends(current_caller)) 
     if caller.is_admin:
         card["candidate"] = candidate_view(await database.get_giveaway_candidate(ping_id))
         card["channel"] = await channel_view(row.get("chat_id"))
+    else:
+        card["can_answer"] = True
+        card["answer"] = await database.get_member_engagement(caller.tg_id, ping_id)
     return card
+
+
+class AnswerBody(BaseModel):
+    action: str = Field(..., pattern="^(joined|skipped)$")
+
+
+@router.post("/api/app/giveaways/{ping_id}/engagement")
+async def answer(ping_id: int, body: AnswerBody, request: Request,
+                 caller: Caller = Depends(fresh_caller)) -> dict:
+    """«Участвую / Пропустил» — то же, что ``bcm:in|skip`` на копии в чате.
+
+    Только гостю: у владельца строки участника нет, и его решение по розыгрышу —
+    это статус записи, а не ответ.
+    """
+    if caller.is_admin:
+        raise HTTPException(status_code=404, detail="Ответ — только у участников")
+    caller.require(FEATURE)
+    row = await database.get_ping_by_id(ping_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    if not accounts_allowed(caller.perms, row.get("mentions")):
+        raise HTTPException(status_code=403, detail="Эта запись не про ваш аккаунт")
+    await database.set_member_engagement(caller.tg_id, ping_id, body.action)
+    await record_app_event("INFO", "engagement", "Member engagement recorded",
+                           {"tg_id": caller.tg_id, "ping_id": ping_id, "action": body.action, "via": "panel"})
+    audit(request, action=body.action)
+    return {"ok": True, "id": ping_id, "answer": body.action}
 
 
 def candidate_view(candidate: Optional[dict]) -> Optional[dict]:

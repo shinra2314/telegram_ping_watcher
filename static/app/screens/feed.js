@@ -31,6 +31,7 @@ const FEED = {
     this.rows = data.items;
     this.meta = data;
     this.at = Date.now();
+    Pulse.saw('feed');
   },
   async more() {
     const last = this.rows[this.rows.length - 1];

@@ -18,6 +18,7 @@ App.register('home', {
     let html = '';
 
     if (data.summary) html += hero(data.summary);
+    App.me = data.me || null;
     if (data.me) html += profileCard(data.name, data.me) + mineBlock(data.mine, data.me);
 
     const tiles = [];
@@ -111,7 +112,8 @@ App.register('home', {
     'open-prefs': () => App.go('prefs'),
     'open-triage': () => { Triage.reset(); return App.go('triage'); },
     'open-win': (el) => App.go('giveaway', { id: el.dataset.id }),
-    'open-wins': () => { GW.wins = true; GW.keep(); GW.reset(); return App.tab('giveaways'); },
+    'open-wins': () => { Wins.rows = null; return App.go('wins'); },
+    'key-access': () => keySheet(),
     'open-attention': (el) => {
       const key = el.dataset.key;
       if (key === 'accounts' && App.sections.accounts) return App.go('accounts');
@@ -160,6 +162,8 @@ function profileCard(name, me) {
   if (me.access && me.access.scheduled) {
     facts.push(profileFact('lock', 'Доступ', me.access.until ? 'до ' + fmtTime(me.access.until) : 'по расписанию'));
   }
+  const expiry = keyExpiry(me.expires_at);
+  if (expiry) facts.push(profileFact('clock', 'Ключ', expiry.text, expiry.soon ? 'warn' : ''));
   const letter = (String(name || '?').trim()[0] || '?').toUpperCase();
   return '<div class="panel keyed profile">'
     + '<div class="profile-top"><div class="avatar">' + esc(letter) + '</div>'
@@ -167,6 +171,7 @@ function profileCard(name, me) {
     + '<span class="badge ' + (premium ? 'on' : '') + '">' + (premium ? icon('flame', 12) + 'Премиум' : icon('user', 12) + 'Просмотр')
     + '</span></div></div>'
     + '<div class="facts">' + facts.join('') + '</div>'
+    + '<button class="link key-more" data-act="key-access">Что открывает ключ ›</button>'
     + (me.muted
       ? '<div class="muted-line" data-act="open-prefs">' + icon('bell-off', 16)
         + '<span>Уведомления выключены</span><span class="go">Включить ›</span></div>'
@@ -174,9 +179,40 @@ function profileCard(name, me) {
     + '</div>';
 }
 
-function profileFact(iconName, label, value) {
+function profileFact(iconName, label, value, tone) {
   return '<div class="fact"><span class="k">' + icon(iconName, 14) + esc(label) + '</span>'
-    + '<span class="v">' + esc(value) + '</span></div>';
+    + '<span class="v' + (tone ? ' ' + tone : '') + '">' + esc(value) + '</span></div>';
+}
+
+// "до 30.09" — and a warning tone for the last three days, when there is
+// still time to ask the owner for more.
+function keyExpiry(iso) {
+  const at = parseTime(iso);
+  if (!at) return null;
+  const days = Math.ceil((at - new Date()) / 86400000);
+  if (days < 0) return { text: 'истёк', soon: true };
+  const date = at.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  return { text: 'до ' + date + (days <= 3 ? ' · ' + days + ' ' + plural(days, 'день', 'дня', 'дней') : ''), soon: days <= 3 };
+}
+
+function keySheet() {
+  const me = App.me || {};
+  const access = me.access || {};
+  let html = '<div class="section-label" style="margin-top:0">Разделы</div>'
+    + (me.sections && me.sections.length
+      ? '<div class="tags">' + me.sections.map((s) => '<span class="badge on">' + esc(s) + '</span>').join('') + '</div>'
+      : '<div class="dim">Ни одного раздела</div>')
+    + '<div class="section-label">Уведомления</div>'
+    + '<div class="dim" style="font-size:14px">' + esc(me.notify && me.notify.length ? me.notify.join(', ') : 'закрыты владельцем')
+    + (me.delay_minutes ? ' · копии через ' + esc(me.delay_text) : '') + '</div>';
+  if (access.windows && access.windows.length) {
+    html += '<div class="section-label">Расписание доступа</div><div class="list">'
+      + access.windows.map((w) => item({
+        lead: icon(w.allow ? 'check' : 'lock', 15), leadCls: w.allow ? 'on' : 'warn',
+        title: w.allow ? 'Открыт' : 'Закрыт', desc: esc(w.text), wrap: true,
+      })).join('') + '</div>';
+  }
+  Sheet.open('Ваш ключ', html);
 }
 
 function mineBlock(mine, me) {

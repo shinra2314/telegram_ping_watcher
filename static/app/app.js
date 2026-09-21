@@ -77,6 +77,7 @@ const App = {
       if (def.mounted) this.leave = def.mounted(cur.params || {}) || null;
       if (!quiet) window.scrollTo(0, 0);
       this.remember();
+      Pulse.paint();
     } catch (err) {
       clearTimeout(this.skeletonTimer);
       if (mine !== this.seq) return;
@@ -88,7 +89,7 @@ const App = {
     const cur = this.current();
     const tabName = def.tab || cur.name;
     this.bar.innerHTML = this.tabs().map((t) =>
-      '<button class="tab' + (t[0] === tabName ? ' on' : '') + '" data-tab="' + t[0] + '">'
+      '<button class="tab' + (t[0] === tabName ? ' on' : '') + (Pulse.fresh[t[0]] ? ' fresh' : '') + '" data-tab="' + t[0] + '">'
       + icon(t[1], 22) + '<span>' + t[2] + '</span></button>').join('');
     this.sub.textContent = def.title || '';
     if (tg && tg.BackButton) {
@@ -119,12 +120,25 @@ class ApiError extends Error {
 // is never written to the device.
 const RETRYABLE = [
   /^\/api\/app\/pings\/\d+\/status$/,
-  /^\/api\/app\/debts\/(claim|restore)$/,
+  /^\/api\/app\/debts\/claim$/,
   /^\/api\/app\/feed\/\d+\/meta$/,
   /^\/api\/app\/giveaways\/\d+\/engagement$/,
   /^\/api\/app\/prefs$/,
 ];
-const RETRY_KEY = 'pd.retry';
+// Per Telegram user: Telegram Desktop runs several accounts in one WebView,
+// and localStorage is shared across them — one person's saved screen or
+// pending action must never surface in another's panel.
+function whoami() {
+  const user = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+  if (user && user.id) return String(user.id);
+  try {
+    const raw = new URLSearchParams(initDataFromHash()).get('user');
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && parsed.id) return String(parsed.id);
+  } catch (e) { /* no signed user: nothing personal is stored under it anyway */ }
+  return 'anon';
+}
+const RETRY_KEY = 'pd.retry.' + whoami();
 const RETRY_TTL_MS = 30 * 60 * 1000;
 
 // `label` names the action for «Повторить: …» if the session has run out.
@@ -234,7 +248,7 @@ const Session = {
 // week reads as missing data.
 const Saved = {
   data: {},
-  KEY: 'pd.state',
+  KEY: 'pd.state.' + whoami(),
   // CloudStorage answers by callback; a client that never calls back must not
   // hold the whole panel on a blank screen.
   async load() {
@@ -513,6 +527,7 @@ const GLOBAL_ACTIONS = {
   link: (el) => openLink(el.dataset.url),
   copy: (el) => copyText(el.dataset.text || ''),
   'retry-run': () => Session.runRetry(),
+  'pulse-refresh': () => Pulse.refresh(),
   'retry-drop': () => Session.dropRetry(),
 };
 
@@ -564,3 +579,93 @@ document.addEventListener('focusin', (e) => { if (e.target.matches(TYPING)) App.
 document.addEventListener('focusout', () => { setTimeout(() => {
   if (!document.activeElement || !document.activeElement.matches(TYPING)) App.bar.style.display = '';
 }, 80); });
+
+// ── Pulse: "is there anything new?" while the panel is on screen ──────
+// Every 30 s, and only while visible, the page asks /api/app/pulse (cached
+// per person on the server). Newer rows light a dot on their tab and a pill
+// on the open list; the list itself is never repainted underneath the
+// reader — that would steal the scroll and any focused field. Home has
+// nothing to type into, so it refreshes itself.
+const Pulse = {
+  EVERY_MS: 30000,
+  marks: { feed: null, giveaways: null },   // what the list last showed
+  fresh: {},
+  last: null,
+  inactive: false,
+
+  value(tab, p) {
+    if (tab === 'feed') return p.latest;
+    if (tab === 'giveaways') return Math.max(p.latest_giveaway || 0, p.latest_win || 0) || undefined;
+    return undefined;
+  },
+
+  visible() { return document.visibilityState === 'visible' && !this.inactive; },
+
+  start() {
+    setInterval(() => this.tick(), this.EVERY_MS);
+    document.addEventListener('visibilitychange', () => { if (this.visible()) this.tick(); });
+    if (tg && tg.onEvent) {
+      try {
+        tg.onEvent('activated', () => { this.inactive = false; this.tick(); });
+        tg.onEvent('deactivated', () => { this.inactive = true; });
+      } catch (e) { /* older clients: visibilitychange is enough */ }
+    }
+  },
+
+  async tick() {
+    if (!this.visible() || this.busy) return;
+    this.busy = true;
+    let p;
+    try { p = await api('/api/app/pulse'); } catch (e) { return; } finally { this.busy = false; }
+    const before = this.last;
+    this.last = p;
+    Object.keys(this.marks).forEach((tab) => {
+      const now = this.value(tab, p);
+      if (now === undefined) return;
+      if (this.marks[tab] === null) this.marks[tab] = now;
+      else if (now > this.marks[tab]) this.fresh[tab] = true;
+    });
+    this.paint();
+    const cur = App.current().name;
+    const changed = before && (p.latest !== before.latest || p.queue !== before.queue
+      || p.level !== before.level || p.latest_win !== before.latest_win);
+    const typing = document.activeElement && document.activeElement.matches('input, textarea');
+    if (changed && cur === 'home' && !typing && !Sheet.isOpen()) App.render({ quiet: true });
+  },
+
+  // A list that has just loaded has seen everything up to now.
+  saw(tab) {
+    this.marks[tab] = this.last ? this.value(tab, this.last) : null;
+    delete this.fresh[tab];
+    this.paint();
+    // The server may know of rows newer than the last pulse: ask again soon.
+    clearTimeout(this.soon);
+    this.soon = setTimeout(() => { this.marks[tab] = null; this.tick(); }, 1500);
+  },
+
+  paint() {
+    App.bar.querySelectorAll('.tab').forEach((el) => {
+      el.classList.toggle('fresh', Boolean(this.fresh[el.dataset.tab]));
+    });
+    const old = document.querySelector('.pulse-pill');
+    if (old) old.remove();
+    const cur = App.current().name;
+    if (!this.fresh[cur]) return;
+    const screen = App.el.querySelector('.screen');
+    if (!screen) return;
+    const pill = document.createElement('button');
+    pill.className = 'pulse-pill';
+    pill.dataset.act = 'pulse-refresh';
+    pill.innerHTML = icon('refresh', 15) + 'Есть новое — обновить';
+    screen.insertBefore(pill, screen.firstChild);
+  },
+
+  refresh() {
+    const cur = App.current().name;
+    const def = App.screens[cur];
+    if (def && def.reset) def.reset();
+    delete this.fresh[cur];
+    window.scrollTo(0, 0);
+    return App.render({ quiet: true });
+  },
+};

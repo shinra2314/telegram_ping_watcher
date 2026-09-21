@@ -1,7 +1,7 @@
 """Member engagement with broadcast giveaways («участвую» / «пропустил»)."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import aiosqlite
 
@@ -37,6 +37,31 @@ async def get_member_engagement(tg_id: int, ping_id: int) -> Optional[str]:
             )
         ).fetchone()
     return str(row[0]) if row else None
+
+
+async def member_engagement_for(tg_id: int, ping_ids: Sequence[int]) -> dict[int, str]:
+    """This member's answer per ping, for a page of rows in one query.
+
+    The panel marks the rows a guest has already answered and filters to the
+    ones they have not; one ``get_member_engagement`` per row would be a query
+    per line of the list.
+    """
+    ids = sorted({int(i) for i in ping_ids})
+    if not ids:
+        return {}
+    found: dict[int, str] = {}
+    async with _connect() as db:
+        # SQLite caps bound parameters; a queue page is far below it, the
+        # chunking only keeps a whole-board call honest.
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            rows = await (await db.execute(
+                f"SELECT ping_id, action FROM member_engagement WHERE tg_id = ? "
+                f"AND ping_id IN ({','.join('?' * len(chunk))})",
+                (int(tg_id), *chunk),
+            )).fetchall()
+            found.update({int(r[0]): str(r[1]) for r in rows})
+    return found
 
 
 async def member_engagement_stats(tg_id: int) -> dict[str, int]:

@@ -365,6 +365,13 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(data["all_time_paid"], 0)
         self.assertEqual(data["wins_all_time"], 3)
 
+    def test_history_is_month_by_month_newest_first(self):
+        data = account_analytics(self.data, "Илья", "2026-09")
+        self.assertEqual([h["month"] for h in data["history"]], ["2026-09", "2026-08"])
+        self.assertAlmostEqual(sum(h["total"] for h in data["history"]), data["all_time"])
+        # Only this person's rows: Вова's paid September is not in Илья's history.
+        self.assertTrue(all(h["paid_at"] is None for h in data["history"]))
+
     def test_empty_month_is_safe(self):
         data = account_analytics(self.data, "Тимон", "2026-09")
         self.assertIsNone(data["row"])

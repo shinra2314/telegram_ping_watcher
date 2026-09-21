@@ -125,5 +125,28 @@ function accountView(a) {
     + '<div class="cell"><div class="k">Заработано</div><div class="v sm">' + money(a.all_time) + '</div></div>'
     + '<div class="cell"><div class="k">Ждёт выплаты</div><div class="v sm">' + money(a.all_time_pending) + '</div></div>'
     + '</div>';
+  // Month by month: "was August paid?" answered without flipping months.
+  const history = a.history || [];
+  if (history.length > 1) {
+    html += '<div class="section-label">Все месяцы</div><div class="list">'
+      + history.map((h) => {
+        const st = SAL_STATUS[h.status] || SAL_STATUS.none;
+        return item({
+          act: 'month', data: { v: h.month }, chev: false,
+          lead: icon(h.status === 'paid' ? 'check' : 'clock', 15), leadCls: h.status === 'paid' ? 'on' : (h.status === 'pending' ? 'warn' : ''),
+          title: esc(salaryMonthLabel(h.month)),
+          desc: '<span class="badge ' + st[1] + '">' + st[0] + '</span>' + (h.paid_at ? ' <span class="dim">' + esc(h.paid_at) + '</span>' : ''),
+          end: '<div class="t num">' + money(h.total) + '</div>',
+        });
+      }).join('') + '</div>';
+  }
   return html;
+}
+
+const SALARY_MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+
+function salaryMonthLabel(key) {
+  const parts = String(key || '').split('-');
+  const month = SALARY_MONTHS[Number(parts[1]) - 1];
+  return month ? month[0].toUpperCase() + month.slice(1) + ' ' + parts[0] : key;
 }

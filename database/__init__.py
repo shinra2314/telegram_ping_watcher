@@ -113,6 +113,7 @@ from .engagement import (
     account_win_stats,
     engagement_summary,
     get_member_engagement,
+    member_engagement_for,
     member_engagement_since,
     member_engagement_stats,
     set_member_engagement,

@@ -563,6 +563,13 @@ def account_analytics(book: SalaryBook, account: str, month: str) -> dict:
         "all_time_paid": sum(r.total for r in mine if r.status == STATUS_PAID),
         "all_time_pending": sum(r.total for r in mine if r.status == STATUS_PENDING),
         "wins_all_time": sum(1 for e in book.journal if e.account.casefold() == account.casefold()),
+        # Month by month, newest first: what was due and whether it was paid.
+        # «За всё время» says how much; this says when, which is what a
+        # person asking "did I get August?" needs.
+        "history": [
+            {"month": r.month, "total": r.total, "status": r.status, "paid_at": r.paid_at}
+            for r in sorted(mine, key=lambda r: r.month, reverse=True)
+        ],
     }
 
 

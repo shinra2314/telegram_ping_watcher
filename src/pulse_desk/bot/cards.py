@@ -868,7 +868,18 @@ def salary_analytics_card(data: dict) -> str:
     ]
     if data.get("all_time_withheld"):
         lines.append(kv("✂️", "Удержано за расходы", money(data["all_time_withheld"])))
+    history = data.get("history") or []
+    if history:
+        lines += [DIV, "🗓 **По месяцам**"]
+        for item in history[:SALARY_HISTORY_LINES]:
+            icon = {salary.STATUS_PAID: "✅", salary.STATUS_PENDING: "⏳"}.get(item["status"], "▫️")
+            paid = f" · {item['paid_at'].strftime('%d.%m')}" if item.get("paid_at") else ""
+            lines.append(f"{icon} {salary.month_label(item['month'])}: `{money(item['total'])}`{paid}")
     return "\n".join(lines)
+
+
+# The bot card is a chat message: half a year is what fits without scrolling.
+SALARY_HISTORY_LINES = 6
 
 
 def salary_top_card(rows, month: str, mine: Optional[str] = None) -> str:

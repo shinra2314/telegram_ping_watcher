@@ -5,16 +5,20 @@
 // Filters persist (Saved 'gw'); rows are cached so «назад» from a card and a
 // switch of tabs do not refetch the queue. `rows` null = ask the server.
 const GW = {
-  sort: 'd', wins: false, account: -1,
+  sort: 'd', wins: false, account: -1, unanswered: false,
   rows: null, meta: null, at: 0,
   STALE_MS: 60000,
-  query() { return '/api/app/giveaways?sort=' + this.sort + '&wins=' + this.wins + '&account=' + this.account; },
-  keep() { Saved.put('gw', { sort: this.sort, wins: this.wins, account: this.account }); },
+  query() {
+    return '/api/app/giveaways?sort=' + this.sort + '&wins=' + this.wins + '&account=' + this.account
+      + (this.unanswered ? '&unanswered=true' : '');
+  },
+  keep() { Saved.put('gw', { sort: this.sort, wins: this.wins, account: this.account, unanswered: this.unanswered }); },
   restore() {
     const s = Saved.get('gw', {});
     if (s.sort === 'd' || s.sort === 'p') this.sort = s.sort;
     this.wins = Boolean(s.wins);
     this.account = Number.isInteger(s.account) ? s.account : -1;
+    this.unanswered = Boolean(s.unanswered);
   },
   reset() { this.rows = null; },
   drop(id) {
@@ -34,6 +38,7 @@ const GW = {
     this.rows = data.items;
     this.meta = data;
     this.at = Date.now();
+    Pulse.saw('giveaways');
   },
   async more() {
     const last = this.rows[this.rows.length - 1];
@@ -71,6 +76,9 @@ App.register('giveaways', {
         ? '<button class="chip' + (accountName ? ' on' : '') + '" data-act="account">' + icon('users', 15)
           + esc(accountName ? '@' + accountName : 'Все аккаунты') + '</button>'
         : '')
+      + (last.can_answer
+        ? '<button class="chip' + (GW.unanswered ? ' on' : '') + '" data-act="unanswered">' + icon('check', 15) + 'Без ответа</button>'
+        : '')
       + '</div>';
 
     if (!rows.length) {
@@ -81,7 +89,9 @@ App.register('giveaways', {
       act: 'open', data: { id: r.id },
       lead: icon(r.is_win ? 'trophy' : 'gift', 17), leadCls: r.is_win ? 'on' : '',
       title: esc(r.chat),
-      desc: (r.deleted ? 'удалён · ' : '') + esc(priorityLabel(r.priority)),
+      desc: (r.deleted ? 'удалён · ' : '') + esc(priorityLabel(r.priority))
+        + (r.answer ? ' · <span class="' + (r.answer === 'joined' ? 'accent' : 'dim') + '">'
+          + (r.answer === 'joined' ? 'участвую' : 'пропустил') + '</span>' : ''),
       end: '<div class="gw-end"><div class="d num">' + esc(fmtTime(GW.sort === 'p' ? r.date : r.detected_at)) + '</div>'
         + (last.can_edit
           ? '<button class="icon-btn gw-x" data-act="dismiss" data-id="' + r.id + '" data-status="' + esc(r.status || '')
@@ -99,6 +109,7 @@ App.register('giveaways', {
 
   actions: {
     kind: (el) => { GW.wins = el.dataset.v === 'wins'; GW.keep(); GW.reset(); return App.render({ quiet: true }); },
+    unanswered: () => { GW.unanswered = !GW.unanswered; GW.keep(); GW.reset(); return App.render({ quiet: true }); },
     sort: () => { GW.sort = GW.sort === 'd' ? 'p' : 'd'; GW.keep(); GW.reset(); return App.render({ quiet: true }); },
     more: async (el) => {
       el.disabled = true;
@@ -195,6 +206,7 @@ App.register('giveaway', {
         }).join('') + '</div>';
     }
     if (g.can_edit) html += '<div id="gw-extra">' + extraBlocks(g) + '</div>';
+    if (g.can_answer && !g.is_win) html += '<div id="gw-answer">' + answerBlock(g) + '</div>';
     return html;
   },
 
@@ -215,6 +227,19 @@ App.register('giveaway', {
     // above stays where the owner was reading it.
     analyze: (el) => extraAction(el, 'analyze', 'Разбираю…', (res) => { GW_CARD.candidate = res.candidate; return 'Разобрано'; }),
     profile: (el) => extraAction(el, 'profile', 'Читаю канал…', (res) => { GW_CARD.channel = res.channel; return 'Профиль обновлён'; }),
+    // The guest's «Участвую / Пропустил» — the buttons under a broadcast copy.
+    answer: async (el) => {
+      const id = App.current().params.id;
+      const action = el.dataset.v;
+      const res = await api('/api/app/giveaways/' + id + '/engagement', { action: action },
+        action === 'joined' ? 'участвую' : 'пропустил');
+      GW_CARD.answer = res.answer;
+      const box = document.getElementById('gw-answer');
+      if (box) box.innerHTML = answerBlock(GW_CARD);
+      if (GW.rows) GW.rows.forEach((r) => { if (String(r.id) === String(id)) r.answer = res.answer; });
+      if (GW.unanswered) GW.drop(id);
+      toast(action === 'joined' ? 'Записал: участвуете' : 'Ок, пропускаем');
+    },
     skip: async (el) => {
       const id = el.dataset.id;
       const res = await api('/api/app/giveaways/' + id + '/skip', {}, 'не участвуем');
@@ -287,4 +312,14 @@ function extraBlocks(g) {
       + icon('x', 18) + 'Не участвуем</button></div>';
   }
   return html;
+}
+
+function answerBlock(g) {
+  const on = g.answer;
+  return '<div class="section-label">Ваш ответ</div><div class="btn-row">'
+    + '<button class="btn' + (on === 'joined' ? ' primary' : '') + '" data-act="answer" data-v="joined">'
+    + icon('check', 18) + 'Участвую</button>'
+    + '<button class="btn' + (on === 'skipped' ? ' primary' : '') + '" data-act="answer" data-v="skipped">'
+    + icon('x', 18) + 'Пропустил</button></div>'
+    + '<div class="hint" style="margin:8px 4px 0">Ответ видит владелец — так он знает, кто участвует. Изменить можно в любой момент.</div>';
 }

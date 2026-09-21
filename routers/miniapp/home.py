@@ -17,7 +17,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends
 
 from database import (
-    account_win_stats, get_bot_member, get_debt_board, get_pings, list_access_windows,
+    account_win_stats, get_bot_key, get_bot_member, get_debt_board, get_pings, list_access_windows,
     member_engagement_since,
 )
 from pulse_desk.account_health import account_problem
@@ -28,7 +28,11 @@ from pulse_desk.bot.sections.market import latest_snapshot
 from pulse_desk.bot.sections.salary import visible as salary_visible
 from pulse_desk.bot.views import GiveawayFilter
 from pulse_desk.bot_membership import access_decision
-from pulse_desk.bot_permissions import NOTIFY_TYPES, allowed_pref_keys, format_delay, permission_delay_minutes
+from pulse_desk.access_control import parse_repeat_rule
+from pulse_desk.bot.sections.members import describe_repeat
+from pulse_desk.bot_permissions import (
+    ALL_FEATURES, FEATURES, NOTIFY_TYPES, allowed_pref_keys, format_delay, permission_delay_minutes,
+)
 from pulse_desk.bot_prefs import parse_member_prefs
 from pulse_desk.converter import usd_value
 from pulse_desk.dashboard import collect_dashboard
@@ -85,14 +89,22 @@ async def member_profile(caller: Caller) -> Optional[dict[str, Any]]:
     if not member:
         return None
     prefs = parse_member_prefs(member.get("notification_prefs"))
-    access: dict[str, Any] = {"scheduled": False, "until": None}
-    if await list_access_windows(caller.tg_id):
+    access: dict[str, Any] = {"scheduled": False, "until": None, "windows": []}
+    windows = await list_access_windows(caller.tg_id)
+    if windows:
         access["scheduled"] = True
         _allowed, _reason, until = await access_decision(caller.tg_id, member)
         now = datetime.now(until.tzinfo) if until and until.tzinfo else datetime.now()
         if until and until - now < ACCESS_HORIZON:
             # Local wall-clock time: the page prints it as is.
             access["until"] = until.astimezone().replace(tzinfo=None).isoformat(timespec="minutes")
+        # The same wording the owner's /access card uses, minus its Markdown.
+        access["windows"] = [
+            {"allow": bool(w.get("enabled")),
+             "text": describe_repeat(parse_repeat_rule(w.get("repeat_rule")), w).replace("`", "")}
+            for w in windows
+        ]
+    key = await get_bot_key(int(member["key_id"])) if member.get("key_id") else None
     return {
         "role": caller.role,
         "accounts": list(caller.perms.get("accounts") or []),
@@ -101,6 +113,9 @@ async def member_profile(caller: Caller) -> Optional[dict[str, Any]]:
         "delay_text": format_delay(permission_delay_minutes(caller.perms)),
         "muted": bool(prefs.get("muted")),
         "access": access,
+        "expires_at": (key or {}).get("expires_at"),
+        "sections": [FEATURES[code][0].split(" ", 1)[-1]
+                     for code in ALL_FEATURES if caller.may(code)],
     }
 
 

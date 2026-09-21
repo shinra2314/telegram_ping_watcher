@@ -9,8 +9,12 @@ from telethon import TelegramClient, types
 from telethon.tl.functions.channels import GetFullChannelRequest
 
 from telegram_ping_watcher import (
+    build_post_link,
+    channel_post_ref,
     chat_type_from_entity,
+    display_name,
     is_mass_tag,
+    local_iso_datetime,
     mentions_in_text,
     message_looks_like_broadcast_channel,
     message_to_record,
@@ -35,6 +39,13 @@ _resolve_retry_at: dict[str, float] = {}
 # winner tagged under a post was invisible while only channels counted.
 # Private chats stay out: nobody @-mentions an account in its own DMs.
 WATCHED_CHAT_TYPES = frozenset({"channel", "group"})
+
+# A post whose newest stamp — posting or last edit — is older than this is
+# backlog: stored and on the boards, but no card. A sweep reads history (every
+# channel an account joins, every tracked name added), and on 20.09 a win from
+# 24.02 pinged the owner as news. The edit counts because channels append the
+# winners to the post itself, often a day after posting.
+NOTIFY_MAX_AGE_SECONDS = 24 * 3600
 
 
 def own_mention(message: Any, account_username: str, tracked: list[str]) -> Optional[str]:
@@ -158,6 +169,55 @@ def _profile_is_fresh(profile: Optional[dict[str, Any]]) -> bool:
     except ValueError:
         return False
     return (datetime.now() - fetched_at).total_seconds() < CHANNEL_PROFILE_TTL_SECONDS
+
+
+def is_backlog(record: dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """True when the post is too old for a card (see ``NOTIFY_MAX_AGE_SECONDS``).
+
+    An unknown age is not backlog: a mention always reaches the owner, and
+    Telethon never hands over a message without a date.
+    """
+    stamps = []
+    for key in ("date", "edited_at"):
+        try:
+            stamp = datetime.fromisoformat(str(record.get(key) or ""))
+        except ValueError:
+            continue
+        stamps.append(stamp if stamp.tzinfo else stamp.astimezone())
+    if not stamps:
+        return False
+    reference = now or datetime.now().astimezone()
+    if reference.tzinfo is None:
+        reference = reference.astimezone()
+    return (reference - max(stamps)).total_seconds() > NOTIFY_MAX_AGE_SECONDS
+
+
+async def record_as_channel_post(record: dict[str, Any], message: Any) -> bool:
+    """Re-key a discussion chat's copy of a channel post as that post.
+
+    The copy used to be a group ping of its own, so every winners post in a
+    channel with a chat pinged twice. Stored under the post's own (chat_id,
+    message_id), the copy and the channel read land on one row whichever comes
+    first, and the outbox sends that row one card. Returns True when re-keyed.
+    """
+    ref = channel_post_ref(message)
+    if ref is None:
+        return False
+    channel_id, post_id = ref
+    try:
+        channel = await message.get_sender()  # the copy is sent by the channel
+    except Exception:
+        channel = None
+    record.update({
+        "chat": display_name(channel) if channel is not None else str(channel_id),
+        "chat_id": channel_id,
+        "message_id": post_id,
+        "link": build_post_link(channel, channel_id, post_id),
+    })
+    posted = getattr(getattr(message, "fwd_from", None), "date", None)
+    if posted:
+        record["date"] = local_iso_datetime(posted)
+    return True
 
 
 def record_reference_datetime(record: dict[str, Any]) -> datetime:
@@ -342,6 +402,28 @@ async def link_win_copies(ping_id: int) -> Optional[int]:
         return None
 
 
+async def copied_from_another_chat(ping_id: int) -> bool:
+    """True when this win is a copy of a win already stored in another chat.
+
+    The primary carried the card; a winners post pasted or forwarded elsewhere
+    is the same prize. The same text posted again in one chat is not a copy —
+    a channel reuses its template for every fast giveaway, and the same account
+    can win twice.
+    """
+    from database import get_ping_by_id
+
+    try:
+        row = await get_ping_by_id(int(ping_id))
+        primary_id = (row or {}).get("duplicate_of")
+        if not primary_id:
+            return False
+        primary = await get_ping_by_id(int(primary_id))
+        return bool(primary) and primary.get("chat_id") != row.get("chat_id")
+    except Exception:
+        logger.debug("Could not tell whether win %s is a copy", ping_id, exc_info=True)
+        return False
+
+
 async def dedupe_existing_wins() -> int:
     """One-off pass over stored wins; returns how many rows became duplicates."""
     from database import get_wins_for_dedupe, mark_duplicates, update_ping_meta
@@ -428,8 +510,12 @@ async def process_ping_message(
         # no card and no member copy — the owner asked for these not to ping.
         notify = False
         logger.debug("Mass tag stored without a card in %s", record.get("chat"))
+    if chat_type == "group" and await record_as_channel_post(record, message):
+        chat_type = "channel"
     record["chat_type"] = chat_type
     record["detected_at"] = now_iso()
+    if notify and is_backlog(record):
+        notify = False
     classify_record(record)
     if search_is_win:
         record["is_win"] = True
@@ -455,8 +541,10 @@ async def process_ping_message(
 
     if not ping_id:
         return None
+    copy_elsewhere = False
     if record.get("is_win"):
         await link_win_copies(int(ping_id))
+        copy_elsewhere = await copied_from_another_chat(int(ping_id))
     win_upgrade = upgraded_to_win(existing, record)
     if existing is None:
         found_label = "Channel ping found" if chat_type == "channel" else "Group ping found"
@@ -480,7 +568,7 @@ async def process_ping_message(
         await analyze_and_store_giveaway(client, int(ping_id), record, message)
 
     announce = existing is None or win_upgrade
-    if notify and announce:
+    if notify and announce and not copy_elsewhere:
         # A win edited into a known post owes the 🏆 card: the first-detection
         # card said "mention"/"giveaway". Delivery is guaranteed by the outbox
         # (ping_notify); the analysis runs between the owner's card and the

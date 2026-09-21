@@ -185,7 +185,19 @@ src/pulse_desk/
                       account (@name, mention entity, t.me link) still arrives
                       through `extract_mentions`. Messages sent by our own
                       accounts (`state.connected_user_ids`) are skipped there;
-                      private chats stay out. A tag bot's ad (≥3 hidden user
+                      private chats stay out. **One win, one card, only while it
+                      is news** (owner's order, 21.09): a post whose newest stamp
+                      (posting or last edit) is > 24 h old is backlog — stored,
+                      no card (`is_backlog`, `NOTIFY_MAX_AGE_SECONDS`; a sweep of
+                      a newly joined channel carded a win from 24.02). A
+                      discussion chat's copy of a channel post (sent by the
+                      channel, `telegram_ping_watcher.channel_post_ref`) is
+                      stored **as that post** (`record_as_channel_post`), so the
+                      copy and the channel read share one row and one card in
+                      either order; a win pasted/forwarded by a person into
+                      another chat after the channel's is a dedupe copy and gets
+                      no card (`copied_from_another_chat`; same chat + same text
+                      is a new win). A tag bot's ad (≥3 hidden user
                       links on emoji, no tracked name written out —
                       `telegram_ping_watcher.is_mass_tag`) is stored without a
                       card or member copy, at the owner's request (16.09).
@@ -745,7 +757,10 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
 - **A mention always reaches the owner (owner's order, 2026-09-16).** Nothing may
   drop the owner's ping card: quiet hours, the notification switch, filters and
   rules, vacation mode and the repeat throttle only make it **silent**
-  (`bot_notify.owner_card_silent`); they still decide the *member* broadcast. A
+  (`bot_notify.owner_card_silent`); they still decide the *member* broadcast.
+  The only mentions stored without a card are backlog (post and edit > 24 h
+  old), tag-bot ads and a copy of a win already stored in another chat — see
+  `ping_pipeline`. A
   card that could not be sent stays owed (`pings.notified_at IS NULL`) and
   `notify-retry` sends it. Any new code path that stores a ping without meaning
   to announce it must settle it (`mark_ping_notified`), or a card goes out 90 s

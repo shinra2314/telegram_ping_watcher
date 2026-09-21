@@ -510,3 +510,125 @@ class IgnoredChatsTests(GroupMentionPipelineTests):
         self.assertIn(b"igc:add:42", datas)
         channel = bot_notify._admin_card_buttons("https://t.me/c/1/2", 42, "channel")
         self.assertNotIn(b"igc:add:42", [getattr(b, "data", b"") for row in channel for b in row])
+
+
+WIN_TEXT = "🎉 Результаты розыгрыша: 20💵 4 по 5💵 Победители: @Smileofert, @MuverGT, @Kot"
+CHANNEL_PEER_ID = -1000000000777  # telethon.utils.get_peer_id(PeerChannel(777))
+
+
+class ChannelPost(FakeMessage):
+    """A post read in the channel itself."""
+
+    def __init__(self, text: str, *, post_id: int = 42, **kwargs):
+        super().__init__(text, sender_id=CHANNEL_PEER_ID, **kwargs)
+        self.chat_id = CHANNEL_PEER_ID
+        self.id = post_id
+
+    async def get_chat(self):
+        return SimpleNamespace(title="Harley Queen", username="herleeey", id=777, broadcast=True)
+
+    async def get_sender(self):
+        return await self.get_chat()
+
+
+class DiscussionCopy(ChannelPost):
+    """The copy Telegram puts in the channel's discussion chat: sent by the
+    channel, living in the chat, its forward header pointing at the post."""
+
+    def __init__(self, text: str, *, post_id: int = 42, chat_message_id: int = 104468,
+                 sender_id: int = CHANNEL_PEER_ID, **kwargs):
+        from telethon.tl import types
+
+        super().__init__(text, post_id=post_id, **kwargs)
+        self.chat_id = -100555
+        self.id = chat_message_id
+        self.sender_id = sender_id
+        self.fwd_from = types.MessageFwdHeader(
+            date=self.date, from_id=types.PeerChannel(777), channel_post=post_id,
+            saved_from_peer=types.PeerChannel(777), saved_from_msg_id=post_id,
+        )
+
+    async def get_chat(self):
+        return SimpleNamespace(title="чат Harley Quinn", username=None, id=555)
+
+    async def get_sender(self):
+        if self.sender_id == CHANNEL_PEER_ID:
+            return await ChannelPost.get_chat(self)
+        return SimpleNamespace(first_name="Vasya", username="vasya", id=self.sender_id)
+
+
+class OneWinOneCardTests(GroupMentionPipelineTests):
+    """A win reaches the owner once, and only while it is news (owner's order, 21.09).
+
+    Two kinds of card were noise: a win the sweep dug out of a channel's history
+    (a SkinsHub post from 24.02 pinged on 20.09, when an account joined it), and
+    the copy of a channel's winners post in the channel's own discussion chat,
+    which pinged a second time for the same prize.
+    """
+
+    async def test_a_months_old_win_found_by_a_sweep_is_stored_without_a_card(self):
+        long_ago = datetime.now() - timedelta(days=208)
+        post = ChannelPost(WIN_TEXT)
+        post.date, post.edit_date = long_ago, long_ago + timedelta(hours=16)
+        ping_id = await self._process(post, chat_type="channel")
+        self.assertIsNotNone(ping_id, "still on the boards")
+        self.assertTrue((await database.get_ping_by_id(ping_id))["is_win"])
+        self.notify.assert_not_awaited()
+        self.assertEqual(await self.owed(ping_id), (False, False), "and nothing is owed for it")
+
+    async def test_winners_edited_into_an_old_post_today_are_news(self):
+        post = ChannelPost(WIN_TEXT)
+        post.date, post.edit_date = datetime.now() - timedelta(days=3), datetime.now()
+        await self._process(post, chat_type="channel")
+        self.notify.assert_awaited_once()
+
+    async def test_a_discussion_copy_is_recorded_as_the_channel_post(self):
+        ping_id = await self._process(DiscussionCopy(WIN_TEXT))
+        row = await database.get_ping_by_id(ping_id)
+        self.assertEqual((row["chat_id"], row["message_id"]), (CHANNEL_PEER_ID, 42))
+        self.assertEqual(row["chat_type"], "channel")
+        self.assertEqual(row["chat"], "Harley Queen (@herleeey)")
+        self.assertEqual(row["link"], "https://t.me/herleeey/42")
+
+    async def test_channel_post_then_its_chat_copy_is_one_card(self):
+        await self._process(ChannelPost(WIN_TEXT), chat_type="channel")
+        self.assertIsNone(await self._process(DiscussionCopy(WIN_TEXT)))
+        self.notify.assert_awaited_once()
+        self.assertEqual(len(await database.get_pings(limit=10)), 1)
+
+    async def test_chat_copy_first_then_the_channel_post_is_one_card(self):
+        await self._process(DiscussionCopy(WIN_TEXT))
+        self.assertIsNone(await self._process(ChannelPost(WIN_TEXT), chat_type="channel"))
+        self.notify.assert_awaited_once()
+
+    async def test_a_post_forwarded_by_a_person_stays_their_message(self):
+        ping_id = await self._process(DiscussionCopy("глянь @MuverGT", sender_id=9))
+        row = await database.get_ping_by_id(ping_id)
+        self.assertEqual((row["chat_id"], row["chat_type"]), (-100555, "group"))
+
+    async def test_a_win_pasted_into_another_chat_after_the_channel_is_not_a_second_card(self):
+        await self._process(ChannelPost(WIN_TEXT), chat_type="channel")
+        ping_id = await self._process(FakeMessage(WIN_TEXT))
+        self.assertIsNotNone(ping_id)
+        self.assertIsNotNone((await database.get_ping_by_id(ping_id))["duplicate_of"])
+        self.notify.assert_awaited_once()
+        self.assertEqual(await self.owed(ping_id), (False, False))
+
+    async def test_the_same_winners_text_posted_again_in_one_channel_is_a_new_win(self):
+        await self._process(ChannelPost(WIN_TEXT, post_id=42), chat_type="channel")
+        await self._process(ChannelPost(WIN_TEXT, post_id=57), chat_type="channel")
+        self.assertEqual(self.notify.await_count, 2)
+
+
+class BacklogRuleTests(unittest.TestCase):
+    NOW = datetime(2026, 9, 21, 12, 0).astimezone()
+
+    def test_age_counts_from_the_newest_of_post_and_edit(self):
+        old, fresh = "2026-02-24T19:14:36+02:00", "2026-09-21T09:00:00+03:00"
+        self.assertTrue(ping_pipeline.is_backlog({"date": old, "edited_at": "2026-02-25T11:00:00+02:00"}, self.NOW))
+        self.assertFalse(ping_pipeline.is_backlog({"date": old, "edited_at": fresh}, self.NOW))
+        self.assertFalse(ping_pipeline.is_backlog({"date": fresh, "edited_at": None}, self.NOW))
+
+    def test_an_unknown_age_still_reaches_the_owner(self):
+        self.assertFalse(ping_pipeline.is_backlog({"date": "", "edited_at": None}, self.NOW))
+        self.assertFalse(ping_pipeline.is_backlog({"date": "garbage"}, self.NOW))

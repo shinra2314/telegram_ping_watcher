@@ -15,12 +15,13 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 try:
-    from telethon import TelegramClient, events, types
+    from telethon import TelegramClient, events, types, utils
     from telethon.errors import FloodWaitError
 except ImportError:  # pragma: no cover
     TelegramClient = None
     events = None
     types = None
+    utils = None
 
     class FloodWaitError(Exception):
         seconds = 0
@@ -160,14 +161,37 @@ def message_looks_like_broadcast_channel(message) -> bool:
     return bool(getattr(message, "is_channel", False))
 
 
-def build_message_link(chat, message) -> str:
+def build_post_link(chat, chat_id, message_id) -> str:
     username = getattr(chat, "username", None)
     if username:
-        return f"https://t.me/{username}/{message.id}"
-    chat_id = str(getattr(message, "chat_id", "") or "")
+        return f"https://t.me/{username}/{message_id}"
+    chat_id = str(chat_id or "")
     if chat_id.startswith("-100"):
-        return f"https://t.me/c/{chat_id[4:]}/{message.id}"
+        return f"https://t.me/c/{chat_id[4:]}/{message_id}"
     return "нет публичной ссылки"
+
+
+def build_message_link(chat, message) -> str:
+    return build_post_link(chat, getattr(message, "chat_id", None), message.id)
+
+
+def channel_post_ref(message) -> tuple[int, int] | None:
+    """(channel id, post id) when a chat message is a channel's own post.
+
+    A channel with a discussion chat copies every post into it: the copy is sent
+    by the channel itself, its forward header names the post, and it is edited
+    along with the post. A post someone forwarded by hand is their message, not
+    the channel's, and is not covered.
+    """
+    fwd = getattr(message, "fwd_from", None)
+    peer = getattr(fwd, "from_id", None)
+    post_id = getattr(fwd, "channel_post", None)
+    if types is None or not post_id or not isinstance(peer, types.PeerChannel):
+        return None
+    channel_id = utils.get_peer_id(peer)
+    if getattr(message, "sender_id", None) != channel_id:
+        return None
+    return channel_id, int(post_id)
 
 
 def mentions_in_text(text: str, ping_regex: re.Pattern[str], usernames: Iterable[str]) -> list[str]:

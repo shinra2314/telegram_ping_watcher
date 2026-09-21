@@ -33,7 +33,7 @@ from telethon.errors import FloodWaitError
 
 from .app_ctx import logger, settings, state
 from .common import flood_wait_seconds, record_app_event
-from .ping_pipeline import process_ping_message
+from .ping_pipeline import NOTIFY_MAX_AGE_SECONDS, process_ping_message
 from .telegram_accounts import mark_account_cooldown
 
 # Win-keyword queries are only worth running when a textless card showed up, so
@@ -43,8 +43,9 @@ WIN_ORACLE_LIMIT = 40
 # Search answers with its whole backlog, not just what happened since the last
 # sweep, so the first pass (and every tracked-username change) would otherwise
 # fire a notification per historical mention. Old hits are still recorded — they
-# land on the dashboard and the giveaway board — they just arrive quietly.
-NOTIFY_MAX_AGE_SECONDS = 24 * 3600
+# land on the dashboard and the giveaway board — they just arrive quietly. The
+# age limit is the pipeline's own (NOTIFY_MAX_AGE_SECONDS); this pass is stricter
+# only about a hit with no date at all.
 
 
 def global_search_limit() -> int:

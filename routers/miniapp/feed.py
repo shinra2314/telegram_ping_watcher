@@ -91,11 +91,21 @@ async def feed(
     asc: bool = Query(False),
     q: str = Query("", max_length=64),
     page: int = Query(1, ge=1, le=200),
+    after: Optional[int] = Query(None, ge=1),
+    loaded: int = Query(0, ge=0, le=PAGE_SIZE * 200),
 ) -> dict:
+    """``after`` — id последней строки, что уже на экране: следующая порция
+    идёт от неё, а не от номера страницы. ``loaded`` — сколько строк на экране,
+    на случай, если той строки уже нет."""
     query = q.strip()
     caller.require(SEARCH_FEATURE if query else FEATURE)
     filt = FeedFilter(type=kind, status=status, sort=sort, ascending=asc, query=bool(query), page=page)
-    rows, has_more = await fetch(filt, caller.perms, query, page_size=PAGE_SIZE)
+    if after is None:
+        rows, has_more = await fetch(filt, caller.perms, query, page_size=PAGE_SIZE)
+    else:
+        last = await database.get_ping_by_id(after)
+        rows, has_more = await fetch(filt, caller.perms, query, page_size=PAGE_SIZE,
+                                     after=last, offset=loaded)
     return {
         "items": [feed_row(r) for r in rows],
         "has_more": has_more,

@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .app_ctx import logger, settings
+from .common import record_app_event
 
 APP_DIR = Path(__file__).resolve().parents[2] / "static" / "app"
 
@@ -36,6 +37,23 @@ CSP = (
 )
 
 
+async def journal(request: Request) -> None:
+    """One ``miniapp`` event per action that went through: who, what, on what.
+
+    The body is never read here — it can carry a phone number, a login code or
+    a 2FA password. What a handler wants on record beyond the path it puts in
+    ``request.state.audit`` (``routers.miniapp.common.audit``).
+    """
+    caller = getattr(request.state, "caller", None)
+    context = {
+        "path": request.url.path,
+        "tg_id": getattr(caller, "tg_id", None),
+        "role": getattr(caller, "role", None),
+        **(getattr(request.state, "audit", None) or {}),
+    }
+    await record_app_event("INFO", "miniapp", "Panel action", context)
+
+
 def build_miniapp() -> FastAPI:
     """The Mini App ASGI app: its router, its static mount and security headers.
 
@@ -50,6 +68,8 @@ def build_miniapp() -> FastAPI:
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
+        if request.method == "POST" and request.url.path.startswith("/api/") and response.status_code < 400:
+            await journal(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/api/"):

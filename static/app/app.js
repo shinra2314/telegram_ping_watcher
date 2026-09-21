@@ -40,6 +40,19 @@ const App = {
     cur.params = Object.assign({}, cur.params, params);
     return this.render({ quiet: true });
   },
+  // Drop every screen's cached rows: the next render asks the server again.
+  invalidate() {
+    Object.keys(this.screens).forEach((name) => { const d = this.screens[name]; if (d.reset) d.reset(); });
+  },
+  // The open screens, so a reopen within half an hour lands where it left.
+  // The login wizard is never restored: its state is a phone number.
+  remember() {
+    if (this.stack.some((e) => e.name === 'login')) return;
+    Saved.put('stack', {
+      at: Date.now(),
+      stack: this.stack.map((e) => ({ name: e.name, params: plainParams(e.params) })),
+    });
+  },
 
   async render(opts) {
     const quiet = opts && opts.quiet;
@@ -63,6 +76,7 @@ const App = {
       }
       if (def.mounted) this.leave = def.mounted(cur.params || {}) || null;
       if (!quiet) window.scrollTo(0, 0);
+      this.remember();
     } catch (err) {
       clearTimeout(this.skeletonTimer);
       if (mine !== this.seq) return;
@@ -100,7 +114,21 @@ class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function api(path, body) {
+// Actions worth offering again after the panel is reopened. Only ids and
+// status codes ride in these bodies; a login step (phone, code, password)
+// is never written to the device.
+const RETRYABLE = [
+  /^\/api\/app\/pings\/\d+\/status$/,
+  /^\/api\/app\/debts\/(claim|restore)$/,
+  /^\/api\/app\/feed\/\d+\/meta$/,
+  /^\/api\/app\/giveaways\/\d+\/engagement$/,
+  /^\/api\/app\/prefs$/,
+];
+const RETRY_KEY = 'pd.retry';
+const RETRY_TTL_MS = 30 * 60 * 1000;
+
+// `label` names the action for «Повторить: …» if the session has run out.
+async function api(path, body, label) {
   const init = { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || initDataFromHash() } };
   if (body !== undefined) {
     init.method = 'POST';
@@ -119,16 +147,124 @@ async function api(path, body) {
       const data = await res.json();
       detail = typeof data.detail === 'string' ? data.detail : detail;
     } catch (e) { /* keep default */ }
+    if (res.status === 401 && body !== undefined) {
+      if (RETRYABLE.some((re) => re.test(path))) {
+        try {
+          localStorage.setItem(RETRY_KEY, JSON.stringify({ path: path, body: body, label: label || 'последнее действие', at: Date.now() }));
+        } catch (e) { /* private mode: nothing to offer later */ }
+      }
+      Session.render();
+    }
     throw new ApiError(res.status, detail);
   }
   return res.json();
 }
+
+// ── Session ───────────────────────────────────────────────────────────
+// The server takes actions only from initData younger than an hour (reads
+// stay open for a day). The page knows the same clock, so it says so before
+// a tap fails instead of after.
+const Session = {
+  FRESH_SECONDS: 3600,
+  WARN_SECONDS: 300,
+  el: document.getElementById('notice'),
+
+  age() {
+    const at = tg && tg.initDataUnsafe && Number(tg.initDataUnsafe.auth_date);
+    return at ? Date.now() / 1000 - at : 0;
+  },
+  stale() { return this.age() >= this.FRESH_SECONDS; },
+
+  render() {
+    if (!this.el || this.el.dataset.kind === 'retry' || this.el.dataset.kind === 'offline') return;
+    const left = this.FRESH_SECONDS - this.age();
+    if (left > this.WARN_SECONDS) { this.hide('session'); return; }
+    this.show('session', icon('clock', 15) + '<span>' + (left > 0
+      ? 'Через ' + Math.max(1, Math.round(left / 60)) + ' мин для действий нужно будет открыть панель заново'
+      : 'Смотреть можно, а для действий откройте панель заново из бота') + '</span>'
+      + '<button class="link" data-act="app-close">Закрыть</button>');
+  },
+
+  show(kind, html) {
+    if (!this.el) return;
+    this.el.dataset.kind = kind;
+    this.el.innerHTML = html;
+    this.el.hidden = false;
+  },
+  hide(kind) {
+    if (!this.el || (kind && this.el.dataset.kind !== kind)) return;
+    this.el.hidden = true;
+    this.el.dataset.kind = '';
+    this.el.innerHTML = '';
+  },
+
+  // After a reopen: the action a stale session refused, if it is recent.
+  offerRetry() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(RETRY_KEY) || 'null'); } catch (e) { saved = null; }
+    if (!saved) return;
+    if (!saved.at || Date.now() - saved.at > RETRY_TTL_MS || !RETRYABLE.some((re) => re.test(saved.path))) {
+      this.dropRetry();
+      return;
+    }
+    this.show('retry', icon('refresh', 15) + '<span>Не сохранилось: ' + esc(saved.label) + '</span>'
+      + '<button class="link" data-act="retry-run">Повторить</button>'
+      + '<button class="icon-btn" data-act="retry-drop" aria-label="Не повторять">' + icon('x', 15) + '</button>');
+  },
+  dropRetry() {
+    try { localStorage.removeItem(RETRY_KEY); } catch (e) { /* ignore */ }
+    this.hide('retry');
+  },
+  async runRetry() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(RETRY_KEY) || 'null'); } catch (e) { saved = null; }
+    this.dropRetry();
+    if (!saved) return;
+    await api(saved.path, saved.body, saved.label);
+    toast('Готово: ' + saved.label);
+    App.invalidate();
+    return App.render({ quiet: true });
+  },
+};
+
+// ── Saved view state ──────────────────────────────────────────────────
+// Filters and the open screen, per Telegram user, across devices (Store is
+// CloudStorage: 4096 characters a value, so it stays one small object).
+// Search text is not kept — an old query silently narrowing the feed next
+// week reads as missing data.
+const Saved = {
+  data: {},
+  KEY: 'pd.state',
+  // CloudStorage answers by callback; a client that never calls back must not
+  // hold the whole panel on a blank screen.
+  async load() {
+    const timeout = new Promise((resolve) => setTimeout(() => resolve({}), 900));
+    const value = await Promise.race([Store.json(this.KEY, {}), timeout]);
+    this.data = value && typeof value === 'object' ? value : {};
+  },
+  get(key, fallback) { return this.data[key] !== undefined ? this.data[key] : fallback; },
+  put(key, value) {
+    this.data[key] = value;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => Store.set(this.KEY, JSON.stringify(this.data)), 400);
+  },
+};
 
 // Outside Telegram (a browser tab during development) the WebApp script still
 // loads but has no initData; the signed string then rides in the URL hash.
 function initDataFromHash() {
   const m = /tgWebAppData=([^&]*)/.exec(location.hash);
   return m ? decodeURIComponent(m[1]) : '';
+}
+
+// Params worth keeping across a reopen: strings and numbers, no `force`.
+function plainParams(params) {
+  const out = {};
+  Object.keys(params || {}).forEach((k) => {
+    const v = params[k];
+    if (k !== 'force' && (typeof v === 'string' || typeof v === 'number')) out[k] = v;
+  });
+  return out;
 }
 
 // ── Formatting ────────────────────────────────────────────────────────
@@ -361,7 +497,22 @@ const GLOBAL_ACTIONS = {
   nav: (el) => App.go(el.dataset.to, Object.assign({}, el.dataset)),
   link: (el) => openLink(el.dataset.url),
   copy: (el) => copyText(el.dataset.text || ''),
+  'retry-run': () => Session.runRetry(),
+  'retry-drop': () => Session.dropRetry(),
 };
+
+// A refused action: a stale session gets a way out, anything else a toast.
+function failed(err) {
+  if (err && err.status === 401) {
+    Sheet.open('Сессия устарела', '<p class="hint" style="margin:0 0 14px">Смотреть можно и дальше, но для действий '
+      + 'Telegram должен выдать панели свежую подпись — закройте её и откройте из бота. '
+      + 'Если действие не сохранилось, панель предложит повторить его.</p>'
+      + '<button class="btn primary" data-act="app-close">' + icon('x', 18) + 'Закрыть панель</button>');
+    haptic('warning');
+    return;
+  }
+  toast((err && err.message) || 'Ошибка', true);
+}
 
 function dispatch(kind, event) {
   const target = event.target.closest('[data-act]');
@@ -372,7 +523,7 @@ function dispatch(kind, event) {
   const run = (table && table[act]) || (kind === 'click' && GLOBAL_ACTIONS[act]);
   if (!run) return;
   if (kind === 'click') haptic();
-  Promise.resolve(run(target, event)).catch((err) => toast(err.message || 'Ошибка', true));
+  Promise.resolve(run(target, event)).catch(failed);
 }
 
 document.addEventListener('click', (event) => {
@@ -388,7 +539,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && event.target.matches('[data-enter]')) {
     const def = App.screens[App.current().name] || {};
     const run = def.actions && def.actions[event.target.dataset.enter];
-    if (run) { event.preventDefault(); Promise.resolve(run(event.target, event)).catch((err) => toast(err.message, true)); }
+    if (run) { event.preventDefault(); Promise.resolve(run(event.target, event)).catch(failed); }
   }
 });
 // A focused field pulls the keyboard up; a fixed bar would then float over it.

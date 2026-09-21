@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from database import get_debt_board
@@ -15,7 +15,7 @@ from pulse_desk.bot.sections.debts import (
 )
 from pulse_desk.ping_actions import apply_ping_meta
 
-from .common import Caller, admin_caller, fresh_admin
+from .common import Caller, admin_caller, audit, fresh_admin
 
 router = APIRouter()
 
@@ -56,8 +56,9 @@ class ClaimBody(BaseModel):
 
 
 @router.post("/api/app/debts/claim")
-async def claim(body: ClaimBody, caller: Caller = Depends(fresh_admin)) -> dict:
+async def claim(body: ClaimBody, request: Request, caller: Caller = Depends(fresh_admin)) -> dict:
     ids = list(dict.fromkeys(body.ids))
+    audit(request, ids=ids, status=body.status)
     for ping_id in ids:
         await apply_ping_meta(ping_id, giveaway_status=body.status, action_status=body.status)
     return {"ok": True, "count": len(ids), "status": body.status}

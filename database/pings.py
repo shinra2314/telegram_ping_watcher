@@ -454,6 +454,26 @@ async def get_giveaway_pings_with_links(limit: int = 5000) -> list[dict[str, Any
         return [dict(row) for row in rows]
 
 
+def _keyset_after(field: str, direction: str, after: tuple[Any, int]) -> tuple[str, list[Any]]:
+    """WHERE clause for "rows after ``(value, id)``" in ``ORDER BY field, id``.
+
+    SQLite puts NULLs first ascending and last descending, and a comparison
+    with NULL is never true — so a NULL on either side gets its own branch
+    instead of a row-value ``(field, id) < (?, ?)``. ``field`` is already
+    checked against the whitelist by the caller.
+    """
+    value, last_id = after
+    if field == "id":
+        return ("id < ?" if direction == "DESC" else "id > ?"), [last_id]
+    if direction == "DESC":
+        if value is None:
+            return f"({field} IS NULL AND id < ?)", [last_id]
+        return f"({field} IS NULL OR {field} < ? OR ({field} = ? AND id < ?))", [value, value, last_id]
+    if value is None:
+        return f"(({field} IS NULL AND id > ?) OR {field} IS NOT NULL)", [last_id]
+    return f"({field} > ? OR ({field} = ? AND id > ?))", [value, value, last_id]
+
+
 async def get_pings(
     limit: int = 100,
     chat_type: Optional[str] = None,
@@ -472,7 +492,16 @@ async def get_pings(
     action_status: Optional[str] = None,
     source_score_min: Optional[float] = None,
     tag: Optional[str] = None,
+    after: Optional[tuple[Any, int]] = None,
 ) -> list[dict[str, Any]]:
+    """Filtered, ordered pings.
+
+    ``after`` is a keyset cursor — the ``(sort value, id)`` of the last row the
+    caller already has — and returns the rows that follow it in this order.
+    Unlike ``offset`` it neither repeats nor skips a row when new ones arrive
+    or old ones leave the filter between two pages. ``id`` breaks ties in the
+    ordering either way, so both paths see the same sequence.
+    """
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM pings"
@@ -492,13 +521,18 @@ async def get_pings(
             tag=tag,
         )
 
-        if where:
-            query += " WHERE " + " AND ".join(where)
-
         direction = "DESC" if sort_order.upper() == "DESC" else "ASC"
         valid_sort_fields = {"detected_at", "date", "chat", "sender", "status", "id", "priority_score", "action_status"}
         field = sort_by if sort_by in valid_sort_fields else "detected_at"
-        query += f" ORDER BY {field} {direction}"
+        if after is not None:
+            clause, values = _keyset_after(field, direction, after)
+            where.append(clause)
+            params.extend(values)
+
+        if where:
+            query += " WHERE " + " AND ".join(where)
+
+        query += f" ORDER BY {field} {direction}" + ("" if field == "id" else f", id {direction}")
         if limit and limit > 0:
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])

@@ -2,7 +2,47 @@
 // callback, plus a card with the post, its link and the owner's quick statuses.
 'use strict';
 
-const GW = { sort: 'd', wins: false, account: -1, pages: 1 };
+// Filters persist (Saved 'gw'); rows are cached so «назад» from a card and a
+// switch of tabs do not refetch the queue. `rows` null = ask the server.
+const GW = {
+  sort: 'd', wins: false, account: -1,
+  rows: null, meta: null, at: 0,
+  STALE_MS: 60000,
+  query() { return '/api/app/giveaways?sort=' + this.sort + '&wins=' + this.wins + '&account=' + this.account; },
+  keep() { Saved.put('gw', { sort: this.sort, wins: this.wins, account: this.account }); },
+  restore() {
+    const s = Saved.get('gw', {});
+    if (s.sort === 'd' || s.sort === 'p') this.sort = s.sort;
+    this.wins = Boolean(s.wins);
+    this.account = Number.isInteger(s.account) ? s.account : -1;
+  },
+  reset() { this.rows = null; },
+  drop(id) {
+    if (!this.rows) return;
+    const before = this.rows.length;
+    this.rows = this.rows.filter((r) => r.id !== Number(id));
+    if (this.meta && this.rows.length < before) this.meta.total = Math.max(0, this.meta.total - 1);
+  },
+  async load() {
+    const data = await api(this.query());
+    // A saved account the key no longer covers would filter to nothing.
+    if (this.account >= (data.accounts || []).length && this.account !== -1) {
+      this.account = -1;
+      this.keep();
+      return this.load();
+    }
+    this.rows = data.items;
+    this.meta = data;
+    this.at = Date.now();
+  },
+  async more() {
+    const last = this.rows[this.rows.length - 1];
+    const data = await api(this.query() + '&after=' + last.id + '&loaded=' + this.rows.length);
+    const have = new Set(this.rows.map((r) => r.id));
+    this.rows = this.rows.concat(data.items.filter((r) => !have.has(r.id)));
+    this.meta = Object.assign({}, this.meta, { has_more: data.has_more, total: data.total });
+  },
+};
 
 const GW_STATUS = {
   pending: ['ждёт итогов', 'clock', 'warn'],
@@ -15,14 +55,13 @@ const GW_STATUS = {
 App.register('giveaways', {
   tab: 'giveaways',
   title: 'Розыгрыши',
+  reset: () => GW.reset(),
 
-  async render() {
-    const query = '/api/app/giveaways?sort=' + GW.sort + '&wins=' + GW.wins + '&account=' + GW.account;
-    // "Show more" keeps earlier pages on screen, so a re-render refetches them all.
-    const pages = await Promise.all(Array.from({ length: GW.pages }, (_, i) => api(query + '&page=' + (i + 1))));
-    const last = pages[pages.length - 1];
-    const rows = [].concat.apply([], pages.map((p) => p.items));
-    App.sub.textContent = last.total + ' ' + plural(last.total, 'в очереди', 'в очереди', 'в очереди');
+  async render(params) {
+    if (params.force || !GW.rows || Date.now() - GW.at > GW.STALE_MS) await GW.load();
+    const last = GW.meta;
+    const rows = GW.rows;
+    App.sub.textContent = last.total + ' в очереди';
     const accountName = GW.account >= 0 ? last.accounts[GW.account] : null;
 
     let html = seg([['all', 'Все'], ['wins', 'Победы']], GW.wins ? 'wins' : 'all', 'kind')
@@ -59,32 +98,39 @@ App.register('giveaways', {
   },
 
   actions: {
-    kind: (el) => { GW.wins = el.dataset.v === 'wins'; GW.pages = 1; return App.render({ quiet: true }); },
-    sort: () => { GW.sort = GW.sort === 'd' ? 'p' : 'd'; GW.pages = 1; return App.render({ quiet: true }); },
-    more: () => { GW.pages += 1; return App.render({ quiet: true }); },
+    kind: (el) => { GW.wins = el.dataset.v === 'wins'; GW.keep(); GW.reset(); return App.render({ quiet: true }); },
+    sort: () => { GW.sort = GW.sort === 'd' ? 'p' : 'd'; GW.keep(); GW.reset(); return App.render({ quiet: true }); },
+    more: async (el) => {
+      el.disabled = true;
+      try { await GW.more(); } finally { el.disabled = false; }
+      return App.render({ quiet: true });
+    },
     // Убрать из очереди = статус «Закрыт»; «Вернуть» кладёт прежние значения обратно.
     dismiss: async (el) => {
-      const path = '/api/app/pings/' + el.dataset.id + '/status';
+      const id = el.dataset.id;
+      const path = '/api/app/pings/' + id + '/status';
       const prev = { status: el.dataset.status || '', action: el.dataset.action || 'new' };
-      const row = el.closest('.item');
-      if (row) row.remove();
-      const refresh = () => (App.current().name === 'giveaways' ? App.render({ quiet: true }) : null);
+      const repaint = () => (App.current().name === 'giveaways' ? App.render({ quiet: true }) : null);
+      GW.drop(id);
+      repaint();
       try {
-        await api(path, { status: 'closed' });
-      } finally {
-        refresh();
+        await api(path, { status: 'closed' }, 'убрать из очереди');
+      } catch (err) {
+        GW.reset();
+        repaint();
+        throw err;
       }
       toast('Убрано из очереди', false, {
         label: 'Вернуть',
-        run: async () => { await api(path, prev); toast('Вернули в очередь'); return refresh(); },
+        run: async () => { await api(path, prev, 'вернуть в очередь'); toast('Вернули в очередь'); GW.reset(); return repaint(); },
       });
     },
     open: (el) => App.go('giveaway', { id: el.dataset.id }),
-    account: async () => {
-      const data = await api('/api/app/giveaways?sort=' + GW.sort + '&page=1');
+    account: () => {
+      const names = (GW.meta && GW.meta.accounts) || [];
       const rows = [item({ act: 'pick-account', data: { i: -1 }, chev: false, cls: GW.account < 0 ? 'selected' : '',
         lead: icon('users', 16), title: 'Все аккаунты' })]
-        .concat(data.accounts.map((name, i) => item({
+        .concat(names.map((name, i) => item({
           act: 'pick-account', data: { i: i }, chev: false, cls: GW.account === i ? 'selected' : '',
           lead: icon('phone', 16), title: '@' + esc(name),
         })));
@@ -92,7 +138,8 @@ App.register('giveaways', {
     },
     'pick-account': (el) => {
       GW.account = Number(el.dataset.i);
-      GW.pages = 1;
+      GW.keep();
+      GW.reset();
       Sheet.close();
       return App.render({ quiet: true });
     },
@@ -146,8 +193,10 @@ App.register('giveaway', {
     status: async (el) => {
       const code = el.dataset.v;
       if (code === 'scam' && !(await confirmBox('Отметить как скам?'))) return;
-      await api('/api/app/pings/' + el.dataset.id + '/status', { status: code });
-      toast('Сохранено: ' + (GW_STATUS[code] || [code])[0]);
+      const word = (GW_STATUS[code] || [code])[0];
+      await api('/api/app/pings/' + el.dataset.id + '/status', { status: code }, 'отметка «' + word + '»');
+      GW.drop(el.dataset.id);
+      toast('Сохранено: ' + word);
       return App.back();
     },
   },

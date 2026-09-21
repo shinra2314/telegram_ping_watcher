@@ -103,7 +103,7 @@ App.register('home', {
     'open-analytics': () => App.go('analytics'),
     'open-prefs': () => App.go('prefs'),
     'open-win': (el) => App.go('giveaway', { id: el.dataset.id }),
-    'open-wins': () => { if (typeof GW !== 'undefined') { GW.wins = true; GW.pages = 1; } return App.tab('giveaways'); },
+    'open-wins': () => { GW.wins = true; GW.keep(); GW.reset(); return App.tab('giveaways'); },
     'open-attention': (el) => {
       const key = el.dataset.key;
       if (key === 'accounts' && App.sections.accounts) return App.go('accounts');

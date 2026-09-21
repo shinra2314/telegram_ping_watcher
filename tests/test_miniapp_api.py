@@ -26,6 +26,8 @@ from pulse_desk.account_login import LoginResult
 from pulse_desk.bot_permissions import full_permissions
 from pulse_desk.miniapp_auth import sign
 from pulse_desk.miniapp_server import build_miniapp
+from routers.miniapp import common
+from routers.miniapp.common import RateLimiter
 from routers.miniapp.market import rate_table
 
 TOKEN = "123456:AAHtesttokenvaluethatisnotreal"
@@ -81,6 +83,12 @@ class MiniAppApiTests(unittest.TestCase):
             patcher = patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # One limiter serves the whole class-level client; a test must not
+        # inherit the minute budget the previous ones spent.
+        common.LIMITER.reset()
+        journal = patch("pulse_desk.miniapp_server.record_app_event", AsyncMock())
+        self.journal = journal.start()
+        self.addCleanup(journal.stop)
 
     # --- the gate ---------------------------------------------------------
     def test_missing_init_data_is_401(self):
@@ -305,6 +313,92 @@ class MiniAppApiTests(unittest.TestCase):
         res = self.client.get("/app")
         self.assertEqual(res.status_code, 200)
         self.assertIn("script-src 'self' https://telegram.org", res.headers["content-security-policy"])
+
+
+class GateInventoryTests(unittest.TestCase):
+    """Every panel route declares its gate. A new endpoint that forgets one
+    fails here instead of shipping open on a port that is on the internet."""
+
+    @staticmethod
+    def calls(dependant) -> set:
+        found = set()
+        for dep in dependant.dependencies:
+            found.add(dep.call)
+            found |= GateInventoryTests.calls(dep)
+        return found
+
+    def test_every_api_route_verifies_the_caller(self):
+        routes = [r for r in build_miniapp().routes if getattr(r, "path", "").startswith("/api/")]
+        self.assertTrue(routes)
+        for route in routes:
+            with self.subTest(route=route.path):
+                self.assertIn(common.current_caller, self.calls(route.dependant))
+
+    def test_every_action_needs_a_fresh_session(self):
+        fresh = {common.fresh_admin, common.fresh_caller}
+        for route in build_miniapp().routes:
+            if not getattr(route, "path", "").startswith("/api/") or "POST" not in route.methods:
+                continue
+            with self.subTest(route=route.path):
+                self.assertTrue(self.calls(route.dependant) & fresh)
+
+
+class LimitsAndJournalTests(unittest.TestCase):
+    """Budget per person and the action journal, on a client of their own."""
+
+    def setUp(self):
+        self.client = TestClient(build_miniapp())
+        for target, value in (
+            ("routers.miniapp.common.BOT_TOKEN", TOKEN),
+            ("routers.miniapp.common.resolve_member_access", fake_access),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        common.LIMITER.reset()
+        journal = patch("pulse_desk.miniapp_server.record_app_event", AsyncMock())
+        self.journal = journal.start()
+        self.addCleanup(journal.stop)
+
+    def test_limiter_forgets_after_the_window(self):
+        now = [0.0]
+        limiter = RateLimiter(window=60, clock=lambda: now[0])
+        self.assertTrue(all(limiter.allow("k", 3) for _ in range(3)))
+        self.assertFalse(limiter.allow("k", 3))
+        self.assertTrue(limiter.allow("other", 3))
+        now[0] = 60.0
+        self.assertTrue(limiter.allow("k", 3))
+
+    def test_guest_actions_are_capped_per_minute(self):
+        h = headers(GUEST)
+        codes = [self.client.post("/api/app/pings/5/status", headers=h, json={"status": "closed"}).status_code
+                 for _ in range(common.LIMITS["guest"][1] + 1)]
+        self.assertEqual(codes[:-1], [403] * common.LIMITS["guest"][1])
+        self.assertEqual(codes[-1], 429)
+        # Reading is a separate budget.
+        self.assertEqual(self.client.get("/api/app/market", headers=h).status_code, 403)
+
+    def test_journal_names_the_actor_and_never_the_phone(self):
+        result = LoginResult("code_sent", "Код отправлен", "session_380", "app")
+        with patch("routers.miniapp.accounts.account_login.request_code", AsyncMock(return_value=result)):
+            res = self.client.post("/api/app/login/code", headers=headers(OWNER),
+                                   json={"phone": "+380671234567", "session_name": ""})
+        self.assertEqual(res.status_code, 200)
+        self.journal.assert_awaited_once()
+        level, source, _message, context = self.journal.await_args.args
+        self.assertEqual((level, source, context["tg_id"], context["role"]), ("INFO", "miniapp", OWNER, "admin"))
+        self.assertEqual(context["path"], "/api/app/login/code")
+        self.assertNotIn("380671234567", json.dumps(context))
+
+    def test_journal_carries_the_ids_from_the_body(self):
+        with patch("routers.miniapp.debts.apply_ping_meta", AsyncMock()):
+            self.client.post("/api/app/debts/claim", headers=headers(OWNER), json={"ids": [5, 7]})
+        context = self.journal.await_args.args[3]
+        self.assertEqual((context["ids"], context["status"]), ([5, 7], "claimed"))
+
+    def test_refused_actions_are_not_journalled(self):
+        self.client.post("/api/app/debts/claim", headers=headers(GUEST), json={"ids": [1]})
+        self.journal.assert_not_awaited()
 
 
 class RateTableTests(unittest.TestCase):

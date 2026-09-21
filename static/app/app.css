@@ -461,3 +461,16 @@ input.range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; b
 .step-dots i { width: 22px; height: 4px; border-radius: 2px; background: var(--card-hi); }
 .step-dots i.on { background: var(--accent); }
 .big-ok { width: 72px; height: 72px; border-radius: 22px; margin: 18px auto 14px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+
+/* ── Notice: session running out, an action to repeat, offline snapshot ── */
+.notice {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 10px; padding: 9px 12px;
+  border-radius: var(--radius-s); border: 1px solid rgba(255, 190, 70, .28);
+  background: rgba(255, 190, 70, .07); color: var(--text); font-size: 13px;
+}
+.notice[hidden] { display: none; }
+.notice .ic { color: var(--amber); }
+.notice span { flex: 1; min-width: 0; }
+.notice .link { padding: 0 2px; font-size: 13px; font-weight: 650; color: var(--accent); white-space: nowrap; }
+.notice .icon-btn { width: 44px; height: 44px; margin: -10px -10px -10px 0; background: none; border: 0; }

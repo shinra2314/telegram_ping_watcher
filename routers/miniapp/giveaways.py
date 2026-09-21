@@ -79,13 +79,23 @@ async def giveaways(
     wins: bool = Query(False),
     account: int = Query(ALL_ACCOUNTS),
     page: int = Query(1, ge=1, le=200),
+    after: Optional[int] = Query(None, ge=1),
+    loaded: int = Query(0, ge=0, le=PAGE_SIZE * 200),
 ) -> dict:
+    """``after`` / ``loaded`` — как в ленте: следующая порция идёт от последней
+    строки на экране. Очередь собирается на Python, так что курсор — это просто
+    позиция той строки в списке; если её уже нет (забрана в боте), — счётчик."""
     caller.require(FEATURE)
     filt = GiveawayFilter(sort=sort, wins=wins, account=account, page=page)
     accounts = visible_accounts(caller.perms)
-    window = PAGE_SIZE * page + 1
+    start = loaded if after is not None else PAGE_SIZE * (page - 1)
+    # С запасом на новые строки сверху: курсор должен остаться в окне.
+    window = start + (2 * PAGE_SIZE if after is not None else PAGE_SIZE) + 1
     rows, total = await need_action(caller, filt, limit=window * (8 if is_narrowed(caller, filt) else 1))
-    start = PAGE_SIZE * (page - 1)
+    if after is not None:
+        ids = [int(r["id"]) for r in rows]
+        if after in ids:
+            start = ids.index(after) + 1
     chunk = rows[start:start + PAGE_SIZE + 1]
     return {
         "items": [feed_row(r) for r in chunk[:PAGE_SIZE]],

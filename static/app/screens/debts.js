@@ -47,7 +47,7 @@ App.register('debts', {
   },
 
   actions: {
-    seg: (el) => { Debts.seg = el.dataset.v; return App.render({ quiet: true }); },
+    seg: (el) => { Debts.seg = el.dataset.v; Saved.put('debts_seg', Debts.seg); return App.render({ quiet: true }); },
     // Selecting is local: repaint the row and the dock, never refetch the board.
     toggle: (el) => {
       const id = Number(el.dataset.id);

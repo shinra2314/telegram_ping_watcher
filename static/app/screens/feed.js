@@ -3,15 +3,51 @@
 // tags stay in the owner's bot.
 'use strict';
 
-const FEED = { type: 'a', status: 'a', sort: 'd', asc: false, q: '', pages: 1 };
+// Filters persist (Saved 'feed'), search text does not. Rows are cached like
+// the giveaways queue; «Показать ещё» continues from the last row on screen.
+const FEED = {
+  type: 'a', status: 'a', sort: 'd', asc: false, q: '',
+  rows: null, meta: null, at: 0,
+  STALE_MS: 60000,
+  keep() { Saved.put('feed', { type: this.type, status: this.status, sort: this.sort, asc: this.asc }); },
+  restore() {
+    const s = Saved.get('feed', {});
+    const known = (table, code) => table.some((t) => t[0] === code);
+    if (known(FEED_TYPES, s.type)) this.type = s.type;
+    if (known(FEED_STATUSES, s.status)) this.status = s.status;
+    if (known(FEED_SORTS, s.sort)) this.sort = s.sort;
+    this.asc = Boolean(s.asc);
+  },
+  reset() { this.rows = null; },
+  // Any filter change: remember it, forget the rows, repaint in place.
+  set(changes) {
+    Object.assign(this, changes);
+    this.keep();
+    this.reset();
+    return App.render({ quiet: true });
+  },
+  async load() {
+    const data = await api(feedQuery());
+    this.rows = data.items;
+    this.meta = data;
+    this.at = Date.now();
+  },
+  async more() {
+    const last = this.rows[this.rows.length - 1];
+    const data = await api(feedQuery() + '&after=' + last.id + '&loaded=' + this.rows.length);
+    const have = new Set(this.rows.map((r) => r.id));
+    this.rows = this.rows.concat(data.items.filter((r) => !have.has(r.id)));
+    this.meta = Object.assign({}, this.meta, { has_more: data.has_more });
+  },
+};
 
 const FEED_TYPES = [['a', 'Все'], ['w', 'Победы'], ['g', 'Розыгрыши'], ['i', 'Важные'], ['c', 'Каналы'], ['r', 'Группы'], ['p', 'Личные']];
 const FEED_SORTS = [['d', 'Сначала новые'], ['m', 'По дате поста'], ['p', 'По приоритету']];
 const FEED_STATUSES = [['a', 'Любой статус'], ['n', 'Новые'], ['r', 'Прочитанные'], ['i', 'Важные'], ['g', 'Игнор'], ['s', 'Решённые']];
 
-function feedQuery(page) {
+function feedQuery() {
   return '/api/app/feed?type=' + FEED.type + '&status=' + FEED.status + '&sort=' + FEED.sort
-    + '&asc=' + FEED.asc + '&page=' + page + (FEED.q ? '&q=' + encodeURIComponent(FEED.q) : '');
+    + '&asc=' + FEED.asc + (FEED.q ? '&q=' + encodeURIComponent(FEED.q) : '');
 }
 
 function feedLead(r) {
@@ -30,11 +66,12 @@ App.register('feed', {
   tab: 'feed',
   title: 'Лента',
 
-  async render() {
-    // "Show more" keeps earlier pages on screen, so a re-render refetches them all.
-    const pages = await Promise.all(Array.from({ length: FEED.pages }, (_, i) => api(feedQuery(i + 1))));
-    const last = pages[pages.length - 1];
-    const rows = [].concat.apply([], pages.map((p) => p.items));
+  reset: () => FEED.reset(),
+
+  async render(params) {
+    if (params.force || !FEED.rows || Date.now() - FEED.at > FEED.STALE_MS) await FEED.load();
+    const last = FEED.meta;
+    const rows = FEED.rows;
     App.sub.textContent = last.accounts.length ? last.accounts.map((a) => '@' + a).join(', ') : 'все аккаунты';
 
     let html = '';
@@ -82,32 +119,34 @@ App.register('feed', {
   },
 
   actions: {
-    type: (el) => { FEED.type = el.dataset.v; FEED.pages = 1; haptic('select'); return App.render({ quiet: true }); },
+    type: (el) => { haptic('select'); return FEED.set({ type: el.dataset.v }); },
     sort: () => {
       const codes = FEED_SORTS.map((s) => s[0]);
-      FEED.sort = codes[(codes.indexOf(FEED.sort) + 1) % codes.length];
-      FEED.pages = 1;
-      return App.render({ quiet: true });
+      return FEED.set({ sort: codes[(codes.indexOf(FEED.sort) + 1) % codes.length] });
     },
-    order: () => { FEED.asc = !FEED.asc; FEED.pages = 1; return App.render({ quiet: true }); },
+    order: () => FEED.set({ asc: !FEED.asc }),
     status: () => {
       Sheet.open('Статус', '<div class="list">' + FEED_STATUSES.map((s) => item({
         act: 'pick-status', data: { v: s[0] }, chev: false, cls: s[0] === FEED.status ? 'selected' : '',
         lead: icon(s[0] === FEED.status ? 'check' : 'list', 16), title: esc(s[1]),
       })).join('') + '</div>');
     },
-    'pick-status': (el) => { FEED.status = el.dataset.v; FEED.pages = 1; Sheet.close(); return App.render({ quiet: true }); },
+    'pick-status': (el) => { Sheet.close(); return FEED.set({ status: el.dataset.v }); },
     search: async () => {
       const input = document.getElementById('feed-q');
       const q = (input && input.value || '').trim();
-      if (q === FEED.q) { if (input) input.blur(); return null; }
-      FEED.q = q;
-      FEED.pages = 1;
       if (input) input.blur();
+      if (q === FEED.q) return null;
+      FEED.q = q;
+      FEED.reset();
       return App.render({ quiet: true });
     },
-    'clear-search': () => { FEED.q = ''; FEED.pages = 1; return App.render({ quiet: true }); },
-    more: () => { FEED.pages += 1; return App.render({ quiet: true }); },
+    'clear-search': () => { FEED.q = ''; FEED.reset(); return App.render({ quiet: true }); },
+    more: async (el) => {
+      el.disabled = true;
+      try { await FEED.more(); } finally { el.disabled = false; }
+      return App.render({ quiet: true });
+    },
     open: (el) => App.go('ping', { id: el.dataset.id }),
   },
 });

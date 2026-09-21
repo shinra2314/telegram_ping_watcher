@@ -87,7 +87,8 @@ def _searching_only(state_filter: FeedFilter) -> bool:
 
 
 async def fetch(state_filter: FeedFilter, perms: dict, query: str,
-                page_size: int = PAGE_SIZE) -> tuple[list[dict], bool]:
+                page_size: int = PAGE_SIZE, *, after: Optional[dict] = None,
+                offset: Optional[int] = None) -> tuple[list[dict], bool]:
     """Страница ленты плюс признак, что дальше есть ещё.
 
     Берём на одну строку больше, чем показываем: это дешевле, чем считать
@@ -99,10 +100,16 @@ async def fetch(state_filter: FeedFilter, perms: dict, query: str,
     нельзя. Поиск вместе с другими фильтрами всё же уходит в ``get_pings``:
     FTS не умеет ни статус, ни избранное, а дублировать эти условия на Python
     значит завести вторую правду о том, что такое «важные».
+
+    Панель листает не страницами, а от последней строки, что у неё уже есть
+    (``after`` — эта строка целиком): «Показать ещё» не повторяет и не теряет
+    записи, пока лента меняется. ``offset`` — запасной путь, когда той строки
+    больше нет.
     """
     perms = perms or full_permissions()
     wanted = page_size + 1
-    offset = (max(1, state_filter.page) - 1) * page_size
+    if offset is None:
+        offset = (max(1, state_filter.page) - 1) * page_size
     search = query if (state_filter.query and query) else None
 
     if search and _searching_only(state_filter):
@@ -111,12 +118,16 @@ async def fetch(state_filter: FeedFilter, perms: dict, query: str,
         found = await search_pings_fts(search, limit=(wanted + offset) * (8 if scoped else 1))
         if found:
             rows = [r for r in found if accounts_allowed(perms, r.get("mentions"))]
-            window = rows[offset:offset + wanted]
+            ids = [r.get("id") for r in rows]
+            start = ids.index(after["id"]) + 1 if after and after.get("id") in ids else offset
+            window = rows[start:start + wanted]
             return window[:page_size], len(window) > page_size
 
+    keyset = (after.get(state_filter.db_sort), int(after["id"])) if after else None
     rows = await get_pings(
         limit=wanted,
-        offset=offset,
+        offset=0 if keyset else offset,
+        after=keyset,
         chat_type=state_filter.db_type,
         status=state_filter.db_status,
         favorite=True if state_filter.favorite else None,

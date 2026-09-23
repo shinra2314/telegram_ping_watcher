@@ -593,11 +593,15 @@ async def init_db() -> None:
                 amount TEXT NOT NULL DEFAULT '',
                 outcome TEXT NOT NULL,
                 reply TEXT NOT NULL DEFAULT '',
+                press_ms INTEGER,
                 UNIQUE(session, bot, code)
             )
             """
         )
         await db.execute("CREATE INDEX IF NOT EXISTS idx_check_claims_created ON check_claims(created_at)")
+        # --- schema 26: how fast each press went out (update received → startBot answered).
+        if "press_ms" not in await _columns(db, "check_claims"):
+            await db.execute("ALTER TABLE check_claims ADD COLUMN press_ms INTEGER")
         await db.commit()
 
 

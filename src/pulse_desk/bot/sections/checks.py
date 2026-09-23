@@ -67,9 +67,10 @@ def card(cfg: dict[str, Any], accounts: list[tuple[str, str]], recent: list[dict
     for row in recent:
         who = row.get("account") or "—"
         chat = str(row.get("chat") or "")[:32]
+        speed = f" · ⚡{row['press_ms']}мс" if row.get("press_ms") is not None else ""
         lines.append(f"{cc.OUTCOME_LABELS.get(row['outcome'], row['outcome'])} · "
                      f"{_when(row.get('updated_at') or row.get('created_at'))} · "
-                     f"{row.get('amount') or '—'} · {who} · {chat}")
+                     f"{row.get('amount') or '—'} · {who} · {chat}{speed}")
     lines += [DIV, "__Жмёт сам: каждый аккаунт, увидевший чек, а личный чек «для @…» — только адресат. "
                    "Чеки ваших аккаунтов и владельца не трогает. Капчу не решает: присылает её сюда "
                    "кнопками, ответ нажимаете вы.__"]

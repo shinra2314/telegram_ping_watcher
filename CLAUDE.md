@@ -307,9 +307,19 @@ src/pulse_desk/
                       which nobody else can take: 7 days, and the group
                       unread-mention catch-up also hands its messages over
                       (`live=False`: such a claim first asks the journal whether this
-                      account tried the code before a restart). A general check is pressed by each
-                      account that received it; a personal one only by the addressee
-                      (matched by live `username`), whichever account received it.
+                      account tried the code before a restart). A general check is
+                      pressed by **every** enabled online account as soon as the
+                      first of ours receives it (fan-out: a late update or an account
+                      outside the chat does not wait); a personal one only by the
+                      addressee (matched by live `username`), whichever account
+                      received it. **Speed:** the press (`_press_start`) goes out
+                      before any lock, lookup or SQLite — the wallet bot's peer is
+                      cached per account by `warm_up`; only reading the answer and
+                      follow-up steps queue per (account, bot). Answers to presses
+                      that overlapped are attributed by order (`_replies_for`: the
+                      k-th of a burst of our «/start» gets the k-th answer). The
+                      journal's `press_ms` (schema 26) is update-received → startBot
+                      answered; the log line also gives how old the post was.
                       **Own checks are never pressed:** sender is one of our accounts
                       or `ADMIN_ID`; `message.out` (posted as a channel / anonymous
                       admin — remembered for the others); sender is a chat one of our
@@ -718,8 +728,8 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 25 —
-                check_claims, the check auto-claim journal; 24 —
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 26 —
+                check_claims.press_ms; 25 — check_claims, the check auto-claim journal; 24 —
                 pings.notified_at / win_notified_at, the owner-card outbox;
                 23 — bot_ephemeral_messages, bot_access_keys.max_uses,
                 pings.edited_at / win_detected_at / duplicate_of)

@@ -13,7 +13,8 @@ import aiosqlite
 
 from ._core import _connect, _now_iso
 
-_FIELDS = ("bot", "code", "session", "account", "chat_id", "chat", "message_id", "link", "amount", "outcome", "reply")
+_FIELDS = ("bot", "code", "session", "account", "chat_id", "chat", "message_id", "link", "amount", "outcome", "reply",
+           "press_ms")
 
 
 async def record_check_claim(row: dict[str, Any]) -> int:
@@ -32,7 +33,8 @@ async def record_check_claim(row: dict[str, Any]) -> int:
                 updated_at = excluded.updated_at,
                 outcome = CASE WHEN check_claims.outcome = 'claimed' THEN 'claimed' ELSE excluded.outcome END,
                 reply = CASE WHEN check_claims.outcome = 'claimed' THEN check_claims.reply ELSE excluded.reply END,
-                amount = CASE WHEN excluded.amount != '' THEN excluded.amount ELSE check_claims.amount END
+                amount = CASE WHEN excluded.amount != '' THEN excluded.amount ELSE check_claims.amount END,
+                press_ms = COALESCE(check_claims.press_ms, excluded.press_ms)
             """,
             (now, now, *(values[name] for name in _FIELDS)),
         )

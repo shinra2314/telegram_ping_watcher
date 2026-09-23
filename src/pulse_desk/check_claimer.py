@@ -48,6 +48,9 @@ RELAY_TTL = timedelta(minutes=30)
 SEEN_LIMIT = 5000
 
 _saved_admin_chats: list[int] = []
+# (session, bot key) -> the wallet bot's input peer, filled by warm_up: the press
+# then needs no lookup at all, not even the session file's entity table.
+_bot_peers: dict[tuple[str, str], Any] = {}
 # (session, bot key) -> (lock, the loop it belongs to); see _lock_for.
 _bot_locks: dict[tuple[str, str], tuple[asyncio.Lock, Any]] = {}
 
@@ -135,6 +138,7 @@ def on_message(client: Any, session: str, account: dict, message: Any, *, live: 
 
 
 def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool = True) -> None:
+    received = asyncio.get_running_loop().time()
     cfg = _config()
     if cfg["mode"] == "off":
         return
@@ -172,9 +176,23 @@ def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool
         target_client = client if target == session else client_for(target) if target else None
         if target_client is None:
             return
-        _launch(target_client, target, state.accounts_state.get(target) or account, message, info, cfg, live)
+        _launch(target_client, target, state.accounts_state.get(target) or account, message, info, cfg, live, received)
         return
-    _launch(client, session, account, message, info, cfg, live)
+    _launch(client, session, account, message, info, cfg, live, received)
+    # The first of ours to see a general check presses for all of them: an
+    # account whose own copy of the update is late — or that is not in this chat
+    # at all — does not wait for it, and still gets its share of a multi-check.
+    for other_client, other_session, other_account in _online_accounts():
+        if other_session != session:
+            _launch(other_client, other_session, other_account, message, info, cfg, live, received)
+
+
+def _online_accounts():
+    for other in list(state.clients):
+        name = getattr(other, "_session_name_custom", "")
+        account = state.accounts_state.get(name) or {}
+        if name and account.get("status") == "online":
+            yield other, name, account
 
 
 def _note_unreadable(message: Any) -> None:
@@ -193,7 +211,7 @@ def _note_unreadable(message: Any) -> None:
 
 
 def _launch(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo, cfg: dict,
-            live: bool = True) -> None:
+            live: bool = True, received: Optional[float] = None) -> None:
     if session in cfg["disabled"]:
         return
     for link in info.links:
@@ -203,20 +221,30 @@ def _launch(client: Any, session: str, account: dict, message: Any, info: cc.Che
             continue
         if _first(state.check_seen, f"{session}|{link.key}"):
             start_background_task(f"check-claim:{session}:{link.key}",
-                                  claim(client, session, account, message, info, link, live=live))
+                                  claim(client, session, account, message, info, link, live=live,
+                                        received=received))
 
 
 # ---- the claim --------------------------------------------------------------
 async def claim(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo,
-                link: cc.CheckLink, *, announce: bool = True, live: bool = True) -> str:
-    """Press one check from one account; returns the outcome."""
+                link: cc.CheckLink, *, announce: bool = True, live: bool = True,
+                received: Optional[float] = None) -> str:
+    """Press one check from one account; returns the outcome.
+
+    The press goes out before anything else — no lock, no lookup, no SQLite.
+    Only what follows (reading the answer, a subscription, a password) waits
+    its turn in the account's conversation with the bot.
+    """
     if not live and await _tried_before(session, link):
         return "skipped"
-    outcome, reply, action, bot = "error", "", None, None
+    outcome, reply, action, bot, press_ms = "error", "", None, None, None
+    loop = asyncio.get_running_loop()
     try:
-        bot = await client.get_input_entity(cc.BOT_USERNAMES[link.bot])
+        bot = await _bot_peer(client, session, link.bot)
+        sent_id = await _press_start(client, bot, link.code)
+        press_ms = int((loop.time() - (received if received is not None else loop.time())) * 1000)
         async with _lock_for(session, link.bot):
-            replies = await _start(client, bot, link.code)
+            replies = await _await_replies(client, bot, sent_id, link.code)
             outcome, reply, action = _judge(replies)
             if outcome == "subscribe":
                 outcome, reply, action = await _subscribe(client, bot, link, replies, action)
@@ -226,8 +254,11 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
         outcome, reply = "error", _error_text(exc)
         logger.warning("Check %s from %s failed: %s", link.key, session, exc)
     ctx = await _context(message, info, link, session, account)
+    ctx["press_ms"] = press_ms
     claim_id = await _journal(ctx, outcome, reply)
-    logger.info("Check %s in %s by %s: %s", ctx["amount"] or link.code, ctx["chat"], ctx["account"], outcome)
+    logger.info("Check %s in %s by %s: %s (pressed %s ms after the update, post %s)",
+                ctx["amount"] or link.code, ctx["chat"], ctx["account"], outcome, press_ms,
+                _update_lag(message))
     if not announce:
         return outcome
     if outcome == "claimed":
@@ -237,11 +268,35 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
     return outcome
 
 
-async def _start(client: Any, bot: Any, code: str) -> list:
+async def _press_start(client: Any, bot: Any, code: str) -> Optional[int]:
+    """Send startBot with the code; returns the id of our «/start <code>»."""
     from telethon.tl.functions.messages import StartBotRequest
 
-    result = await client(StartBotRequest(bot=bot, peer=bot, start_param=code))
-    return await _await_replies(client, bot, _sent_id(result), code)
+    return _sent_id(await client(StartBotRequest(bot=bot, peer=bot, start_param=code)))
+
+
+async def _start(client: Any, bot: Any, code: str) -> list:
+    return await _await_replies(client, bot, await _press_start(client, bot, code), code)
+
+
+async def _bot_peer(client: Any, session: str, bot_key: str) -> Any:
+    peer = _bot_peers.get((session, bot_key))
+    if peer is None:
+        peer = await client.get_input_entity(cc.BOT_USERNAMES[bot_key])
+        _bot_peers[(session, bot_key)] = peer
+    return peer
+
+
+def _update_lag(message: Any) -> str:
+    """How old the post was when we got it (whole seconds: that is Telegram's resolution)."""
+    from datetime import timezone
+
+    posted = getattr(message, "date", None)
+    if not isinstance(posted, datetime):
+        return "?"
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    return f"{(datetime.now(timezone.utc) - posted).total_seconds():.0f} s old"
 
 
 async def _tried_before(session: str, link: cc.CheckLink) -> bool:
@@ -272,6 +327,48 @@ def _incoming(batch: Any, base: Optional[int]) -> list:
     return sorted((m for m in batch or [] if not getattr(m, "out", False) and m.id > base), key=lambda m: m.id)
 
 
+# Our messages further apart than this are not one burst of presses.
+BURST_SECONDS = 20
+
+
+def _replies_for(batch: Any, base: Optional[int]) -> list:
+    """The bot's answer to our message ``base``.
+
+    Presses go out at once, so two checks for one account can leave «/start A»,
+    «/start B», answer A, answer B in the chat. A bot answers in order: within a
+    burst of our messages with no answer between them, the k-th of ours gets the
+    k-th answer after the burst. Alone, ours gets everything up to our next one.
+    """
+    if base is None:
+        return []
+    ordered = sorted(batch or [], key=lambda m: m.id)
+    index = next((i for i, m in enumerate(ordered) if m.id == base), None)
+    if index is None:
+        return _incoming(batch, base)
+    anchor = getattr(ordered[index], "date", None)
+
+    def same_burst(m: Any) -> bool:
+        when = getattr(m, "date", None)
+        return (not isinstance(when, datetime) or not isinstance(anchor, datetime)
+                or abs((when - anchor).total_seconds()) <= BURST_SECONDS)
+
+    start = index
+    while start > 0 and getattr(ordered[start - 1], "out", False) and same_burst(ordered[start - 1]):
+        start -= 1
+    end = index
+    while end + 1 < len(ordered) and getattr(ordered[end + 1], "out", False) and same_burst(ordered[end + 1]):
+        end += 1
+    answers = []
+    for m in ordered[end + 1:]:
+        if getattr(m, "out", False):
+            break
+        answers.append(m)
+    if start == end:
+        return answers
+    k = index - start
+    return answers[k:k + 1]
+
+
 def _own_message_id(batch: Any, marker: str) -> Optional[int]:
     ids = [m.id for m in batch or []
            if getattr(m, "out", False) and (not marker or marker in (getattr(m, "raw_text", "") or ""))]
@@ -286,13 +383,13 @@ async def _await_replies(client: Any, bot: Any, after_id: Optional[int], marker:
     delay, base = POLL_FIRST_DELAY, after_id
     while True:
         await asyncio.sleep(delay)
-        batch = await client.get_messages(bot, limit=10, min_id=base or 0)
+        batch = await client.get_messages(bot, limit=20)
         if base is None:
             base = _own_message_id(batch, marker)
-        incoming = _incoming(batch, base)
+        incoming = _replies_for(batch, base)
         if incoming:
             await asyncio.sleep(SETTLE_SECONDS)
-            return _incoming(await client.get_messages(bot, limit=10, min_id=base), base) or incoming
+            return _replies_for(await client.get_messages(bot, limit=20), base) or incoming
         if loop.time() >= deadline:
             return []
         delay = min(delay * 1.5, POLL_MAX_DELAY)
@@ -438,7 +535,8 @@ def _post_button(ctx: dict[str, Any]) -> Optional[list[list[Any]]]:
 async def _notify_claimed(ctx: dict[str, Any]) -> None:
     from .bot_notify import send_admin_bot_message
 
-    text = f"🧾 **Чек забран** · {ctx['amount'] or 'сумма не указана'}\n{_where(ctx, ctx['account'])}"
+    speed = f"\n⚡ нажал через {ctx['press_ms']} мс" if ctx.get("press_ms") is not None else ""
+    text = f"🧾 **Чек забран** · {ctx['amount'] or 'сумма не указана'}\n{_where(ctx, ctx['account'])}{speed}"
     with suppress(Exception):
         await send_admin_bot_message(text, buttons=_post_button(ctx))
 
@@ -688,6 +786,7 @@ async def warm_up(client: Any, session: str) -> None:
         except Exception as exc:
             logger.debug("Could not resolve @%s for %s: %s", username, session, exc)
             continue
+        _bot_peers[(session, key)] = peer
         user_id = getattr(peer, "user_id", None)
         if isinstance(user_id, int):
             state.check_bot_ids[user_id] = key

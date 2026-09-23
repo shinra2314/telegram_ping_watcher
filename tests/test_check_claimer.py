@@ -53,11 +53,12 @@ class BotMessage:
 class FakeClient:
     """One account: records requests and plays a scripted wallet bot."""
 
-    def __init__(self, session, script=None):
+    def __init__(self, session, script=None, *, deferred=False):
         self._session_name_custom = session
         self.script = script or (lambda kind, value: [])
         self.requests, self.clicks, self.texts, self.chat = [], [], [], []
         self._next_id = 100
+        self.deferred, self._owed = deferred, []
 
     @property
     def starts(self):
@@ -66,12 +67,16 @@ class FakeClient:
     def add(self, out, text, buttons=None, photo=None):
         self._next_id += 1
         message = BotMessage(self, self._next_id, out, text, buttons, photo)
+        message.date = datetime.now(timezone.utc)
         self.chat.append(message)
         return message
 
     def react(self, kind, value):
         for spec in self.script(kind, value) or []:
-            self.add(False, spec.get("text", ""), spec.get("buttons"), spec.get("photo"))
+            if self.deferred:
+                self._owed.append(spec)
+            else:
+                self.add(False, spec.get("text", ""), spec.get("buttons"), spec.get("photo"))
 
     async def get_input_entity(self, username):
         return SimpleNamespace(user_id=BOT_ID, username=username)
@@ -85,6 +90,9 @@ class FakeClient:
         return SimpleNamespace()
 
     async def get_messages(self, peer, limit=None, min_id=0, ids=None):
+        while self._owed:
+            spec = self._owed.pop(0)
+            self.add(False, spec.get("text", ""), spec.get("buttons"), spec.get("photo"))
         if ids is not None:
             return next((m for m in self.chat if m.id == ids), None)
         found = sorted((m for m in self.chat if m.id > (min_id or 0)), key=lambda m: m.id, reverse=True)
@@ -118,6 +126,7 @@ def claimed(kind, value):
 
 class ClaimerCase(unittest.IsolatedAsyncioTestCase):
     script = staticmethod(claimed)
+    only_a = False  # Swight0 switched off: one account, one bot chat to assert on
 
     async def asyncSetUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -139,7 +148,7 @@ class ClaimerCase(unittest.IsolatedAsyncioTestCase):
         self._saved = {name: getattr(state, name) for name in STATE_FIELDS}
         for name, factory in STATE_FIELDS.items():
             setattr(state, name, factory())
-        state.check_claim_cfg = cc.normalize_config(None)
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]} if self.only_a else None)
         state.connected_user_ids.update({1, 2})
         state.accounts_state.update({
             "w3v8f0rm": {"status": "online", "username": "MCshinra", "display": "@MCshinra"},
@@ -264,6 +273,38 @@ class WhoPressesTests(ClaimerCase):
         self.assertIn("Поймал бы", self.notify.await_args.args[0])
 
 
+class SpeedTests(ClaimerCase):
+    async def test_first_account_to_see_a_general_check_presses_for_all(self):
+        self.see(self.a, post("🚀 Чек на 5 USDT"))  # B's copy of the update has not come yet
+        await self.settle()
+        self.assertEqual((self.a.starts, self.b.starts), (["mc_Gen1"], ["mc_Gen1"]))
+        rows = await self.rows()
+        self.assertTrue(all(r["press_ms"] is not None for r in rows))
+
+    async def test_fan_out_still_skips_switched_off_accounts(self):
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
+        self.see(self.a, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        self.assertEqual(self.b.starts, [])
+
+    async def test_back_to_back_checks_are_both_pressed_before_any_answer_and_not_mixed_up(self):
+        def script(kind, value):
+            if kind != "start":
+                return []
+            return [{"text": "✅ Вы получили 5 USDT" if value == "mc_First" else "❌ Этот чек уже активирован"}]
+
+        self.a.script, self.a.deferred = script, True
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
+        self.see(self.a, post("🚀 Чек на 5 USDT", "mc_First", msg_id=11))
+        self.see(self.a, post("🚀 Чек на 5 USDT", "mc_Second", msg_id=12))
+        await self.settle()
+        # Both presses went out before the bot answered either of them…
+        self.assertEqual([m.out for m in self.a.chat[:2]], [True, True])
+        # …and each answer was read as its own check's.
+        outcomes = {r["code"]: r["outcome"] for r in await self.rows()}
+        self.assertEqual(outcomes, {"mc_First": "claimed", "mc_Second": "gone"})
+
+
 class OwnChecksTests(ClaimerCase):
     async def test_check_from_one_of_our_accounts_is_never_pressed(self):
         message = post("🚀 Чек на 5 USDT", sender_id=1)
@@ -314,6 +355,7 @@ def subscribe_script(kind, value):
 
 
 class SubscribeTests(ClaimerCase):
+    only_a = True
     script = staticmethod(subscribe_script)
 
     async def test_subscription_is_met_then_the_bot_checks_again(self):
@@ -334,6 +376,7 @@ def password_script(kind, value):
 
 
 class PasswordTests(ClaimerCase):
+    only_a = True
     script = staticmethod(password_script)
 
     async def test_password_written_in_the_post_is_typed_in(self):
@@ -363,6 +406,7 @@ class CaptchaRelayTests(ClaimerCase):
     script = staticmethod(captcha_script)
 
     async def test_captcha_is_handed_to_the_owner_and_the_press_is_mirrored(self):
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
         self.see(self.a, post("🚀 Чек на 5 USDT"))
         await self.settle()
         self.notify.assert_awaited_once()
@@ -393,6 +437,7 @@ class CaptchaRelayTests(ClaimerCase):
         self.assertEqual(list(state.check_relays), [fresh["token"]])
 
     async def test_expired_relays_are_swept(self):
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
         self.see(self.a, post("🚀 Чек на 5 USDT"))
         await self.settle()
         self.assertEqual(check_claimer.sweep_relays(datetime.now() + timedelta(hours=1)), 1)
@@ -407,6 +452,7 @@ def pay_script(kind, value):
 
 
 class MoneyOutTests(ClaimerCase):
+    only_a = True
     script = staticmethod(pay_script)
 
     async def test_payment_buttons_never_reach_the_card_or_the_bot(self):
@@ -427,6 +473,7 @@ def invoice_script(kind, value):
 
 
 class InvoiceTests(ClaimerCase):
+    only_a = True
     script = staticmethod(invoice_script)
 
     async def test_an_invoice_behind_a_check_word_stops_without_a_card(self):
@@ -438,6 +485,7 @@ class InvoiceTests(ClaimerCase):
 
 
 class SectionTests(ClaimerCase):
+    only_a = True
     script = staticmethod(captcha_script)
 
     def click(self, data: str):
@@ -476,10 +524,10 @@ class SectionTests(ClaimerCase):
 
         event, click = self.click("ck:a:0")
         await checks.handle(click)
-        self.assertEqual(state.check_claim_cfg["disabled"], ["Swight0"])
+        self.assertEqual(state.check_claim_cfg["disabled"], [])
         event, click = self.click("ck:a:0")
         await checks.handle(click)
-        self.assertEqual(state.check_claim_cfg["disabled"], [])
+        self.assertEqual(state.check_claim_cfg["disabled"], ["Swight0"])
 
     async def test_owner_press_on_the_card_claims_the_check(self):
         from pulse_desk.bot.sections import checks
@@ -501,6 +549,7 @@ class SectionTests(ClaimerCase):
 
 
 class SilenceTests(ClaimerCase):
+    only_a = True
     script = staticmethod(lambda kind, value: [])
 
     async def test_no_answer_is_journaled_as_an_error_without_a_card(self):

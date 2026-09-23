@@ -78,7 +78,19 @@ class FindCheckTests(unittest.TestCase):
         self.assertIsNotNone(cc.find_check(post))
 
     def test_other_bots_are_ignored(self):
-        self.assertIsNone(cc.find_check(message("🔥 Чек на Казино 1$ : https://t.me/redcubebetbot?start=CivUJDeEhFjZ")))
+        self.assertIsNone(cc.find_check(message("🔥 Чек на Казино 1$ : https://t.me/somecasinobot?start=CivUJDeEhFjZ")))
+
+    def test_redcube_multicheck(self):
+        post = message("🧾 Мультичек на сумму 3$\n\nСумма одного чека: 0.3$\nКол-во активаций: 10",
+                       buttons=[[button("Получить 0.3$", "https://t.me/redcubebetbot?start=CivUJDeEhFjZ")]],
+                       via_bot_id=777000)
+        info = cc.find_check(post)
+        self.assertEqual([(link.bot, link.code) for link in info.links], [("redcube", "CivUJDeEhFjZ")])
+        self.assertEqual(info.amount, "0.3 $")
+        self.assertFalse(info.dead)
+        # A player's profile link is not a check.
+        self.assertIsNone(cc.find_check(message("Чек игрока t.me/redcubebetbot?start=U1741523718")))
+        self.assertEqual(cc.amount_totals(["0.3 $", "0.3 $"]), {"$": "0.6"})
 
     def test_same_code_twice_is_one_link(self):
         post = message("Чек https://t.me/xrocket?start=mc_Same1",

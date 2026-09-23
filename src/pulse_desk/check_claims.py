@@ -1,6 +1,6 @@
 """Wallet-bot checks posted in chats: what is one, whose is it (pure rules).
 
-A check from xRocket or CryptoBot is a deep link — ``t.me/<bot>?start=<code>`` —
+A check from xRocket, CryptoBot or the RedCube casino is a deep link — ``t.me/<bot>?start=<code>`` —
 usually on a URL button «Получить 0.1 USDT» under a message sent through the
 bot's inline mode. Pressing that button is ``messages.startBot`` with the code,
 which is all :mod:`check_claimer` does. Everything here decides *whether* to:
@@ -20,10 +20,12 @@ from typing import Any, Iterable, Optional
 
 # Username in the link (lowercase) -> canonical bot key. CryptoBot answers at
 # both @send (its inline name, the one on checks) and @CryptoBot.
-BOT_ALIASES = {"xrocket": "xrocket", "send": "send", "cryptobot": "send"}
+BOT_ALIASES = {"xrocket": "xrocket", "send": "send", "cryptobot": "send",
+               # RedCube posts through inline @redcube; its check links all go to @redcubebetbot.
+               "redcube": "redcube", "redcubebetbot": "redcube"}
 # Where startBot goes, per canonical key.
-BOT_USERNAMES = {"xrocket": "xrocket", "send": "send"}
-BOT_LABELS = {"xrocket": "🚀 xRocket", "send": "👛 CryptoBot"}
+BOT_USERNAMES = {"xrocket": "xrocket", "send": "send", "redcube": "redcubebetbot"}
+BOT_LABELS = {"xrocket": "🚀 xRocket", "send": "👛 CryptoBot", "redcube": "🎲 RedCube"}
 
 # Past this a general check is history: they go in seconds, and what still
 # arrives later is the morning catch-up or xRocket editing an old post's
@@ -42,7 +44,10 @@ LINK_RE = re.compile(
     re.IGNORECASE,
 )
 # Any link to a wallet bot — to notice a post whose check link LINK_RE cannot read.
-WALLET_LINK_RE = re.compile(r"(?:t|telegram)\.(?:me|dog)/(?:xrocket|send|cryptobot)(?![A-Za-z0-9_])", re.IGNORECASE)
+WALLET_LINK_RE = re.compile(r"(?:t|telegram)\.(?:me|dog)/(?:xrocket|send|cryptobot|redcube(?:betbot)?)(?![A-Za-z0-9_])",
+                            re.IGNORECASE)
+# «0.3$» / «0.3 💲» — RedCube counts in dollars and writes no ticker.
+DOLLAR_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\$|💲)")
 _ANY_URL_RE = re.compile(r"(?:https?://|(?:t|telegram)\.(?:me|dog)/)\S+", re.IGNORECASE)
 # The noun, verb-safe: «чек», «чеки», «мультичек», not «чекать» / «человечек».
 # xRocket calls a personal check a «перевод» («Этот перевод уже активирован»).
@@ -104,7 +109,7 @@ NEEDS_HAND = {"captcha", "password", "unknown"}
 
 # Joining for a check: at most this many channels, and never a bot.
 MAX_JOINS = 3
-_WALLET_USERNAMES = {"xrocket", "send", "cryptobot", "wallet"}
+_WALLET_USERNAMES = {"xrocket", "send", "cryptobot", "wallet", "redcube", "redcubebetbot"}
 JOIN_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.(?:me|dog)/"
     r"(?:(?:joinchat/|\+)([A-Za-z0-9_-]{6,})|([A-Za-z][A-Za-z0-9_]{3,31}))/?(?:[?#].*)?$",
@@ -205,11 +210,14 @@ def message_links(message: Any) -> list[tuple[str, str]]:
 
 
 def code_is_check(bot: str, code: str) -> bool:
-    """CryptoBot checks are ``CQ…`` (its invoices ``IV…``); xRocket invoices ``inv…``."""
+    """CryptoBot checks are ``CQ…`` (its invoices ``IV…``); xRocket invoices ``inv…``;
+    RedCube checks ``C`` + 11 (``U<id>`` is a player's profile link)."""
     if bot == "send":
         return code.startswith("CQ")
     if bot == "xrocket":
         return not code.lower().startswith("inv")
+    if bot == "redcube":
+        return re.fullmatch(r"C[A-Za-z0-9]{8,}", code) is not None
     return False
 
 
@@ -220,6 +228,9 @@ def parse_amount(sources: Iterable[str]) -> str:
         match = AMOUNT_RE.search(clean)
         if match:
             return f"{match.group(1).replace(',', '.')} {match.group(2)}"
+        match = DOLLAR_RE.search(clean)
+        if match:
+            return f"{match.group(1).replace(',', '.')} $"
     return ""
 
 

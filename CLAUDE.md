@@ -99,7 +99,7 @@ per giveaway plus a polling loop. Nothing parses or writes `deadline_*`/`is_chec
 any more; the columns survive in the schema (no migration) but stay NULL/0.
 
 Checks came back on 2026-09-23 as a different feature: **auto-claim** of xRocket /
-CryptoBot checks (`check_claims.py` + `check_claimer.py`, ⚙️ → 🧾 Чеки). It does not
+CryptoBot / RedCube checks (`check_claims.py` + `check_claimer.py`, ⚙️ → 🧾 Чеки). It does not
 touch `pings.is_check`; its journal is the `check_claims` table. Two rules are the
 owner's and are not up for "optimisation": a check posted by one of our accounts (or
 the owner) is **never** pressed, and a captcha is **never** solved by code — it is
@@ -289,10 +289,12 @@ src/pulse_desk/
                       several times a minute
   check_claims.py   — Wallet-bot checks (pure): a check is `t.me/<bot>?start=<code>`
                       (URL button, hidden link or text) for `xrocket` / `send` /
-                      `CryptoBot` **and** a post that reads like one («чек» in the
+                      `CryptoBot` / `redcubebetbot` (casino, inline @redcube) **and** a post that reads like one («чек» in the
                       text or a «Получить/Receive» button) — referral links in
                       chatter do not count; CryptoBot codes only `CQ…` (invoices are
-                      `IV…`), xRocket anything but `inv…`. Amount, addressee
+                      `IV…`), xRocket anything but `inv…` (its invoices; a personal
+                      check it calls «перевод»), RedCube `C` + 11 (`U<id>` is a
+                      profile link). Amounts with a ticker or in `$`. Amount, addressee
                       («для @X»), a password written in the post, the own-sender
                       rule, reply classification (claimed / gone / not_for_you /
                       own / premium / captcha / password / subscribe / unknown —

@@ -28,6 +28,9 @@ BOT_LABELS = {"xrocket": "🚀 xRocket", "send": "👛 CryptoBot"}
 # Past this a check is history: the morning catch-up replays posts from the
 # night, and every one of those is long claimed.
 MAX_AGE_SECONDS = 30 * 60
+# A personal check («для @наш») waits for its addressee — nobody else can take
+# it — so the one sent at 3 a.m. while the PC was off is still worth a press.
+PERSONAL_MAX_AGE_SECONDS = 7 * 24 * 3600
 
 MODES = ("claim", "watch", "off")
 DEFAULT_MODE = "claim"
@@ -278,13 +281,14 @@ def normalize_config(raw: Any) -> dict[str, Any]:
     return {"mode": mode, "disabled": disabled}
 
 
-def is_fresh(posted: Optional[datetime], now: Optional[datetime] = None) -> bool:
+def is_fresh(posted: Optional[datetime], now: Optional[datetime] = None, *, personal: bool = False) -> bool:
     if posted is None:
         return True
     now = now or datetime.now(timezone.utc)
     if posted.tzinfo is None:
         posted = posted.replace(tzinfo=timezone.utc)
-    return (now - posted).total_seconds() <= MAX_AGE_SECONDS
+    limit = PERSONAL_MAX_AGE_SECONDS if personal else MAX_AGE_SECONDS
+    return (now - posted).total_seconds() <= limit
 
 
 def amount_totals(amounts: Iterable[str]) -> dict[str, str]:

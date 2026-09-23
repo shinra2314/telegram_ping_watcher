@@ -98,6 +98,7 @@ from .channels import (
 from .check_claims import (
     get_check_claim_stats,
     get_recent_check_claims,
+    has_check_claim,
     record_check_claim,
     update_check_claim,
 )

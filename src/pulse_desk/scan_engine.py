@@ -96,6 +96,7 @@ async def catch_up_group_mentions(
     from database import get_ping_by_message_ref
     from telethon.tl.types import InputMessagesFilterMyMentions
 
+    from . import check_claimer
     from .global_search import is_notifiable
 
     found = 0
@@ -116,6 +117,10 @@ async def catch_up_group_mentions(
             ):
                 if state.scan_cancel_event.is_set():
                     break
+                # Before the stored-ping skip: a personal check for this account
+                # sent while the PC was off is only ever seen here.
+                check_claimer.on_message(client, session_name, state.accounts_state.get(session_name) or {},
+                                         message, live=False)
                 if await get_ping_by_message_ref(getattr(message, "chat_id", None), getattr(message, "id", None)):
                     continue
                 ping_id = await process_ping_message(

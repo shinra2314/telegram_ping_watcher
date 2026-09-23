@@ -163,6 +163,8 @@ class ConfigAndMiscTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         self.assertTrue(cc.is_fresh(now - timedelta(minutes=5), now))
         self.assertFalse(cc.is_fresh(now - timedelta(hours=2), now))
+        self.assertTrue(cc.is_fresh(now - timedelta(hours=2), now, personal=True))
+        self.assertFalse(cc.is_fresh(now - timedelta(days=8), now, personal=True))
         self.assertTrue(cc.is_fresh(None, now))
 
     def test_totals(self):

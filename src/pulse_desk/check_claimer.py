@@ -122,15 +122,19 @@ def _from_wallet_bot(message: Any) -> bool:
 
 
 # ---- entry point ----------------------------------------------------------
-def on_message(client: Any, session: str, account: dict, message: Any) -> None:
-    """Look at one live message for one account. Never raises, never awaits."""
+def on_message(client: Any, session: str, account: dict, message: Any, *, live: bool = True) -> None:
+    """Look at one message for one account. Never raises, never awaits.
+
+    ``live=False`` is the morning catch-up of unread mentions: what it replays
+    may have been pressed before a restart, so those claims ask the journal first.
+    """
     try:
-        _dispatch(client, session, account, message)
+        _dispatch(client, session, account, message, live)
     except Exception:
         logger.exception("Check claimer failed on message %s", getattr(message, "id", None))
 
 
-def _dispatch(client: Any, session: str, account: dict, message: Any) -> None:
+def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool = True) -> None:
     cfg = _config()
     if cfg["mode"] == "off":
         return
@@ -146,7 +150,8 @@ def _dispatch(client: Any, session: str, account: dict, message: Any) -> None:
             if link.key not in state.check_chat_codes:
                 _first(state.own_check_codes, link.key)
         return
-    if not cc.is_fresh(getattr(message, "date", None)):
+    ours = bool(info.addressee) and session_for_username(info.addressee) is not None
+    if not cc.is_fresh(getattr(message, "date", None), personal=ours):
         return
     sender_id = getattr(message, "sender_id", None)
     out = bool(getattr(message, "out", False))
@@ -167,9 +172,9 @@ def _dispatch(client: Any, session: str, account: dict, message: Any) -> None:
         target_client = client if target == session else client_for(target) if target else None
         if target_client is None:
             return
-        _launch(target_client, target, state.accounts_state.get(target) or account, message, info, cfg)
+        _launch(target_client, target, state.accounts_state.get(target) or account, message, info, cfg, live)
         return
-    _launch(client, session, account, message, info, cfg)
+    _launch(client, session, account, message, info, cfg, live)
 
 
 def _note_unreadable(message: Any) -> None:
@@ -186,7 +191,8 @@ def _note_unreadable(message: Any) -> None:
                     getattr(message, "chat_id", None), getattr(message, "id", None), urls[:3])
 
 
-def _launch(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo, cfg: dict) -> None:
+def _launch(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo, cfg: dict,
+            live: bool = True) -> None:
     if session in cfg["disabled"]:
         return
     for link in info.links:
@@ -196,13 +202,15 @@ def _launch(client: Any, session: str, account: dict, message: Any, info: cc.Che
             continue
         if _first(state.check_seen, f"{session}|{link.key}"):
             start_background_task(f"check-claim:{session}:{link.key}",
-                                  claim(client, session, account, message, info, link))
+                                  claim(client, session, account, message, info, link, live=live))
 
 
 # ---- the claim --------------------------------------------------------------
 async def claim(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo,
-                link: cc.CheckLink, *, announce: bool = True) -> str:
+                link: cc.CheckLink, *, announce: bool = True, live: bool = True) -> str:
     """Press one check from one account; returns the outcome."""
+    if not live and await _tried_before(session, link):
+        return "skipped"
     outcome, reply, action, bot = "error", "", None, None
     try:
         bot = await client.get_input_entity(cc.BOT_USERNAMES[link.bot])
@@ -233,6 +241,15 @@ async def _start(client: Any, bot: Any, code: str) -> list:
 
     result = await client(StartBotRequest(bot=bot, peer=bot, start_param=code))
     return await _await_replies(client, bot, _sent_id(result), code)
+
+
+async def _tried_before(session: str, link: cc.CheckLink) -> bool:
+    from database import has_check_claim
+
+    try:
+        return await has_check_claim(session, link.bot, link.code)
+    except Exception:
+        return False
 
 
 def _sent_id(result: Any) -> Optional[int]:

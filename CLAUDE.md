@@ -303,7 +303,11 @@ src/pulse_desk/
                       live handlers *before* `remember_message` (that dedupe lets one
                       account act for all; here each account presses for itself) and
                       before the ping pipeline, so a claim waits on nothing. Only
-                      live posts ≤ 30 min old. A general check is pressed by each
+                      posts ≤ 30 min old — except a personal check for one of ours,
+                      which nobody else can take: 7 days, and the group
+                      unread-mention catch-up also hands its messages over
+                      (`live=False`: such a claim first asks the journal whether this
+                      account tried the code before a restart). A general check is pressed by each
                       account that received it; a personal one only by the addressee
                       (matched by live `username`), whichever account received it.
                       **Own checks are never pressed:** sender is one of our accounts

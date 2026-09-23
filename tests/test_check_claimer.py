@@ -207,6 +207,28 @@ class WhoPressesTests(ClaimerCase):
         await self.settle()
         self.assertEqual(self.a.starts, [])
 
+    async def test_personal_check_for_us_waits_for_days(self):
+        # Sent at night while the PC was off: nobody else can take it.
+        self.see(self.b, post("🚀 Чек на 0.1 USDT для @MCshinra", "mc_Night", age=timedelta(hours=9)))
+        await self.settle()
+        self.assertEqual(self.a.starts, ["mc_Night"])
+
+    async def test_catch_up_presses_a_personal_check_nobody_tried(self):
+        check_claimer.on_message(self.a, "w3v8f0rm", state.accounts_state["w3v8f0rm"],
+                                 post("🚀 Чек на 0.1 USDT для @MCshinra", "mc_Cu1", age=timedelta(hours=3)),
+                                 live=False)
+        await self.settle()
+        self.assertEqual(self.a.starts, ["mc_Cu1"])
+
+    async def test_catch_up_does_not_repeat_a_code_tried_before_a_restart(self):
+        await database.record_check_claim({"bot": "xrocket", "code": "mc_Cu2", "session": "w3v8f0rm",
+                                           "outcome": "claimed"})
+        check_claimer.on_message(self.a, "w3v8f0rm", state.accounts_state["w3v8f0rm"],
+                                 post("🚀 Чек на 0.1 USDT для @MCshinra", "mc_Cu2", age=timedelta(hours=3)),
+                                 live=False)
+        await self.settle()
+        self.assertEqual(self.a.starts, [])
+
     async def test_disabled_account_does_not_press(self):
         state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
         message = post("🚀 Чек на 5 USDT")
@@ -463,6 +485,11 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
         stats = await database.get_check_claim_stats()
         self.assertEqual(stats["outcomes"], {"claimed": 2, "gone": 1})
         self.assertEqual(cc.amount_totals(stats["claimed"]), {"USDT": "0.3"})
+        # A later «уже активирован» for a code this account already won keeps the win.
+        await database.record_check_claim({**row, "outcome": "gone", "reply": "уже активирован"})
+        self.assertEqual((await database.get_check_claim_stats())["outcomes"], {"claimed": 2, "gone": 1})
+        self.assertTrue(await database.has_check_claim("w3v8f0rm", "xrocket", "mc_1"))
+        self.assertFalse(await database.has_check_claim("w3v8f0rm", "xrocket", "mc_404"))
         await database.update_check_claim(first, "gone", "late")
         rows = await database.get_recent_check_claims(10)
         self.assertEqual(len(rows), 3)

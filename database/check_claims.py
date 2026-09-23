@@ -30,8 +30,8 @@ async def record_check_claim(row: dict[str, Any]) -> int:
             VALUES (?, ?, {', '.join('?' * len(_FIELDS))})
             ON CONFLICT(session, bot, code) DO UPDATE SET
                 updated_at = excluded.updated_at,
-                outcome = excluded.outcome,
-                reply = excluded.reply,
+                outcome = CASE WHEN check_claims.outcome = 'claimed' THEN 'claimed' ELSE excluded.outcome END,
+                reply = CASE WHEN check_claims.outcome = 'claimed' THEN check_claims.reply ELSE excluded.reply END,
                 amount = CASE WHEN excluded.amount != '' THEN excluded.amount ELSE check_claims.amount END
             """,
             (now, now, *(values[name] for name in _FIELDS)),
@@ -43,6 +43,16 @@ async def record_check_claim(row: dict[str, Any]) -> int:
         found = await cursor.fetchone()
         await db.commit()
     return int(found[0]) if found else 0
+
+
+async def has_check_claim(session: str, bot: str, code: str) -> bool:
+    """Whether this account already tried this code (the catch-up path asks; the live one does not)."""
+    async with _connect() as db:
+        found = await (await db.execute(
+            "SELECT 1 FROM check_claims WHERE session = ? AND bot = ? AND code = ? LIMIT 1",
+            (str(session or ""), bot, code),
+        )).fetchone()
+    return found is not None
 
 
 async def update_check_claim(claim_id: int, outcome: str, reply: Optional[str] = None) -> None:

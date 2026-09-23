@@ -29,7 +29,7 @@ if str(SRC_DIR) not in sys.path:
 from database import init_db, interrupt_stale_scan_runs
 
 from pulse_desk import APP_VERSION
-from pulse_desk import ignored_chats
+from pulse_desk import check_claimer, ignored_chats
 from pulse_desk import watch_settings as ws
 from pulse_desk.app_ctx import logger, settings, state
 from pulse_desk.bot_service import bot_start_needs_retry, init_bot, retry_bot_start
@@ -78,6 +78,7 @@ async def lifespan(app: FastAPI):
     ws.apply_keyword_settings(await ws.load_keyword_settings())
     ws.apply_runtime_settings(await ws.load_runtime_settings())
     ignored_chats.apply(await ignored_chats.load())
+    await check_claimer.load()
     try:
         from pulse_desk.obsidian_debts import apply_prefs as _apply_obsidian_prefs, load_prefs as _load_obsidian_prefs
 

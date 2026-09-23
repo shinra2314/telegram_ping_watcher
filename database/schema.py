@@ -572,6 +572,32 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_pings_notify_owed ON pings(detected_at) "
             "WHERE notified_at IS NULL OR (is_win = 1 AND win_notified_at IS NULL)"
         )
+
+        # --- schema 25: wallet-bot check auto-claim (check_claimer.py) ---------
+        # One row per (account, bot, code): a relay step updates it in place. The
+        # owner's own checks are journaled once per code with an empty session.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS check_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                bot TEXT NOT NULL,
+                code TEXT NOT NULL,
+                session TEXT NOT NULL DEFAULT '',
+                account TEXT NOT NULL DEFAULT '',
+                chat_id INTEGER,
+                chat TEXT NOT NULL DEFAULT '',
+                message_id INTEGER,
+                link TEXT NOT NULL DEFAULT '',
+                amount TEXT NOT NULL DEFAULT '',
+                outcome TEXT NOT NULL,
+                reply TEXT NOT NULL DEFAULT '',
+                UNIQUE(session, bot, code)
+            )
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_check_claims_created ON check_claims(created_at)")
         await db.commit()
 
 

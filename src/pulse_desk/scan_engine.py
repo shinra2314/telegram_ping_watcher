@@ -42,14 +42,21 @@ def channel_checkpoint_key(username: str, chat_id: Any) -> str:
 
 async def list_scan_dialogs(client: TelegramClient) -> tuple[list[Any], list[Any]]:
     """(broadcast channels, groups holding unread mentions) from one dialog listing."""
+    from . import check_claimer
+
     channels: list[Any] = []
     groups: list[Any] = []
     async for dialog in client.iter_dialogs():
-        kind = chat_type_from_entity(getattr(dialog, "entity", None))
+        entity = getattr(dialog, "entity", None)
+        # Free with the listing: where our accounts are admins, a post in the
+        # chat's own name may be ours (check_claimer never presses those).
+        check_claimer.note_dialog(entity)
+        kind = chat_type_from_entity(entity)
         if kind == "channel":
             channels.append(dialog)
         elif kind == "group" and int(getattr(dialog, "unread_mentions_count", 0) or 0) > 0:
             groups.append(dialog)
+    await check_claimer.persist_admin_chats()
     return channels, groups
 
 

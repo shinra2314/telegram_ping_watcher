@@ -98,6 +98,13 @@ owner works from the bot only, and both features cost a Telegram `GetFullChannel
 per giveaway plus a polling loop. Nothing parses or writes `deadline_*`/`is_check`
 any more; the columns survive in the schema (no migration) but stay NULL/0.
 
+Checks came back on 2026-09-23 as a different feature: **auto-claim** of xRocket /
+CryptoBot checks (`check_claims.py` + `check_claimer.py`, ⚙️ → 🧾 Чеки). It does not
+touch `pings.is_check`; its journal is the `check_claims` table. Two rules are the
+owner's and are not up for "optimisation": a check posted by one of our accounts (or
+the owner) is **never** pressed, and a captcha is **never** solved by code — it is
+relayed to the owner, whose tap the script presses in the wallet bot.
+
 Giveaway auto-join was removed the same way (2026-07): no `AUTO_JOIN_GIVEAWAYS`
 setting, no `auto_joined` writes, no badge/filter in the UI. The `auto_joined`
 column stays in the schema, always 0. Joining a giveaway is a manual act.
@@ -280,6 +287,46 @@ src/pulse_desk/
                       edit date or after 30 min, failures 5 min) — every sweep on
                       every account used to refetch and re-log the same post
                       several times a minute
+  check_claims.py   — Wallet-bot checks (pure): a check is `t.me/<bot>?start=<code>`
+                      (URL button, hidden link or text) for `xrocket` / `send` /
+                      `CryptoBot` **and** a post that reads like one («чек» in the
+                      text or a «Получить/Receive» button) — referral links in
+                      chatter do not count; CryptoBot codes only `CQ…` (invoices are
+                      `IV…`), xRocket anything but `inv…`. Amount, addressee
+                      («для @X»), a password written in the post, the own-sender
+                      rule, reply classification (claimed / gone / not_for_you /
+                      own / premium / captcha / password / subscribe / unknown —
+                      order matters: «уже активирован» is `gone` before
+                      «активирован» can read as a win), config (`check_claim` key:
+                      `mode` claim|watch|off, `disabled` sessions; absent = claim, all)
+  check_claimer.py  — Presses checks (I/O). `on_message` runs in **every account's**
+                      live handlers *before* `remember_message` (that dedupe lets one
+                      account act for all; here each account presses for itself) and
+                      before the ping pipeline, so a claim waits on nothing. Only
+                      live posts ≤ 30 min old. A general check is pressed by each
+                      account that received it; a personal one only by the addressee
+                      (matched by live `username`), whichever account received it.
+                      **Own checks are never pressed:** sender is one of our accounts
+                      or `ADMIN_ID`; `message.out` (posted as a channel / anonymous
+                      admin — remembered for the others); sender is a chat one of our
+                      accounts administers (`note_dialog` harvests it from the sweep's
+                      dialog list, persisted in `check_claim_admin_chats`); or a code
+                      the wallet bot showed one of our accounts in its own chat
+                      before any chat carried it. Pressing = `messages.startBot`
+                      (the «Получить» button), then the bot's chat is **polled** for
+                      the answer (Conversation API races the dispatcher). One
+                      conversation per (account, bot) at a time (`_lock_for`): four
+                      personal checks in five seconds interleaved replies otherwise.
+                      `subscribe` → joins ≤ 3 linked channels and presses the bot's
+                      «проверить»; `password` → types the one written in the post;
+                      `captcha` / `unknown` / password nobody wrote → **relay card**
+                      to the owner: the bot's text + picture, its callback buttons
+                      mirrored as `ck:b:<token>:<r>:<c>`, «✍️ Ответить» (typed text
+                      sent from the account), «🔁 Повторить», «▶️ Следующий аккаунт»
+                      (one card per check; other accounts wait in its queue). Relays
+                      live 30 min (`bot-janitor`). A post with a wallet-bot button
+                      that does not read as a check is logged once (a new link
+                      format would otherwise go silent)
   miniapp_auth.py   — Telegram Mini App initData validation (pure): drop `hash`,
                       join the rest as sorted `k=v` lines, HMAC-SHA256 under
                       HMAC(b"WebAppData", bot_token), reject anything older than
@@ -379,7 +426,7 @@ src/pulse_desk/
                       (data, segments, role, grants)
   bot/sections/     — one module per area (feed, giveaways, home, analytics,
                       market, converter, salary, keys, members, settings, prefs,
-                      scan, system, broadcast, roulette, legacy). Each exposes
+                      scan, system, broadcast, roulette, checks, legacy). Each exposes
                       `register(router)` plus its own renderers, so the slash
                       command and the button can never render different screens.
                       `legacy.py` answers the underscore callbacks still sitting
@@ -661,7 +708,8 @@ database/                  — SQLite layer (aiosqlite), split per area.
   `from database import save_ping` keep working. DB_PATH stays a mutable
   attribute on the package (tests monkeypatch it); submodules resolve it
   through _core.db_path().
-  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 24 —
+  _core.py    — _connect(), shared helpers, SCHEMA_VERSION (current: 25 —
+                check_claims, the check auto-claim journal; 24 —
                 pings.notified_at / win_notified_at, the owner-card outbox;
                 23 — bot_ephemeral_messages, bot_access_keys.max_uses,
                 pings.edited_at / win_detected_at / duplicate_of)
@@ -676,6 +724,10 @@ database/                  — SQLite layer (aiosqlite), split per area.
   bot_access.py — bot keys/members     stats.py / maintenance.py — stats, cleanup
   access_windows.py — scheduled-access windows (access_schedule) + audit
   ephemeral.py — auto-clean deletions queue   dedupe.py — duplicate_of links
+  check_claims.py — one row per (session, bot, code) check attempt; written
+                after the press, never read before it (a busy SQLite must not
+                slow a claim); own checks once per code with an empty session;
+                trimmed at 90 days by `cleanup_unbounded_tables`
   bot_access.py also: max_uses (one-time invites, `/invite`, 🎟 in the key panel;
   a person already in is not counted against the limit)
   WAL mode + FK enabled + 5 s busy timeout everywhere.
@@ -728,7 +780,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `maintenance` | Stamps `last_alive_at` every 5 min (the next start compares against it to tell a restart from the nightly shutdown — `loops.detect_downtime`), and once an hour (first pass 10 min after start) runs `run_maintenance_once`: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`/`scan_checkpoints`; `settings_history` capped **per key** as well as by age; `scan_checkpoints` drops channels unseen for 90 days **and** rows of sessions that no longer exist or usernames no longer tracked), the size cap (evicts oldest non-favorite/non-win pings to `pulse_desk_archive.db`), archive-record pruning, daily pruning of broadcast/pending-send/outbox bookkeeping (was startup-only), **VACUUM when ≥20 % and ≥16 MB of the file is free pages** (`housekeeping.vacuum_due`; the old in-memory "every 168 h since start" never fired on a PC that reboots nightly and left 114 MB of free pages in a 136 MB file), a daily backup + rotation, the `housekeeping.FILE_RULES` file prune (render cache, stale login QR files) and a once-per-episode low-disk alert. State in the `maintenance` settings key (`audit=False`), last result on `state.maintenance_stats` (→ `/api/health`, 🩺 Диагностика, 💾 Бэкапы, where «🧹 Уборка сейчас» runs a pass) | `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS`, `VACUUM_INTERVAL_HOURS` (fallback), `DISK_FREE_ALERT_MB`, `BACKUP_*` |
 | `daily-digest` | Ticks every 30 s and sends once per slot (`digest.digest_due`; handled slot date in the `digest_state` key, `audit=False`), so a 10:00 slot the PC was off for still goes out when it boots — within `DIGEST_CATCHUP_HOURS` (4 h). Sends the daily digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 10:00) as a two-image album: a ping treemap (24 h, wins/giveaways/mentions per chat, today-vs-yesterday counter) and a crypto heatmap (all 8 tracked coins, area by market cap, day delta from our own `market_history` snapshots, leader/laggard, UAH line). The caption carries only the win links; if Pillow can't render, the old text digest goes out instead | — |
 | `roulette-reminder` | Daily nudge to spin the yobo-bot roulette from every account. The alarm time *is* the previous day's last-click time, reported back by the owner (button, `/roulette 21:47`, or a bare `21:47` in the bot chat). Ticks every 30 s instead of sleeping to the target, so a time reported mid-day applies at once and a slot missed while the PC was off still fires once on the next tick | settings key `roulette` |
-| `bot-janitor` | Every 60 s: deletes unanswered «✍️» prompts (5 min TTL), closes abandoned Mini App logins (`account_login.sweep_expired` — each held a connected Telethon client), forgets stale feed queries / debt marks / undo snapshots, deletes due auto-clean notifications (`bot_ephemeral_messages`) and ends an expired vacation | — |
+| `bot-janitor` | Every 60 s: deletes unanswered «✍️» prompts (5 min TTL), closes abandoned Mini App logins (`account_login.sweep_expired` — each held a connected Telethon client), forgets stale feed queries / debt marks / undo snapshots and check relay cards (30 min), deletes due auto-clean notifications (`bot_ephemeral_messages`) and ends an expired vacation | — |
 | `account-health` | Every 5 min (first after 3 min): `account_health.account_problem` per account, pages the owner once per problem kind and once on recovery (reported kinds persisted in `account_alerts`, so the morning restart does not re-page); hourly `get_me` probe per online account catches revoked/banned sessions | — |
 | `weekly-report` | Ticks every 60 s; Monday 10:15 sends the previous ISO week, the 1st sends the previous month (catch-up 72 h counted from the period's own slot, so a PC off for the whole Monday / 1st still gets it; sent periods in `report_state`) | — |
 | `bot-connection` | Reconnects the bot client after Telethon gives up, so incoming updates never stall (started only when the bot is configured) | — |
@@ -746,6 +798,8 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 
 ### Data flow for a "ping"
 
+0. Live handlers first hand the message to `check_claimer.on_message` (per account, no
+   await) — a wallet-bot check is pressed before anything below runs
 1. Live `NewMessage`/`MessageEdited` handlers, the `auto-scan` sweep (channels), the group
    unread-mention catch-up and the global-search pass all call `process_ping_message`
 2. `telegram_ping_watcher.py` parses messages, matches tracked usernames + win/giveaway keywords

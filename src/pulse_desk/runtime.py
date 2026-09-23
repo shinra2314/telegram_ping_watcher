@@ -99,6 +99,15 @@ class AppState:
     # Снимок держится в памяти, чтобы карточка не разбирала .xlsx на каждый клик.
     salary_book: Any = None
     salary_meta: dict = field(default_factory=dict)
+    # Wallet-bot check auto-claim (check_claimer.py). The config mirrors the
+    # `check_claim` settings key; everything else is process-local bookkeeping.
+    check_claim_cfg: dict = field(default_factory=dict)
+    check_bot_ids: dict[int, str] = field(default_factory=dict)  # wallet bot user id -> "xrocket" / "send"
+    check_seen: OrderedDict[str, None] = field(default_factory=OrderedDict)  # attempts / announcements made
+    check_chat_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes met in chats
+    own_check_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes our accounts made
+    own_admin_chat_ids: set[int] = field(default_factory=set)  # chats any of our accounts administers
+    check_relays: dict[str, dict] = field(default_factory=dict)  # token -> captcha relay card
     ping_usernames: list = field(default_factory=list)
     ignored_chat_ids: set = field(default_factory=set)  # ignored_chats.py
     ping_regex: object = None  # compiled regex or None

@@ -165,6 +165,7 @@ async def cleanup_unbounded_tables(
         "settings_history": 0,
         "access_audit": 0,
         "giveaway_actions": 0,
+        "check_claims": 0,
         "scan_checkpoints": 0,
     }
     async with _connect() as db:
@@ -186,6 +187,8 @@ async def cleanup_unbounded_tables(
             stats["access_audit"] = cur.rowcount or 0
             cur = await db.execute("DELETE FROM giveaway_actions WHERE created_at < ?", (cutoff,))
             stats["giveaway_actions"] = cur.rowcount or 0
+            cur = await db.execute("DELETE FROM check_claims WHERE created_at < ?", (cutoff,))
+            stats["check_claims"] = cur.rowcount or 0
         if history_per_key and history_per_key > 0:
             cur = await db.execute(
                 """

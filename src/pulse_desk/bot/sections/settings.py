@@ -55,7 +55,7 @@ def root_menu() -> tuple[str, list[list[Button]]]:
     buttons = [
         [Button.inline("👁 Юзернеймы", b"st_u"), Button.inline("🔑 Ключевые слова", b"st_k")],
         [Button.inline("🔔 Уведомления", b"st_n"), Button.inline("🎛 Работа", b"st_r")],
-        [Button.inline("🧩 Правила", b"st_l")],
+        [Button.inline("🧩 Правила", b"st_l"), Button.inline("🧾 Чеки", b"ck")],
         [Button.inline("⬅️ Меню", b"menu_main")],
     ]
     return text, buttons

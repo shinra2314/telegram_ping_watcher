@@ -95,6 +95,12 @@ from .channels import (
     recalculate_source_scores,
     upsert_channel_profile,
 )
+from .check_claims import (
+    get_check_claim_stats,
+    get_recent_check_claims,
+    record_check_claim,
+    update_check_claim,
+)
 from .checkpoints import (
     get_checkpoint,
     get_checkpoints,

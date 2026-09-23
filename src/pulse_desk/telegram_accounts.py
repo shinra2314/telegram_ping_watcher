@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import HTTPException
 from telethon import TelegramClient, events
 
+from . import check_claimer
 from .app_ctx import (
     API_HASH,
     API_ID,
@@ -267,6 +268,8 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
             account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
                 return
+            # Before the shared dedupe: every account presses a check for itself.
+            check_claimer.on_message(client, clean_name, account, event.message)
             if not state.remember_message(live_message_key(event.message, clean_name)):
                 return
             await process_ping_message(client, event.message, account_label=account.get("display", clean_name),
@@ -277,6 +280,7 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
             account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
                 return
+            check_claimer.on_message(client, clean_name, account, event.message)
             edit_date = getattr(event.message, "edit_date", None) or getattr(event.message, "date", None) or ""
             if not state.remember_message("edit:" + live_message_key(event.message, clean_name, edit_date)):
                 return
@@ -299,6 +303,7 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
 
         state.clients.append(client)
         start_background_task(f"telegram-watch:{clean_name}", monitor_client_disconnect(client, clean_name))
+        start_background_task(f"check-warmup:{clean_name}", check_claimer.warm_up(client, clean_name))
         logger.info("Account connected: %s", account.get("display", clean_name))
     except FloodWaitError as exc:
         # Capped like every other flood wait: a raw FLOOD_WAIT_86400 here parked

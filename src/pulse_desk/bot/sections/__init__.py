@@ -8,13 +8,13 @@ router's exact-beats-family rule makes even that irrelevant for dispatch.
 from __future__ import annotations
 
 from . import (
-    accounts, analytics, backups, broadcast, converter, dashboard, debts, diagnostics, feed,
+    accounts, analytics, backups, broadcast, checks, converter, dashboard, debts, diagnostics, feed,
     giveaways, home, ignored, keys, legacy, market, members, obsidian, prefs, report, roulette, salary, scan,
     services, settings, system, undo, vacation,
 )
 
 SECTIONS = (
-    accounts, analytics, backups, broadcast, converter, dashboard, debts, diagnostics, feed,
+    accounts, analytics, backups, broadcast, checks, converter, dashboard, debts, diagnostics, feed,
     giveaways, home, ignored, keys, legacy, market, members, obsidian, prefs, report, roulette, salary, scan,
     services, settings, system, undo, vacation,
 )

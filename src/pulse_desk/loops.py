@@ -1075,6 +1075,9 @@ async def run_janitor_once(now: Optional[datetime] = None) -> dict[str, int]:
     from .bot.undo import sweep as sweep_undo
 
     sweep_undo(now)
+    from .check_claimer import sweep_relays
+
+    sweep_relays(now)
     try:
         await check_expiry(now)
     except Exception:

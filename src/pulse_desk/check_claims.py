@@ -45,8 +45,9 @@ LINK_RE = re.compile(
 WALLET_LINK_RE = re.compile(r"(?:t|telegram)\.(?:me|dog)/(?:xrocket|send|cryptobot)(?![A-Za-z0-9_])", re.IGNORECASE)
 _ANY_URL_RE = re.compile(r"(?:https?://|(?:t|telegram)\.(?:me|dog)/)\S+", re.IGNORECASE)
 # The noun, verb-safe: «чек», «чеки», «мультичек», not «чекать» / «человечек».
+# xRocket calls a personal check a «перевод» («Этот перевод уже активирован»).
 CHECK_WORD_RE = re.compile(
-    r"(?<![а-яёa-z])(?:мульти)?чек(?:и|а|у|ом|ов|ами)?(?![а-яёa-z])|cheque",
+    r"(?<![а-яёa-z])(?:(?:мульти)?чек|перевод)(?:и|а|у|ом|ов|ами|ы)?(?![а-яёa-z])|cheque",
     re.IGNORECASE,
 )
 CLAIM_LABEL_RE = re.compile(r"получить|забрать|активир|receive|claim|activate", re.IGNORECASE)
@@ -62,7 +63,7 @@ PASSWORD_RE = re.compile(
 # активирован» must be `gone` before «активирован» can read as a success, and a
 # success with an ad for the bot's channel must not read as «subscribe».
 _OUTCOME_RULES = [
-    ("own", r"сво(?:й|его|ему|ём)\s+(?:собственн\w+\s+)?чек|your\s+own\s+(?:check|cheque)"),
+    ("own", r"сво(?:й|его|ему|ём)\s+(?:собственн\w+\s+)?(?:чек|перевод)|your\s+own\s+(?:check|cheque|transfer)"),
     ("not_for_you", r"не\s+для\s+вас|предназначен\w*\s+(?:для\s+)?друг|другому\s+пользовател"
                     r"|not\s+(?:meant\s+|intended\s+)?for\s+you|for\s+another\s+user"),
     ("gone", r"уже\s+(?:был\w*\s+)?(?:активир|получ|использ|забра)|не\s+найден|недействител|истёк|истек"
@@ -113,7 +114,7 @@ JOIN_RE = re.compile(
 # in place («Чек активирован», «10/10»). Read only in a bot's own text — a
 # person's «прошлый чек закончился, вот новый» must not kill the new one.
 DEAD_POST_RE = re.compile(
-    r"(?:мульти)?чек\w*\s+(?:уже\s+)?(?:был\w*\s+)?(?:активирован|использован|получен|забран|закончил"
+    r"(?:(?:мульти)?чек|перевод)\w*\s+(?:уже\s+)?(?:был\w*\s+)?(?:активирован|использован|получен|забран|закончил"
     r"|истёк|истек|недействител|отозван|удал[её]н)"
     r"|активаций\s+(?:больше\s+)?нет|все\s+активации|активации\s+закончил"
     r"|(?:check|cheque)\s+(?:has\s+been\s+|was\s+|is\s+)?(?:activated|claimed|used|expired|deleted)"

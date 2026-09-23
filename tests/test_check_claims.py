@@ -59,6 +59,13 @@ class FindCheckTests(unittest.TestCase):
         info = cc.find_check(post)
         self.assertEqual([(link.bot, link.code) for link in info.links], [("send", "CQqwerty1")])
 
+    def test_xrocket_transfer_wording_is_a_check(self):
+        post = message("Перевод 0.5 USDT для @MCshinra",
+                       buttons=[[button("Открыть", "https://t.me/xrocket?start=t_AbCdEfGh1234567")]])
+        info = cc.find_check(post)
+        self.assertEqual(info.addressee, "mcshinra")
+        self.assertTrue(cc.post_is_dead("Перевод 0.5 USDT\nПеревод уже активирован"))
+
     def test_invoices_are_not_checks(self):
         self.assertIsNone(cc.find_check(message("Чек на оплату t.me/send?start=IVabcdef")))
         self.assertIsNone(cc.find_check(message("Чек t.me/xrocket?start=inv_abcdef")))
@@ -111,6 +118,8 @@ class ClassifyTests(unittest.TestCase):
         "Вы не можете получить этот чек": "unknown",
         "Чек успешно активирован": "claimed",
         "❌ Этот чек уже активирован": "gone",
+        "Этот перевод уже активирован.": "gone",  # xRocket's real wording, 23.09
+        "Нельзя активировать свой перевод": "own",
         "Чек не найден или уже использован": "gone",
         "This check has already been activated.": "gone",
         "Активаций больше нет": "gone",

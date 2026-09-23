@@ -302,9 +302,21 @@ src/pulse_desk/
                       stops an our-port agent whose parent is gone (scanned on a
                       fresh start or when the port is busy), and
                       `restart_app.ps1` uses `taskkill /T`.
-                      **Outages:** after boot tailscaled answers "unexpected
-                      state: NoState" for a few minutes; retries back off
-                      (10 → 120 s) and a repeated cause is logged once
+                      **NoState is not a warm-up.** Tailscale here is not in
+                      Unattended Mode, so tailscaled runs the tailnet only
+                      while a client of the user holds a connection —
+                      normally the tray app `tailscale-ipn.exe`. Without one
+                      it sits in NoState forever and `tailscale funnel` exits
+                      on it before its own connection can count (23.09:
+                      tailscaled crashed 11:02, came back with no tray app,
+                      panel dark until opened by hand). On NoState the job
+                      starts the tray app (`_wake_tailscale_gui`, ≤ 1 per
+                      5 min, not when it already runs) **through
+                      explorer.exe**, so it belongs to the shell and survives
+                      `taskkill /T`, then retries in 10 s — up in ~25 s.
+                      `Stopped` (a manual Disconnect) is left alone.
+                      **Outages:** retries back off (10 → 120 s) and a
+                      repeated cause is logged once
                       (`TunnelHealth`). Down ≥ 15 min → one owner message, and
                       one more when the panel is back — the watchdog does not
                       cover this job (no heartbeat)

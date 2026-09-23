@@ -96,21 +96,26 @@ DOWN_ALERT_SECONDS = 15 * 60
 # prints an enable-link and then waits forever without exiting.
 URL_WAIT_SECONDS = 60.0
 
+# The Tailscale tray app is started at most this often to wake a NoState daemon.
+GUI_WAKE_INTERVAL_SECONDS = 5 * 60
+
 
 @dataclass
 class TunnelHealth:
     """Outage bookkeeping that outlives one agent run (module-level, in memory).
 
-    After the PC boots, tailscaled needs a few minutes ("unexpected state:
-    NoState"), and each ~20 s retry used to write the same warning into
-    app_events and pay for a PowerShell orphan scan — a dozen of each every
-    morning — while an outage that never ended told nobody at all.
+    After the PC boots, tailscaled sits in "unexpected state: NoState" until a
+    client connects (see _wake_tailscale_gui), and each ~20 s retry used to
+    write the same warning into app_events and pay for a PowerShell orphan
+    scan — a dozen of each every morning — while an outage that never ended
+    told nobody at all.
     """
 
     failures: int = 0
     last_reason: str = ""
     down_since: Optional[datetime] = None
     alerted: bool = False
+    last_wake: Optional[datetime] = None
 
 
 _health = TunnelHealth()
@@ -146,6 +151,7 @@ def note_up(health: TunnelHealth) -> bool:
     health.last_reason = ""
     health.down_since = None
     health.alerted = False
+    health.last_wake = None
     return was_alerted
 
 
@@ -405,6 +411,86 @@ def _bind_to_app_lifetime(pid: int) -> None:
         logger.debug("Could not bind tunnel agent %s to the app lifetime", pid, exc_info=True)
 
 
+# --------------------------------------------------------------------------- #
+# A daemon with nobody to serve                                                 #
+# --------------------------------------------------------------------------- #
+# Outside "Unattended Mode", tailscaled on Windows runs the tailnet only while a
+# client of the logged-in user holds a connection to it — normally the tray app,
+# tailscale-ipn.exe. With none connected it sits in NoState, and `tailscale
+# funnel` reads the state, prints "unexpected state: NoState" and exits before
+# its own connection could count. 23.09 tailscaled crashed at 11:02, the service
+# manager restarted it, the tray app was gone, and the panel stayed down with
+# every retry hitting the same wall until someone opened Tailscale by hand
+# (holding one connection took it to Running in under 2 s). Every boot spent
+# the same wait until the tray app autostarted. So on NoState the tray app is
+# started — what the owner would do. Stopped (the owner pressed Disconnect) is
+# a decision and is left alone.
+
+_NO_STATE = "NoState"
+_GUI_EXE = "tailscale-ipn.exe"
+
+
+def gui_wake_due(health: TunnelHealth, output: str, now: datetime) -> bool:
+    """Did the agent find the daemon in NoState, with no wake in the last interval?"""
+    return _NO_STATE in output and (
+        health.last_wake is None
+        or (now - health.last_wake).total_seconds() >= GUI_WAKE_INTERVAL_SECONDS
+    )
+
+
+def tailscale_gui_path(cli: str) -> Optional[str]:
+    """The tray app installed next to the `tailscale` CLI, or None."""
+    folder = os.path.dirname(cli)
+    # normpath: TAILSCALE_BIN may be written with forward slashes, which
+    # explorer.exe does not take for a path.
+    gui = os.path.normpath(os.path.join(folder, _GUI_EXE))
+    return gui if folder and os.path.isfile(gui) else None
+
+
+async def _gui_running() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tasklist", "/FI", f"IMAGENAME eq {_GUI_EXE}", "/FO", "CSV", "/NH",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            **_NO_WINDOW,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except Exception:
+        return False
+    return f'"{_GUI_EXE}"'.encode() in out.lower()
+
+
+def _launch_gui(path: str) -> None:
+    # Through explorer, as a double-click would: the tray app then belongs to
+    # the owner's shell, not to this process. restart_app.ps1 kills the app with
+    # its whole tree (taskkill /T), so a child of ours — which is what
+    # os.startfile makes — took the owner's tray icon down with every restart.
+    # explorer.exe hands the launch to the shell and exits (with code 1).
+    subprocess.run(["explorer.exe", path], timeout=30, **_NO_WINDOW)
+
+
+async def _wake_tailscale_gui(cli: str, output: str) -> bool:
+    """Start the tray app when the daemon waits for one; True when it was started."""
+    if not gui_wake_due(_health, output, datetime.now()):
+        return False
+    gui = tailscale_gui_path(cli)
+    if gui is None:
+        return False
+    _health.last_wake = datetime.now()
+    if await _gui_running():
+        return False
+    try:
+        await asyncio.to_thread(_launch_gui, gui)
+    except Exception as exc:
+        logger.warning("Could not start the Tailscale app %s (%s)", gui, exc)
+        return False
+    logger.info("tailscaled is in NoState with no client — started %s", gui)
+    await record_app_event("INFO", "tunnel", "Tailscale app started to wake the daemon", {"gui": gui})
+    return True
+
+
 async def tunnel_loop() -> None:
     """Run one tunnel agent; return when it dies so the supervisor respawns it.
 
@@ -487,4 +573,7 @@ async def tunnel_loop() -> None:
              "failures": _health.failures},
         )
     await _check_down_alert(name)
-    await asyncio.sleep(retry_delay(_health.failures))
+    woke = name == "tailscale" and await _wake_tailscale_gui(argv[0], " ".join(tail))
+    # A woken daemon is Running within seconds; sitting out the backoff would
+    # only keep the panel dark for up to two more minutes.
+    await asyncio.sleep(RESTART_DELAY_SECONDS if woke else retry_delay(_health.failures))

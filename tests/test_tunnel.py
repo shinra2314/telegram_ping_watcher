@@ -251,6 +251,55 @@ class OutageBookkeepingTests(unittest.TestCase):
         self.assertIsNone(health.down_since)
 
 
+class GuiWakeTests(unittest.TestCase):
+    """tailscaled outside Unattended Mode waits in NoState until a client connects."""
+
+    def test_wakes_on_no_state_then_waits_out_the_interval(self):
+        from datetime import datetime, timedelta
+
+        from pulse_desk import tunnel
+
+        now = datetime(2026, 9, 23, 11, 3)
+        health = tunnel.TunnelHealth()
+        self.assertTrue(tunnel.gui_wake_due(health, "unexpected state: NoState", now))
+        health.last_wake = now
+        self.assertFalse(tunnel.gui_wake_due(health, "unexpected state: NoState", now + timedelta(minutes=4)))
+        self.assertTrue(tunnel.gui_wake_due(health, "unexpected state: NoState", now + timedelta(minutes=5)))
+
+    def test_a_deliberate_disconnect_is_left_alone(self):
+        from datetime import datetime
+
+        from pulse_desk import tunnel
+
+        health = tunnel.TunnelHealth()
+        self.assertFalse(tunnel.gui_wake_due(health, "unexpected state: Stopped", datetime.now()))
+        self.assertFalse(tunnel.gui_wake_due(
+            health, "sending serve config: listener already exists for port 443", datetime.now()))
+
+    def test_recovery_allows_the_next_outage_to_wake_at_once(self):
+        from datetime import datetime
+
+        from pulse_desk import tunnel
+
+        health = tunnel.TunnelHealth(last_wake=datetime.now())
+        tunnel.note_up(health)
+        self.assertIsNone(health.last_wake)
+
+    def test_gui_is_found_next_to_the_cli(self):
+        import tempfile
+
+        from pulse_desk.tunnel import tailscale_gui_path
+
+        with tempfile.TemporaryDirectory() as folder:
+            cli = Path(folder) / "tailscale.exe"
+            cli.touch()
+            self.assertIsNone(tailscale_gui_path(str(cli)))
+            (Path(folder) / "tailscale-ipn.exe").touch()
+            self.assertEqual(tailscale_gui_path(str(cli)), str(Path(folder) / "tailscale-ipn.exe"))
+        # An unresolved bare name (not on PATH) has no folder to look in.
+        self.assertIsNone(tailscale_gui_path("tailscale"))
+
+
 class TunnelLoopTests(unittest.IsolatedAsyncioTestCase):
     """The loop against a real child process that fails the way tailscale does at boot."""
 
@@ -261,10 +310,11 @@ class TunnelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.events: list[tuple] = []
         self.told: list[str] = []
         self.scans = 0
+        self.launched: list[str] = []
         saved = {name: getattr(tunnel, name) for name in (
             "_health", "provider_spec", "record_app_event", "_tell_owner",
             "kill_orphaned_agents", "_bind_to_app_lifetime", "RESTART_DELAY_SECONDS",
-            "MAX_RETRY_DELAY_SECONDS")}
+            "MAX_RETRY_DELAY_SECONDS", "tailscale_gui_path", "_gui_running", "_launch_gui")}
         saved_url = tunnel.state.public_url
 
         def restore():
@@ -284,6 +334,9 @@ class TunnelLoopTests(unittest.IsolatedAsyncioTestCase):
             self.scans += 1
             return []
 
+        async def gui_running():
+            return False
+
         tunnel._health = tunnel.TunnelHealth()
         tunnel.record_app_event = record
         tunnel._tell_owner = tell
@@ -291,6 +344,9 @@ class TunnelLoopTests(unittest.IsolatedAsyncioTestCase):
         tunnel._bind_to_app_lifetime = lambda pid: None
         tunnel.RESTART_DELAY_SECONDS = 0.0
         tunnel.MAX_RETRY_DELAY_SECONDS = 0.0
+        tunnel.tailscale_gui_path = lambda cli: "C:/Program Files/Tailscale/tailscale-ipn.exe"
+        tunnel._gui_running = gui_running
+        tunnel._launch_gui = self.launched.append
         tunnel.state.public_url = None
 
     def _agent(self, script: str):
@@ -318,6 +374,32 @@ class TunnelLoopTests(unittest.IsolatedAsyncioTestCase):
         await self.tunnel.tunnel_loop()
         self.assertEqual(len(self.told), 2)
         self.assertIn("снова доступна", self.told[1])
+
+    async def test_no_state_starts_the_tailscale_app_once(self):
+        # 23.09: tailscaled crashed at 11:02, came back in NoState with no tray
+        # app to serve, and every retry hit the same wall for as long as nobody
+        # opened Tailscale by hand.
+        self._agent("print('# Health check:'); print('unexpected state: NoState'); raise SystemExit(1)")
+        for _ in range(3):
+            await self.tunnel.tunnel_loop()
+        self.assertEqual(self.launched, ["C:/Program Files/Tailscale/tailscale-ipn.exe"])
+        self.assertTrue(any(e[1] == "Tailscale app started to wake the daemon" for e in self.events))
+
+    async def test_tray_app_already_running_is_not_started_again(self):
+        async def gui_running():
+            return True
+
+        self.tunnel._gui_running = gui_running
+        self._agent("print('unexpected state: NoState'); raise SystemExit(1)")
+        await self.tunnel.tunnel_loop()
+        self.assertEqual(self.launched, [])
+
+    async def test_other_failures_do_not_start_the_tailscale_app(self):
+        self._agent("print('listener already exists for port 443'); raise SystemExit(1)")
+        await self.tunnel.tunnel_loop()
+        self._agent("print('unexpected state: Stopped'); raise SystemExit(1)")
+        await self.tunnel.tunnel_loop()
+        self.assertEqual(self.launched, [])
 
 
 if __name__ == "__main__":

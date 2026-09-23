@@ -390,6 +390,44 @@ class CaptchaRelayTests(ClaimerCase):
         self.assertEqual(state.check_relays, {})
 
 
+def pay_script(kind, value):
+    if kind == "start":
+        return [{"text": "Для получения чека решите капчу",
+                 "buttons": [[Btn("🍎", data=b"1"), Btn("💸 Оплатить 5 USDT", data=b"pay")]]}]
+    return []
+
+
+class MoneyOutTests(ClaimerCase):
+    script = staticmethod(pay_script)
+
+    async def test_payment_buttons_never_reach_the_card_or_the_bot(self):
+        self.see(self.a, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        (token,) = state.check_relays
+        labels = [b.text for row in self.notify.await_args.kwargs["buttons"] for b in row]
+        self.assertIn("🍎", labels)
+        self.assertFalse(any("Оплатить" in label for label in labels))
+        # A forged callback aimed at the payment button is refused before any press.
+        with self.assertRaises(RuntimeError):
+            await check_claimer.relay_press(token, 0, 1)
+        self.assertEqual(self.a.clicks, [])
+
+
+def invoice_script(kind, value):
+    return [{"text": "🧾 Счёт на 5 USDT", "buttons": [[Btn("Оплатить", data=b"pay")]]}] if kind == "start" else []
+
+
+class InvoiceTests(ClaimerCase):
+    script = staticmethod(invoice_script)
+
+    async def test_an_invoice_behind_a_check_word_stops_without_a_card(self):
+        self.see(self.a, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        self.assertEqual([r["outcome"] for r in await self.rows()], ["invoice"])
+        self.notify.assert_not_awaited()
+        self.assertEqual(state.check_relays, {})
+
+
 class SectionTests(ClaimerCase):
     script = staticmethod(captcha_script)
 

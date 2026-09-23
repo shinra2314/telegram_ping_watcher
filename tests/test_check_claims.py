@@ -122,7 +122,19 @@ class ClassifyTests(unittest.TestCase):
         "Чтобы получить чек, подпишитесь на каналы:": "subscribe",
         "Выберите язык / Choose language": "unknown",
         "": "unknown",
+        "🧾 Счёт на 5 USDT": "invoice",
+        "Счёт на оплату от @shop": "invoice",
+        "Invoice #123 for 5 USDT": "invoice",
+        "✅ Вы получили 5 USDT, счёт пополнен": "claimed",
     }
+
+    def test_money_out_labels(self):
+        for label in ("Оплатить 5 USDT", "💸 Перевести", "Pay", "Send", "Вывести", "Пополнить", "Сделать ставку"):
+            with self.subTest(label=label):
+                self.assertTrue(cc.money_out(label))
+        for label in ("🍌", "✅ Проверить подписку", "🇷🇺 Русский", "Получить 5 USDT", "Paypal? no — Payload"):
+            with self.subTest(label=label):
+                self.assertFalse(cc.money_out(label))
 
     def test_table(self):
         for text, expected in self.CASES.items():
@@ -150,6 +162,8 @@ class JoinTargetsTests(unittest.TestCase):
         rows = [[button("📢 Канал", url="https://t.me/x")], [button("✅ Проверить подписку", data=b"chk")]]
         self.assertEqual(cc.recheck_button(rows), (1, 0))
         self.assertIsNone(cc.recheck_button([[button("Канал", url="https://t.me/x")]]))
+        # «Получить» matches the recheck words, but a payment button is never pressed.
+        self.assertIsNone(cc.recheck_button([[button("Оплатить и получить", data=b"pay")]]))
 
 
 class ConfigAndMiscTests(unittest.TestCase):

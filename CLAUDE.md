@@ -328,8 +328,14 @@ src/pulse_desk/
                       mirrored as `ck:b:<token>:<r>:<c>`, «✍️ Ответить» (typed text
                       sent from the account), «🔁 Повторить», «▶️ Следующий аккаунт»
                       (one card per check; other accounts wait in its queue). Relays
-                      live 30 min (`bot-janitor`). A post with a wallet-bot button
-                      that does not read as a check is logged once (a new link
+                      live 30 min (`bot-janitor`). **Money never moves out:** a reply
+                      that reads as an invoice («Счёт на…», «оплатите») ends the
+                      attempt as `invoice`; a button labelled like a payment,
+                      transfer, withdrawal, top-up or bet (`money_out`) is never
+                      pressed and never mirrored onto a relay card, and
+                      `relay_press` refuses such an index even from a forged
+                      callback. A post with a wallet-bot button that does not read
+                      as a check is logged once with its label and text (a new link
                       format would otherwise go silent)
   miniapp_auth.py   — Telegram Mini App initData validation (pure): drop `hash`,
                       join the rest as sorted `k=v` lines, HMAC-SHA256 under

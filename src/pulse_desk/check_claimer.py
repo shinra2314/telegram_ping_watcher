@@ -185,10 +185,11 @@ def _note_unreadable(message: Any) -> None:
     """
     if getattr(message, "reply_markup", None) is None:
         return
-    urls = [url for url, _label in cc.message_links(message) if cc.WALLET_LINK_RE.search(url)]
-    if urls and _first(state.check_seen, f"unreadable|{getattr(message, 'chat_id', None)}|{getattr(message, 'id', None)}"):
-        logger.info("Wallet-bot button not read as a check in %s/%s: %s",
-                    getattr(message, "chat_id", None), getattr(message, "id", None), urls[:3])
+    links = [(label, url) for url, label in cc.message_links(message) if cc.WALLET_LINK_RE.search(url)]
+    if links and _first(state.check_seen, f"unreadable|{getattr(message, 'chat_id', None)}|{getattr(message, 'id', None)}"):
+        logger.info("Wallet-bot button not read as a check in %s/%s: %s | %r",
+                    getattr(message, "chat_id", None), getattr(message, "id", None), links[:3],
+                    cc._text(message)[:80])
 
 
 def _launch(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo, cfg: dict,
@@ -488,6 +489,8 @@ def relay_buttons(relay: dict[str, Any], action: Any) -> list[list[Any]]:
         line = []
         for j, button in enumerate(row or []):
             label = (getattr(button, "text", "") or "·")[:40]
+            if cc.money_out(label):
+                continue  # a stray tap on the card must never pay from the account
             if getattr(button, "data", None) is not None:
                 line.append(Button.inline(label, f"ck:b:{token}:{i}:{j}".encode()))
             elif getattr(button, "url", None):
@@ -513,11 +516,12 @@ _DONE_HEADS = {
     "not_for_you": "🚫 **Чек не для этого аккаунта**",
     "own": "🙈 **Это свой чек**",
     "premium": "💎 **Чек только для Premium**",
+    "invoice": "🧾 **Это счёт на оплату, не чек**",
     "subscribe": "📢 **Подписаться не вышло**",
     "error": "⚠️ **Не получилось**",
 }
 # Nothing more to try on this account: the card closes.
-_SETTLED = {"claimed", "gone", "not_for_you", "own", "premium"}
+_SETTLED = {"claimed", "gone", "not_for_you", "own", "premium", "invoice"}
 
 
 def relay_screen(relay: dict[str, Any], outcome: str, reply: str, action: Any, note: str = "") -> tuple[str, list]:
@@ -623,6 +627,12 @@ async def relay_press(token: str, row: int, column: int) -> tuple[str, str, Any]
         message = await client.get_messages(bot, ids=relay["step"]["msg_id"])
         if message is None:
             raise RuntimeError("сообщение бота пропало")
+        rows = getattr(message, "buttons", None) or []
+        if not (0 <= row < len(rows) and 0 <= column < len(rows[row] or [])):
+            raise RuntimeError("у бота уже другие кнопки — нажмите «🔁 Повторить»")
+        if cc.money_out(getattr(rows[row][column], "text", "")):
+            # The card never shows such a button; a forged callback gets no further.
+            raise RuntimeError("кнопки оплаты и перевода скрипт не нажимает")
         outcome, reply, action = await _press(client, bot, message, row, column)
         return await _relay_settle(relay, client, bot, outcome, reply, action)
 

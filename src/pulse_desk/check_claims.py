@@ -67,6 +67,8 @@ _OUTCOME_RULES = [
              r"|законч|исчерпан|активаций\s+(?:больше\s+)?нет|разобран|удал[её]н"
              r"|already\s+(?:been\s+)?(?:activated|claimed|used|received)|not\s+found|invalid|expired"
              r"|no\s+(?:more\s+)?activations"),
+    # A payment link dressed as a check: stop here, nothing on it is ever pressed.
+    ("invoice", r"сч[её]т\w*(?:\s+на)?\s+(?:оплат|\d)|оплатит|к\s+оплате|invoice|pay\s+now"),
     ("claimed", r"вы\s+(?:успешно\s+)?(?:получил|активировал)|получил[аи]?\s+\+?\d|получено(?![а-яё])"
                 r"|зачислен|успешно\s+(?:активир|получ|зачисл)"
                 r"|you(?:'ve|\s+have)?\s+(?:successfully\s+)?(?:received|got|claimed|activated)"
@@ -87,12 +89,13 @@ OUTCOME_LABELS = {
     "captcha": "🧩 капча",
     "password": "🔑 пароль",
     "subscribe": "📢 подписка",
+    "invoice": "🧾 счёт, не чек",
     "unknown": "❔ непонятный ответ",
     "error": "⚠️ ошибка",
     "watch": "👀 поймал бы",
 }
 # Outcomes that end the attempt with nothing for a human to do.
-FINAL_OUTCOMES = {"claimed", "gone", "not_for_you", "own", "premium", "error"}
+FINAL_OUTCOMES = {"claimed", "gone", "not_for_you", "own", "premium", "invoice", "error"}
 # What the bot answered that only a person can get past.
 NEEDS_HAND = {"captcha", "password", "unknown"}
 
@@ -108,6 +111,17 @@ RECHECK_LABEL_RE = re.compile(
     r"провер|подписал|готово|продолж|получить|активир|check|done|continue|receive|claim",
     re.IGNORECASE,
 )
+# Buttons that move money out. Never pressed by the script and never mirrored
+# onto a relay card, where a stray tap would pay from the account.
+MONEY_OUT_LABEL_RE = re.compile(
+    r"оплат|купить|перев[её]|перевод|отправить|вывест|вывод|обмен|пополн|ставк"
+    r"|\bpay\b|buy|transfer|send|withdraw|exchange|deposit|\bbet\b",
+    re.IGNORECASE,
+)
+
+
+def money_out(label: str) -> bool:
+    return bool(MONEY_OUT_LABEL_RE.search(label or ""))
 
 
 @dataclass(frozen=True)
@@ -268,7 +282,8 @@ def recheck_button(rows: Any) -> Optional[tuple[int, int]]:
     """(row, column) of the bot's «проверить подписку»-style callback button."""
     for i, row in enumerate(rows or []):
         for j, button in enumerate(row or []):
-            if getattr(button, "data", None) is not None and RECHECK_LABEL_RE.search(getattr(button, "text", "") or ""):
+            label = getattr(button, "text", "") or ""
+            if getattr(button, "data", None) is not None and RECHECK_LABEL_RE.search(label) and not money_out(label):
                 return i, j
     return None
 

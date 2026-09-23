@@ -109,6 +109,7 @@ class AppState:
     dead_check_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes known to be used up
     own_admin_chat_ids: set[int] = field(default_factory=set)  # chats any of our accounts administers
     check_relays: dict[str, dict] = field(default_factory=dict)  # token -> captcha relay card
+    check_awaiting_password: dict[Any, list] = field(default_factory=dict)  # chat id -> checks waiting for it
     ping_usernames: list = field(default_factory=list)
     ignored_chat_ids: set = field(default_factory=set)  # ignored_chats.py
     ping_regex: object = None  # compiled regex or None

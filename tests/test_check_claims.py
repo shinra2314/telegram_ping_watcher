@@ -106,6 +106,9 @@ class FindCheckTests(unittest.TestCase):
         self.assertEqual(cc.find_check(post).password, "kotik42")
         self.assertEqual(cc.post_password("пароль от чека будет позже"), "")
         self.assertEqual(cc.post_password("🔑 1234"), "1234")
+        self.assertEqual(cc.follow_up_password("Пароль: kotik42"), "kotik42")
+        self.assertEqual(cc.follow_up_password("  kotik42 "), "kotik42")
+        self.assertEqual(cc.follow_up_password("ну и где пароль то"), "")
 
 
 class OwnerRuleTests(unittest.TestCase):

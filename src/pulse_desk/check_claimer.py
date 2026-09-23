@@ -45,6 +45,8 @@ POLL_MAX_DELAY = 2.0
 SETTLE_SECONDS = 0.8
 JOIN_PAUSE_SECONDS = 1.0
 RELAY_TTL = timedelta(minutes=30)
+# How long a check that asked for a password waits for its author's next post.
+PASSWORD_WAIT = timedelta(minutes=10)
 SEEN_LIMIT = 5000
 
 _saved_admin_chats: list[int] = []
@@ -142,6 +144,7 @@ def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool
     cfg = _config()
     if cfg["mode"] == "off":
         return
+    _maybe_password(message)
     info = cc.find_check(message)
     if info is None:
         _note_unreadable(message)
@@ -273,8 +276,64 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
     if outcome == "claimed":
         await _notify_claimed(ctx)
     elif outcome in cc.NEEDS_HAND and bot is not None and action is not None:
+        if outcome == "password":
+            _await_password(message, client, session, account, bot, link, ctx, claim_id)
         await open_relay(ctx, client, bot, action, reply, outcome, claim_id)
     return outcome
+
+
+# ---- a password posted after the check ------------------------------------------
+def _await_password(message: Any, client: Any, session: str, account: dict, bot: Any,
+                    link: cc.CheckLink, ctx: dict, claim_id: int) -> None:
+    """Remember a check stuck on «введите пароль»: its author often posts the
+    password a moment later, as a separate message."""
+    chat_id = getattr(message, "chat_id", None)
+    if chat_id is None:
+        return
+    state.check_awaiting_password.setdefault(chat_id, []).append({
+        "sender_id": getattr(message, "sender_id", None), "since": datetime.now(), "client": client,
+        "session": session, "account": account, "bot": bot, "link": link, "ctx": ctx, "claim_id": claim_id,
+    })
+
+
+def _maybe_password(message: Any) -> None:
+    """A new post in a chat where a check waits for its password, by the check's author."""
+    waiting = state.check_awaiting_password.get(getattr(message, "chat_id", None))
+    if not waiting:
+        return
+    now = datetime.now()
+    waiting[:] = [entry for entry in waiting if now - entry["since"] <= PASSWORD_WAIT]
+    sender = getattr(message, "sender_id", None)
+    mine = [entry for entry in waiting if entry["sender_id"] == sender]
+    password = cc.follow_up_password(cc._text(message)) if mine else ""
+    if not password:
+        return
+    # Every account gets the same update: the password is typed once per waiting check.
+    if not _first(state.check_seen, f"pw|{getattr(message, 'chat_id', None)}|{getattr(message, 'id', None)}"):
+        return
+    for entry in mine:
+        waiting.remove(entry)
+        start_background_task(f"check-password:{entry['session']}:{entry['link'].key}",
+                              _type_password(entry, password))
+
+
+async def _type_password(entry: dict, password: str) -> None:
+    from database import update_check_claim
+
+    client, bot, link, ctx = entry["client"], entry["bot"], entry["link"], entry["ctx"]
+    try:
+        async with _lock_for(entry["session"], link.bot):
+            outcome, reply, _action = await _answer(client, bot, password)
+    except Exception as exc:
+        outcome, reply = "error", _error_text(exc)
+    if outcome in DEAD_OUTCOMES:
+        _first(state.dead_check_codes, link.key)
+    if entry.get("claim_id"):
+        with suppress(Exception):
+            await update_check_claim(entry["claim_id"], outcome, reply)
+    logger.info("Check %s: password from the next post typed by %s: %s", link.key, ctx["account"], outcome)
+    if outcome == "claimed":
+        await _notify_claimed(ctx)
 
 
 async def _press_start(client: Any, bot: Any, code: str) -> Optional[int]:
@@ -785,6 +844,10 @@ async def relay_next(token: str) -> Optional[dict[str, Any]]:
 
 def sweep_relays(now: Optional[datetime] = None) -> int:
     now = now or datetime.now()
+    for chat_id, waiting in list(state.check_awaiting_password.items()):
+        waiting[:] = [entry for entry in waiting if now - entry["since"] <= PASSWORD_WAIT]
+        if not waiting:
+            state.check_awaiting_password.pop(chat_id, None)
     stale = [token for token, relay in state.check_relays.items() if now - relay["created_at"] > RELAY_TTL]
     for token in stale:
         state.check_relays.pop(token, None)

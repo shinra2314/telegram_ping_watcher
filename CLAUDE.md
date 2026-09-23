@@ -341,7 +341,10 @@ src/pulse_desk/
                       conversation per (account, bot) at a time (`_lock_for`): four
                       personal checks in five seconds interleaved replies otherwise.
                       `subscribe` → joins ≤ 3 linked channels and presses the bot's
-                      «проверить»; `password` → types the one written in the post;
+                      «проверить»; `password` → types the one written in the post, or
+                      waits 10 min for the check author's next post in that chat
+                      («пароль: X», «🔑 X» or a bare token — `follow_up_password`,
+                      `state.check_awaiting_password`) and types it for every account;
                       `captcha` / `unknown` / password nobody wrote → **relay card**
                       to the owner: the bot's text + picture, its callback buttons
                       mirrored as `ck:b:<token>:<r>:<c>`, «✍️ Ответить» (typed text

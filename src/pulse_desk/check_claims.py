@@ -239,6 +239,19 @@ def addressee(text: str) -> str:
     return match.group(1).lower() if match else ""
 
 
+# A follow-up post that is nothing but the password: one short token.
+BARE_PASSWORD_RE = re.compile(r"^\s*[«\"'`]?([^\s«»\"'`]{1,32})[»\"'`]?\s*$")
+
+
+def follow_up_password(text: str) -> str:
+    """The password in a post that comes after the check: «пароль: X», «🔑 X» or just «X»."""
+    found = post_password(text)
+    if found:
+        return found
+    match = BARE_PASSWORD_RE.match(text or "")
+    return match.group(1) if match else ""
+
+
 def post_password(text: str) -> str:
     match = PASSWORD_RE.search(text or "")
     return (match.group(1) or match.group(2) or "") if match else ""

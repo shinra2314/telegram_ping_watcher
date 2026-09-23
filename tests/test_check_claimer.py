@@ -24,7 +24,7 @@ from pulse_desk.app_ctx import state  # noqa: E402
 BOT_ID = 4242
 STATE_FIELDS = {
     "check_claim_cfg": dict, "check_bot_ids": dict, "check_seen": OrderedDict, "check_chat_codes": OrderedDict,
-    "own_check_codes": OrderedDict, "dead_check_codes": OrderedDict, "own_admin_chat_ids": set, "check_relays": dict,
+    "own_check_codes": OrderedDict, "dead_check_codes": OrderedDict, "check_awaiting_password": dict, "own_admin_chat_ids": set, "check_relays": dict,
     "connected_user_ids": set, "accounts_state": dict, "clients": list, "session_names": list,
 }
 
@@ -510,6 +510,49 @@ class InvoiceTests(ClaimerCase):
         self.assertEqual([r["outcome"] for r in await self.rows()], ["invoice"])
         self.notify.assert_not_awaited()
         self.assertEqual(state.check_relays, {})
+
+
+def later_password_script(kind, value):
+    if kind == "start":
+        return [{"text": "Введите пароль от чека", "buttons": [[Btn("❌ Отмена", data=b"x")]]}]
+    if kind == "text":
+        return [{"text": "✅ Вы получили 3 USDT"}] if value == "kotik42" else [{"text": "Неверный пароль"}]
+    return []
+
+
+class LaterPasswordTests(ClaimerCase):
+    only_a = True
+    script = staticmethod(later_password_script)
+
+    def follow_up(self, text, sender_id=777):
+        return SimpleNamespace(raw_text=text, reply_markup=None, entities=[], out=False, sender_id=sender_id,
+                               date=datetime.now(timezone.utc), chat_id=-1002198600083, id=99,
+                               is_private=False, chat=CHAT)
+
+    async def test_password_in_the_next_post_is_typed_in(self):
+        self.see(self.a, post("Мультичек на 3 USDT, пароль в следующем посте", "mc_Later1"))
+        await self.settle()
+        self.see(self.a, self.follow_up("Пароль: kotik42"))
+        self.see(self.b, self.follow_up("Пароль: kotik42"))  # same update on another account
+        await self.settle()
+        self.assertEqual(self.a.texts, ["kotik42"])
+        self.assertEqual([r["outcome"] for r in await self.rows()], ["claimed"])
+        self.assertIn("Чек забран", self.notify.await_args.args[0])
+
+    async def test_bare_password_from_the_author_counts(self):
+        self.see(self.a, post("Мультичек на 3 USDT", "mc_Later2"))
+        await self.settle()
+        self.see(self.a, self.follow_up("kotik42"))
+        await self.settle()
+        self.assertEqual(self.a.texts, ["kotik42"])
+
+    async def test_someone_elses_message_is_not_a_password(self):
+        self.see(self.a, post("Мультичек на 3 USDT", "mc_Later3"))
+        await self.settle()
+        self.see(self.a, self.follow_up("kotik42", sender_id=555))
+        self.see(self.a, self.follow_up("ну и где пароль то"))  # the author, but not a password
+        await self.settle()
+        self.assertEqual(self.a.texts, [])
 
 
 class SectionTests(ClaimerCase):

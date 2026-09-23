@@ -4,12 +4,10 @@
 ловит / не ловит (индекс в `account_rows()`: тот же порядок при отрисовке и при
 нажатии). Карточка-«рука» — капча, пароль, непонятный ответ бота:
 `ck:b:<token>:<r>:<c>` — нажать эту кнопку бота от аккаунта, `ck:t:<token>` —
-ответить текстом, `ck:r:<token>` — начать чек заново, `ck:n:<token>` — к
-следующему аккаунту, застрявшему на том же чеке. Только владелец.
+ответить текстом, `ck:r:<token>` — начать чек заново. Только владелец.
 """
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -71,7 +69,8 @@ def card(cfg: dict[str, Any], accounts: list[tuple[str, str]], recent: list[dict
         lines.append(f"{cc.OUTCOME_LABELS.get(row['outcome'], row['outcome'])} · "
                      f"{_when(row.get('updated_at') or row.get('created_at'))} · "
                      f"{row.get('amount') or '—'} · {who} · {chat}{speed}")
-    lines += [DIV, "__Жмёт сам: каждый аккаунт, увидевший чек, а личный чек «для @…» — только адресат. "
+    lines += [DIV, "__Жмёт сам, один аккаунт на чек: первый, кто увидел пост (выключенный передаёт чек "
+                   "следующему), а личный чек «для @…» — адресат. "
                    "Чеки ваших аккаунтов и владельца не трогает. Капчу не решает: присылает её сюда "
                    "кнопками, ответ нажимаете вы.__"]
     return "\n".join(line for line in lines if line)
@@ -132,14 +131,6 @@ async def _relay(click: Click, action: str) -> None:
     if action == "t":
         await prompt_pending(click.event, REPLY_KIND, scope=token)
         return
-    if action == "n":
-        if await check_claimer.relay_next(token) is None:
-            await click.event.answer("Больше аккаунтов нет", alert=True)
-            return
-        await click.event.answer("▶️ Прислал карточку следующего аккаунта")
-        with suppress(Exception):
-            await click.event.edit(buttons=None)
-        return
     row, column = click.int_arg(3), click.int_arg(4)
     if action == "b" and (row is None or column is None):
         await click.event.answer("Некорректная кнопка", alert=True)
@@ -179,7 +170,7 @@ async def handle(click: Click) -> None:
         await check_claimer.save({**_cfg(), "disabled": sorted(disabled)})
         await _show(click, f"{label}: {'не ловит' if name in disabled else 'ловит'} чеки")
         return
-    if action in ("b", "t", "r", "n"):
+    if action in ("b", "t", "r"):
         await _relay(click, action)
         return
     await _show(click)

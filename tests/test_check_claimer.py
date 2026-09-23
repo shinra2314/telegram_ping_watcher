@@ -182,25 +182,25 @@ class ClaimerCase(unittest.IsolatedAsyncioTestCase):
 
 
 class WhoPressesTests(ClaimerCase):
-    async def test_general_check_is_pressed_by_every_account_that_sees_it(self):
+    async def test_general_check_is_pressed_by_the_first_account_to_see_it_only(self):
+        # 23.09, @ludka2k33: four 5 USDT checks, eight accounts each — 32 presses, 32 «уже активирован».
         message = post("🚀 Чек на 5 USDT (5.0$)")
         self.see(self.a, message)
-        self.see(self.b, message)
+        self.see(self.b, message)  # B's copy of the same update
         await self.settle()
-        self.assertEqual(self.a.starts, ["mc_Gen1"])
-        self.assertEqual(self.b.starts, ["mc_Gen1"])
-        self.assertEqual(sorted(r["outcome"] for r in await self.rows()), ["claimed", "claimed"])
-        self.assertEqual(self.notify.await_count, 2)
+        self.assertEqual((self.a.starts, self.b.starts), (["mc_Gen1"], []))
+        self.assertEqual([r["outcome"] for r in await self.rows()], ["claimed"])
+        self.notify.assert_awaited_once()
         self.assertIn("Чек забран", self.notify.await_args.args[0])
 
-    async def test_channel_post_of_a_stranger_is_pressed_by_every_account(self):
+    async def test_channel_post_of_a_stranger_is_pressed_once(self):
         # t.me/DRUNK_BONUS/12246: posted in the channel's own name, all accounts subscribed.
         message = post("‍🚀 Чек на 5 USDT (5.0$)", "t_Drunk5Usdt123", sender_id=-1002231021453,
                        label="Получить 5 USDT")
-        self.see(self.a, message)
         self.see(self.b, message)
+        self.see(self.a, message)
         await self.settle()
-        self.assertEqual((self.a.starts, self.b.starts), (["t_Drunk5Usdt123"], ["t_Drunk5Usdt123"]))
+        self.assertEqual((self.a.starts, self.b.starts), ([], ["t_Drunk5Usdt123"]))
 
     async def test_personal_check_goes_to_the_addressee_whoever_received_it(self):
         self.see(self.b, post("🚀 Чек на 0.1 USDT (0.1$) для @MCshinra", "mc_P1"))
@@ -250,8 +250,9 @@ class WhoPressesTests(ClaimerCase):
         state.check_seen.clear()  # the restart: in-memory marks are gone…
         await check_claimer.load()  # …and come back from the journal
         self.see(self.a, post("🚀 Чек на 5 USDT"))  # xRocket edits the post: a fresh update
+        self.see(self.b, post("🚀 Чек на 5 USDT"))
         await self.settle()
-        self.assertEqual((len(self.a.starts), len(self.b.starts)), (1, 1))
+        self.assertEqual((len(self.a.starts), len(self.b.starts)), (1, 0))
 
     async def test_personal_check_for_us_waits_for_days(self):
         # Sent at night while the PC was off: nobody else can take it.
@@ -302,18 +303,26 @@ class WhoPressesTests(ClaimerCase):
 
 
 class SpeedTests(ClaimerCase):
-    async def test_first_account_to_see_a_general_check_presses_for_all(self):
+    async def test_first_account_to_see_a_general_check_presses_it_at_once(self):
         self.see(self.a, post("🚀 Чек на 5 USDT"))  # B's copy of the update has not come yet
         await self.settle()
-        self.assertEqual((self.a.starts, self.b.starts), (["mc_Gen1"], ["mc_Gen1"]))
+        self.assertEqual((self.a.starts, self.b.starts), (["mc_Gen1"], []))
         rows = await self.rows()
         self.assertTrue(all(r["press_ms"] is not None for r in rows))
 
-    async def test_fan_out_still_skips_switched_off_accounts(self):
-        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
+    async def test_switched_off_receiver_hands_the_check_to_an_account_that_is_on(self):
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["w3v8f0rm"]})
+        message = post("🚀 Чек на 5 USDT")
+        self.see(self.a, message)
+        self.see(self.b, message)
+        await self.settle()
+        self.assertEqual((self.a.starts, self.b.starts), ([], ["mc_Gen1"]))
+
+    async def test_nobody_presses_when_every_account_is_switched_off(self):
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["w3v8f0rm", "Swight0"]})
         self.see(self.a, post("🚀 Чек на 5 USDT"))
         await self.settle()
-        self.assertEqual(self.b.starts, [])
+        self.assertEqual(self.a.starts + self.b.starts, [])
 
     async def test_back_to_back_checks_are_both_pressed_before_any_answer_and_not_mixed_up(self):
         def script(kind, value):
@@ -450,19 +459,17 @@ class CaptchaRelayTests(ClaimerCase):
         self.assertEqual([(i, j) for _mid, i, j in self.a.clicks], [(0, 1)])
         self.assertEqual([r["outcome"] for r in await self.rows()], ["claimed"])
 
-    async def test_second_account_on_the_same_captcha_waits_in_the_queue(self):
+    async def test_one_captcha_card_per_check(self):
         message = post("🚀 Чек на 5 USDT")
         self.see(self.a, message)
         self.see(self.b, message)
         await self.settle()
         self.notify.assert_awaited_once()
         (relay,) = state.check_relays.values()
-        self.assertEqual(len(relay["queue"]), 1)
-
-        fresh = await check_claimer.relay_next(relay["token"])
-        self.assertEqual(fresh["step"]["session"], {"w3v8f0rm", "Swight0"}.difference({relay["step"]["session"]}).pop())
-        self.assertEqual(self.notify.await_count, 2)
-        self.assertEqual(list(state.check_relays), [fresh["token"]])
+        self.assertEqual(relay["step"]["session"], "w3v8f0rm")
+        self.assertEqual(self.b.starts, [])
+        labels = [b.text for row in self.notify.await_args.kwargs["buttons"] for b in row]
+        self.assertFalse(any("Следующий" in label for label in labels))
 
     async def test_expired_relays_are_swept(self):
         state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})

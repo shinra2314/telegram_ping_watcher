@@ -316,12 +316,16 @@ src/pulse_desk/
                       pressed; a `gone` / `invoice` answer marks the code dead for
                       every account (`state.dead_check_codes`). `load()` restores
                       the last 24 h of attempts from the journal at startup, so the
-                      daily restart does not press anything a second time. A general check is
-                      pressed by **every** enabled online account as soon as the
-                      first of ours receives it (fan-out: a late update or an account
-                      outside the chat does not wait); a personal one only by the
+                      daily restart does not press anything a second time. **One
+                      account per check** (owner's order, 23.09 — four 5 USDT checks
+                      in @ludka2k33 were pressed by all eight accounts, 32 presses,
+                      32 «уже активирован»): a general check by the first of ours to
+                      see it (`_taker`; one switched off in 🧾 Чеки hands it to the
+                      next online account that is on), a personal one only by the
                       addressee (matched by live `username`), whichever account
-                      received it. **Speed:** the press (`_press_start`) goes out
+                      received it. The dedupe is per code (`claim|<bot>|<code>` in
+                      `state.check_seen`), so the others' copies of the update press
+                      nothing. **Speed:** the press (`_press_start`) goes out
                       before any lock, lookup or SQLite — the wallet bot's peer is
                       cached per account by `warm_up`; only reading the answer and
                       follow-up steps queue per (account, bot). Answers to presses
@@ -344,12 +348,11 @@ src/pulse_desk/
                       «проверить»; `password` → types the one written in the post, or
                       waits 10 min for the check author's next post in that chat
                       («пароль: X», «🔑 X» or a bare token — `follow_up_password`,
-                      `state.check_awaiting_password`) and types it for every account;
+                      `state.check_awaiting_password`) and types it in;
                       `captcha` / `unknown` / password nobody wrote → **relay card**
                       to the owner: the bot's text + picture, its callback buttons
                       mirrored as `ck:b:<token>:<r>:<c>`, «✍️ Ответить» (typed text
-                      sent from the account), «🔁 Повторить», «▶️ Следующий аккаунт»
-                      (one card per check; other accounts wait in its queue). Relays
+                      sent from the account), «🔁 Повторить». Relays
                       live 30 min (`bot-janitor`). **Money never moves out:** a reply
                       that reads as an invoice («Счёт на…», «оплатите») ends the
                       attempt as `invoice`; a button labelled like a payment,

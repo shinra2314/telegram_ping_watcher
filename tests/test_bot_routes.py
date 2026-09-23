@@ -89,7 +89,7 @@ ADMIN_ROUTES = [
     "accshow_7", "accoff_7", "accon_7",
     "hidebc_tok3n",
     "igc", "igc:add:42", "igc:del:-1004354427082", "igc:del:-1004354427082:42",
-    "ck", "ck:m:watch", "ck:a:0", "ck:b:ab12cd34:0:1", "ck:t:ab12cd34", "ck:r:ab12cd34", "ck:n:ab12cd34",
+    "ck", "ck:m:watch", "ck:a:0", "ck:b:ab12cd34:0:1", "ck:t:ab12cd34", "ck:r:ab12cd34",
 ]
 
 # Reachable by any member: their own prefs, their own engagement, and the

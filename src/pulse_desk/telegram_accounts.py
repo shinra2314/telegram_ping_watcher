@@ -268,7 +268,8 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
             account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
                 return
-            # Before the shared dedupe: every account presses a check for itself.
+            # Before the shared dedupe: each account's own view of a check post
+            # counts (`out`, the addressee); the claimer picks the one that presses.
             check_claimer.on_message(client, clean_name, account, event.message)
             if not state.remember_message(live_message_key(event.message, clean_name)):
                 return

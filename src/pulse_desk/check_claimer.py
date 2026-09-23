@@ -1,10 +1,11 @@
 """Presses wallet-bot checks for our accounts; the rules live in check_claims.
 
 :func:`on_message` is called from every account's live handlers *before* the
-shared dedupe — ``state.remember_message`` lets one account process a message
-for all of them, while here each account decides for itself — and before the
-ping pipeline, so a claim never waits on classification or SQLite. It only
-schedules work and returns.
+shared dedupe — each account's own view of a post matters here (``out``, a
+personal check's addressee) — and before the ping pipeline, so a claim never
+waits on classification or SQLite. It only schedules work and returns. A check
+is pressed by one account: the addressee of a personal one, otherwise the first
+of ours to see it.
 
 A claim is ``messages.startBot`` with the check's code (what the «Получить»
 button does), then the wallet bot's answer is read from its private chat. The
@@ -186,13 +187,21 @@ def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool
             return
         _launch(target_client, target, state.accounts_state.get(target) or account, message, info, cfg, live, received)
         return
-    _launch(client, session, account, message, info, cfg, live, received)
-    # The first of ours to see a general check presses for all of them: an
-    # account whose own copy of the update is late — or that is not in this chat
-    # at all — does not wait for it, and still gets its share of a multi-check.
-    for other_client, other_session, other_account in _online_accounts():
-        if other_session != session:
-            _launch(other_client, other_session, other_account, message, info, cfg, live, received)
+    # A general check is pressed by ONE account — the first of ours to see it
+    # (owner's order, 23.09: four 5 USDT checks in @ludka2k33 were pressed by all
+    # eight accounts, 32 presses for nothing). The others' copies of the update
+    # find the code taken in _launch.
+    taker = _taker(client, session, account, cfg)
+    if taker is not None:
+        _launch(*taker, message, info, cfg, live, received)
+
+
+def _taker(client: Any, session: str, account: dict, cfg: dict) -> Optional[tuple[Any, str, dict]]:
+    """The account that saw the check, or — when it is switched off in 🧾 Чеки —
+    the first online account that is not."""
+    if session not in cfg["disabled"]:
+        return client, session, account
+    return next((entry for entry in _online_accounts() if entry[1] not in cfg["disabled"]), None)
 
 
 def _online_accounts():
@@ -229,7 +238,8 @@ def _launch(client: Any, session: str, account: dict, message: Any, info: cc.Che
             if _first(state.check_seen, f"watch|{link.key}"):
                 start_background_task(f"check-watch:{link.key}", _announce_watch(message, info, link, session, account))
             continue
-        if _first(state.check_seen, f"{session}|{link.key}"):
+        # Per code, not per account: one press per check, whoever makes it.
+        if _first(state.check_seen, f"claim|{link.key}"):
             start_background_task(f"check-claim:{session}:{link.key}",
                                   claim(client, session, account, message, info, link, live=live,
                                         received=received))
@@ -670,13 +680,8 @@ def relay_buttons(relay: dict[str, Any], action: Any) -> list[list[Any]]:
     rows = rows[:8]
     rows.append([Button.inline("✍️ Ответить", f"ck:t:{token}".encode()),
                  Button.inline("🔁 Повторить", f"ck:r:{token}".encode())])
-    tail = []
-    if relay["queue"]:
-        tail.append(Button.inline(f"▶️ Следующий аккаунт ({len(relay['queue'])})", f"ck:n:{token}".encode()))
     if relay["ctx"].get("link"):
-        tail.append(Button.url("↗️ К посту", relay["ctx"]["link"]))
-    if tail:
-        rows.append(tail)
+        rows.append([Button.url("↗️ К посту", relay["ctx"]["link"])])
     return rows
 
 
@@ -708,13 +713,11 @@ def relay_screen(relay: dict[str, Any], outcome: str, reply: str, action: Any, n
     if reply:
         lines += ["", "```", _clip(reply.replace("```", "'''"), 400), "```"]
     settled = outcome in _SETTLED
-    if settled and not relay["queue"]:
+    if settled:
         state.check_relays.pop(token, None)
     buttons: list[list[Any]] = []
     if not settled:
         buttons.append([Button.inline("🔁 Повторить", f"ck:r:{token}".encode())])
-    if relay["queue"]:
-        buttons.append([Button.inline(f"▶️ Следующий аккаунт ({len(relay['queue'])})", f"ck:n:{token}".encode())])
     if ctx.get("link"):
         buttons.append([Button.url("↗️ К посту", ctx["link"])])
     return "\n".join(lines), buttons
@@ -737,20 +740,12 @@ async def _picture(client: Any, action: Any) -> Optional[io.BytesIO]:
 
 async def open_relay(ctx: dict[str, Any], client: Any, bot: Any, action: Any, reply: str, outcome: str,
                      claim_id: int) -> str:
-    """Hand the bot's question to the owner; returns the relay token.
-
-    One card per check: another account stopping on the same check joins the
-    card's queue and is offered by «▶️ Следующий аккаунт» afterwards.
-    """
+    """Hand the bot's question to the owner; returns the relay token."""
     step = {"session": ctx["session"], "account": ctx["account"], "msg_id": getattr(action, "id", None),
             "claim_id": claim_id, "outcome": outcome}
-    key = f"{ctx['bot']}|{ctx['code']}"
-    for relay in state.check_relays.values():
-        if relay["key"] == key:
-            relay["queue"].append(step)
-            return relay["token"]
     token = secrets.token_hex(4)
-    relay = {"token": token, "key": key, "ctx": ctx, "step": step, "queue": [], "created_at": datetime.now()}
+    relay = {"token": token, "key": f"{ctx['bot']}|{ctx['code']}", "ctx": ctx, "step": step,
+             "created_at": datetime.now()}
     state.check_relays[token] = relay
     await send_relay_card(relay, client, action, reply, outcome)
     return token
@@ -827,21 +822,6 @@ async def relay_retry(token: str) -> tuple[str, str, Any]:
         return await _relay_settle(relay, client, bot, outcome, reply, action)
 
 
-async def relay_next(token: str) -> Optional[dict[str, Any]]:
-    """Move the card on to the next account stopped on this check; sends its card."""
-    relay = state.check_relays.get(token)
-    if relay is None or not relay["queue"]:
-        return None
-    state.check_relays.pop(token, None)
-    step = relay["queue"].pop(0)
-    fresh = {**relay, "token": secrets.token_hex(4), "step": step, "created_at": datetime.now()}
-    state.check_relays[fresh["token"]] = fresh
-    client, bot = await _relay_target(fresh)
-    action = await client.get_messages(bot, ids=step["msg_id"]) if step.get("msg_id") else None
-    await send_relay_card(fresh, client, action, getattr(action, "raw_text", "") or "", step["outcome"])
-    return fresh
-
-
 def sweep_relays(now: Optional[datetime] = None) -> int:
     now = now or datetime.now()
     for chat_id, waiting in list(state.check_awaiting_password.items()):
@@ -911,7 +891,7 @@ async def load() -> None:
     for row in attempts:
         key = f"{row['bot']}|{row['code']}"
         if row["session"]:
-            _first(state.check_seen, f"{row['session']}|{key}")
+            _first(state.check_seen, f"claim|{key}")
         elif row["outcome"] == "own":
             _first(state.own_check_codes, key)
             _first(state.check_seen, f"own|{key}")

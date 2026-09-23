@@ -81,6 +81,9 @@ _OUTCOME_RULES = [
                 r"|зачислен|успешно\s+(?:активир|получ|зачисл)"
                 r"|you(?:'ve|\s+have)?\s+(?:successfully\s+)?(?:received|got|claimed|activated)"
                 r"|successfully\s+(?:activated|claimed|received)"),
+    # A casino check locked behind a betting turnover («нужен оборот 1 000$ за 1
+    # день»): our accounts do not bet, so it is skipped, no card (owner's order, 23.09).
+    ("turnover", r"(?<![а-яё])оборот|отыгр|вейджер|wager|turnover"),
     ("premium", r"premium|премиум"),
     ("captcha", r"капч|captcha|не\s+робот|not\s+a\s+robot"),
     ("password", r"парол|password"),
@@ -98,12 +101,13 @@ OUTCOME_LABELS = {
     "password": "🔑 пароль",
     "subscribe": "📢 подписка",
     "invoice": "🧾 счёт, не чек",
+    "turnover": "🎰 чек с оборотом",
     "unknown": "❔ непонятный ответ",
     "error": "⚠️ ошибка",
     "watch": "👀 поймал бы",
 }
 # Outcomes that end the attempt with nothing for a human to do.
-FINAL_OUTCOMES = {"claimed", "gone", "not_for_you", "own", "premium", "invoice", "error"}
+FINAL_OUTCOMES = {"claimed", "gone", "not_for_you", "own", "premium", "invoice", "turnover", "error"}
 # What the bot answered that only a person can get past.
 NEEDS_HAND = {"captcha", "password", "unknown"}
 

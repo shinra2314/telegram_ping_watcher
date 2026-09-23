@@ -297,9 +297,12 @@ src/pulse_desk/
                       profile link). Amounts with a ticker or in `$`. Amount, addressee
                       («для @X»), a password written in the post, the own-sender
                       rule, reply classification (claimed / gone / not_for_you /
-                      own / premium / captcha / password / subscribe / unknown —
-                      order matters: «уже активирован» is `gone` before
-                      «активирован» can read as a win), config (`check_claim` key:
+                      own / turnover / premium / captcha / password / subscribe /
+                      unknown — order matters: «уже активирован» is `gone` before
+                      «активирован» can read as a win). `turnover` is a casino
+                      check behind a betting turnover («нужен оборот 1 000$ за 1
+                      день»): skipped with no relay card and dead for every
+                      account (owner's order, 23.09), config (`check_claim` key:
                       `mode` claim|watch|off, `disabled` sessions; absent = claim, all)
   check_claimer.py  — Presses checks (I/O). `on_message` runs in **every account's**
                       live handlers *before* `remember_message` (that dedupe lets one

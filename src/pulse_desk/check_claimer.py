@@ -406,8 +406,9 @@ def _incoming(batch: Any, base: Optional[int]) -> list:
 
 
 # Answers that mean the check is over for every one of our accounts. «Premium
-# only» is not among them: some of ours have Premium.
-DEAD_OUTCOMES = {"gone", "invoice"}
+# only» is not among them: some of ours have Premium. A turnover check is: none
+# of ours bets, and the owner does not want them (23.09).
+DEAD_OUTCOMES = {"gone", "invoice", "turnover"}
 
 # Our messages further apart than this are not one burst of presses.
 BURST_SECONDS = 20
@@ -692,11 +693,12 @@ _DONE_HEADS = {
     "own": "🙈 **Это свой чек**",
     "premium": "💎 **Чек только для Premium**",
     "invoice": "🧾 **Это счёт на оплату, не чек**",
+    "turnover": "🎰 **Чек с оборотом — пропущен**",
     "subscribe": "📢 **Подписаться не вышло**",
     "error": "⚠️ **Не получилось**",
 }
 # Nothing more to try on this account: the card closes.
-_SETTLED = {"claimed", "gone", "not_for_you", "own", "premium", "invoice"}
+_SETTLED = {"claimed", "gone", "not_for_you", "own", "premium", "invoice", "turnover"}
 
 
 def relay_screen(relay: dict[str, Any], outcome: str, reply: str, action: Any, note: str = "") -> tuple[str, list]:

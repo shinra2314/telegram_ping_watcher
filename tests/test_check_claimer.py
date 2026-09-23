@@ -519,6 +519,26 @@ class InvoiceTests(ClaimerCase):
         self.assertEqual(state.check_relays, {})
 
 
+def turnover_script(kind, value):
+    if kind == "start":
+        return [{"text": "⚠️ Для активации чека, нужен оборот 1 000$ за 1 день. Вам осталось набрать 1 000$"}]
+    return []
+
+
+class TurnoverTests(ClaimerCase):
+    only_a = True
+    script = staticmethod(turnover_script)
+
+    async def test_a_turnover_check_is_skipped_without_a_card(self):
+        # Owner's order, 23.09: a check that needs a betting turnover is not ours to take.
+        self.see(self.a, post("🚀 Чек на 10 $"))
+        await self.settle()
+        self.assertEqual([r["outcome"] for r in await self.rows()], ["turnover"])
+        self.notify.assert_not_awaited()
+        self.assertEqual(state.check_relays, {})
+        self.assertIn("xrocket|mc_Gen1", state.dead_check_codes)
+
+
 def later_password_script(kind, value):
     if kind == "start":
         return [{"text": "Введите пароль от чека", "buttons": [[Btn("❌ Отмена", data=b"x")]]}]

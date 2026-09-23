@@ -150,6 +150,10 @@ class ClassifyTests(unittest.TestCase):
         "Счёт на оплату от @shop": "invoice",
         "Invoice #123 for 5 USDT": "invoice",
         "✅ Вы получили 5 USDT, счёт пополнен": "claimed",
+        # RedCube's real wording, 23.09: a check locked behind a betting turnover.
+        "⚠️ Для активации чека, нужен оборот 1 000$ за 1 день. Вам осталось набрать 1 000$": "turnover",
+        "Чтобы получить чек, отыграйте 500$": "turnover",
+        "Wager 100$ to activate this check": "turnover",
     }
 
     def test_money_out_labels(self):

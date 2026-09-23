@@ -184,6 +184,15 @@ class WhoPressesTests(ClaimerCase):
         self.assertEqual(self.notify.await_count, 2)
         self.assertIn("Чек забран", self.notify.await_args.args[0])
 
+    async def test_channel_post_of_a_stranger_is_pressed_by_every_account(self):
+        # t.me/DRUNK_BONUS/12246: posted in the channel's own name, all accounts subscribed.
+        message = post("‍🚀 Чек на 5 USDT (5.0$)", "t_Drunk5Usdt123", sender_id=-1002231021453,
+                       label="Получить 5 USDT")
+        self.see(self.a, message)
+        self.see(self.b, message)
+        await self.settle()
+        self.assertEqual((self.a.starts, self.b.starts), (["t_Drunk5Usdt123"], ["t_Drunk5Usdt123"]))
+
     async def test_personal_check_goes_to_the_addressee_whoever_received_it(self):
         self.see(self.b, post("🚀 Чек на 0.1 USDT (0.1$) для @MCshinra", "mc_P1"))
         await self.settle()

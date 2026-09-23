@@ -106,6 +106,7 @@ class AppState:
     check_seen: OrderedDict[str, None] = field(default_factory=OrderedDict)  # attempts / announcements made
     check_chat_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes met in chats
     own_check_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes our accounts made
+    dead_check_codes: OrderedDict[str, None] = field(default_factory=OrderedDict)  # codes known to be used up
     own_admin_chat_ids: set[int] = field(default_factory=set)  # chats any of our accounts administers
     check_relays: dict[str, dict] = field(default_factory=dict)  # token -> captcha relay card
     ping_usernames: list = field(default_factory=list)

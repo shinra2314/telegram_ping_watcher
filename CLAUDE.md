@@ -302,12 +302,19 @@ src/pulse_desk/
   check_claimer.py  — Presses checks (I/O). `on_message` runs in **every account's**
                       live handlers *before* `remember_message` (that dedupe lets one
                       account act for all; here each account presses for itself) and
-                      before the ping pipeline, so a claim waits on nothing. Only
-                      posts ≤ 30 min old — except a personal check for one of ours,
-                      which nobody else can take: 7 days, and the group
-                      unread-mention catch-up also hands its messages over
-                      (`live=False`: such a claim first asks the journal whether this
-                      account tried the code before a restart). A general check is
+                      before the ping pipeline, so a claim waits on nothing.
+                      **No pressing old or dead checks:** a general check only
+                      ≤ 5 min after posting (later arrivals are the catch-up or
+                      xRocket editing an old post's counter — every edit is a
+                      fresh update); a personal check for one of ours ≤ 24 h (the
+                      group unread-mention catch-up hands its messages over,
+                      `live=False`). A post the bot itself marked as used up
+                      («Чек активирован», «10/10», a relabelled button —
+                      `post_is_dead`, read only in text sent via a bot) is never
+                      pressed; a `gone` / `invoice` answer marks the code dead for
+                      every account (`state.dead_check_codes`). `load()` restores
+                      the last 24 h of attempts from the journal at startup, so the
+                      daily restart does not press anything a second time. A general check is
                       pressed by **every** enabled online account as soon as the
                       first of ours receives it (fan-out: a late update or an account
                       outside the chat does not wait); a personal one only by the

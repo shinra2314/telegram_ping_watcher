@@ -24,7 +24,7 @@ from pulse_desk.app_ctx import state  # noqa: E402
 BOT_ID = 4242
 STATE_FIELDS = {
     "check_claim_cfg": dict, "check_bot_ids": dict, "check_seen": OrderedDict, "check_chat_codes": OrderedDict,
-    "own_check_codes": OrderedDict, "own_admin_chat_ids": set, "check_relays": dict,
+    "own_check_codes": OrderedDict, "dead_check_codes": OrderedDict, "own_admin_chat_ids": set, "check_relays": dict,
     "connected_user_ids": set, "accounts_state": dict, "clients": list, "session_names": list,
 }
 
@@ -221,9 +221,37 @@ class WhoPressesTests(ClaimerCase):
         self.assertEqual(self.a.starts, ["mc_Gen1"])
 
     async def test_stale_post_is_ignored(self):
-        self.see(self.a, post("🚀 Чек на 5 USDT", age=timedelta(hours=2)))
+        self.see(self.a, post("🚀 Чек на 5 USDT", age=timedelta(minutes=10)))
         await self.settle()
-        self.assertEqual(self.a.starts, [])
+        self.assertEqual(self.a.starts + self.b.starts, [])
+
+    async def test_post_the_bot_marked_as_used_is_not_pressed(self):
+        message = post("🚀 Чек на 5 USDT\n\n✅ Чек активирован")
+        message.via_bot_id = 5014831088
+        self.see(self.a, message)
+        await self.settle()
+        self.assertEqual(self.a.starts + self.b.starts, [])
+
+    async def test_a_used_up_check_is_not_pressed_again_by_anyone(self):
+        self.a.script = self.b.script = lambda kind, value: (
+            [{"text": "❌ Этот чек уже активирован"}] if kind == "start" else [])
+        state.check_claim_cfg = cc.normalize_config({"disabled": ["Swight0"]})
+        self.see(self.a, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        state.check_claim_cfg = cc.normalize_config(None)  # Swight0 back on, the post seen again
+        self.see(self.b, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        self.assertEqual((self.a.starts, self.b.starts), (["mc_Gen1"], []))
+
+    async def test_a_restart_does_not_press_what_was_pressed_before_it(self):
+        self.see(self.a, post("🚀 Чек на 5 USDT"))
+        await self.settle()
+        self.assertEqual(len(self.a.starts), 1)
+        state.check_seen.clear()  # the restart: in-memory marks are gone…
+        await check_claimer.load()  # …and come back from the journal
+        self.see(self.a, post("🚀 Чек на 5 USDT"))  # xRocket edits the post: a fresh update
+        await self.settle()
+        self.assertEqual((len(self.a.starts), len(self.b.starts)), (1, 1))
 
     async def test_personal_check_for_us_waits_for_days(self):
         # Sent at night while the PC was off: nobody else can take it.

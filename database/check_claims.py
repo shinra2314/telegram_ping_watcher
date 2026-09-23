@@ -47,6 +47,17 @@ async def record_check_claim(row: dict[str, Any]) -> int:
     return int(found[0]) if found else 0
 
 
+async def get_check_attempts(since: str) -> list[dict]:
+    """(session, bot, code, outcome) of every attempt since an ISO time — what a
+    restart must not press again."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT session, bot, code, outcome FROM check_claims WHERE created_at >= ?", (since,)
+        )).fetchall()
+    return [dict(row) for row in rows]
+
+
 async def has_check_claim(session: str, bot: str, code: str) -> bool:
     """Whether this account already tried this code (the catch-up path asks; the live one does not)."""
     async with _connect() as db:

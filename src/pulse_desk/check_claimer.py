@@ -157,6 +157,11 @@ def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool
     ours = bool(info.addressee) and session_for_username(info.addressee) is not None
     if not cc.is_fresh(getattr(message, "date", None), personal=ours):
         return
+    if info.dead:
+        # The bot already wrote «активирован» on the post: nothing left to press.
+        for link in info.links:
+            _first(state.dead_check_codes, link.key)
+        return
     sender_id = getattr(message, "sender_id", None)
     out = bool(getattr(message, "out", False))
     if cc.own_sender(sender_id, out, _own_user_ids(), state.own_admin_chat_ids) or any(
@@ -215,6 +220,8 @@ def _launch(client: Any, session: str, account: dict, message: Any, info: cc.Che
     if session in cfg["disabled"]:
         return
     for link in info.links:
+        if link.key in state.dead_check_codes:
+            continue  # one of ours was already told «уже активирован»
         if cfg["mode"] == "watch":
             if _first(state.check_seen, f"watch|{link.key}"):
                 start_background_task(f"check-watch:{link.key}", _announce_watch(message, info, link, session, account))
@@ -253,6 +260,8 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
     except Exception as exc:
         outcome, reply = "error", _error_text(exc)
         logger.warning("Check %s from %s failed: %s", link.key, session, exc)
+    if outcome in DEAD_OUTCOMES:
+        _first(state.dead_check_codes, link.key)
     ctx = await _context(message, info, link, session, account)
     ctx["press_ms"] = press_ms
     claim_id = await _journal(ctx, outcome, reply)
@@ -326,6 +335,10 @@ def _incoming(batch: Any, base: Optional[int]) -> list:
         return []  # without our own message older chatter cannot be told apart
     return sorted((m for m in batch or [] if not getattr(m, "out", False) and m.id > base), key=lambda m: m.id)
 
+
+# Answers that mean the check is over for every one of our accounts. «Premium
+# only» is not among them: some of ours have Premium.
+DEAD_OUTCOMES = {"gone", "invoice"}
 
 # Our messages further apart than this are not one burst of presses.
 BURST_SECONDS = 20
@@ -711,6 +724,8 @@ async def _relay_settle(relay: dict[str, Any], client: Any, bot: Any, outcome: s
     if action is not None and isinstance(getattr(action, "id", None), int):
         step["msg_id"] = action.id
     step["outcome"] = outcome
+    if outcome in DEAD_OUTCOMES:
+        _first(state.dead_check_codes, relay["key"])
     if step.get("claim_id"):
         with suppress(Exception):
             await update_check_claim(step["claim_id"], outcome, reply)
@@ -819,9 +834,26 @@ async def persist_admin_chats() -> None:
 
 
 async def load() -> None:
-    from database import get_setting
+    from database import get_check_attempts, get_setting
 
     state.check_claim_cfg = cc.normalize_config(await get_setting(SETTINGS_KEY, None))
+    # What was pressed before the restart stays pressed: the in-memory marks are
+    # gone, and xRocket keeps editing old posts (every edit is a fresh update).
+    since = (datetime.now() - timedelta(seconds=cc.PERSONAL_MAX_AGE_SECONDS)).replace(microsecond=0).isoformat()
+    try:
+        attempts = await get_check_attempts(since)
+    except Exception:
+        attempts = []
+        logger.warning("Could not read past check attempts", exc_info=True)
+    for row in attempts:
+        key = f"{row['bot']}|{row['code']}"
+        if row["session"]:
+            _first(state.check_seen, f"{row['session']}|{key}")
+        elif row["outcome"] == "own":
+            _first(state.own_check_codes, key)
+            _first(state.check_seen, f"own|{key}")
+        if row["outcome"] in DEAD_OUTCOMES:
+            _first(state.dead_check_codes, key)
     saved = await get_setting(ADMIN_CHATS_KEY, None)
     for value in saved if isinstance(saved, list) else []:
         with suppress(TypeError, ValueError):

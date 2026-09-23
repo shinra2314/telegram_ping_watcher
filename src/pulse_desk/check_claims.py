@@ -25,12 +25,14 @@ BOT_ALIASES = {"xrocket": "xrocket", "send": "send", "cryptobot": "send"}
 BOT_USERNAMES = {"xrocket": "xrocket", "send": "send"}
 BOT_LABELS = {"xrocket": "🚀 xRocket", "send": "👛 CryptoBot"}
 
-# Past this a check is history: the morning catch-up replays posts from the
-# night, and every one of those is long claimed.
-MAX_AGE_SECONDS = 30 * 60
+# Past this a general check is history: they go in seconds, and what still
+# arrives later is the morning catch-up or xRocket editing an old post's
+# activation counter — both only ever answer «уже активирован».
+MAX_AGE_SECONDS = 5 * 60
 # A personal check («для @наш») waits for its addressee — nobody else can take
-# it — so the one sent at 3 a.m. while the PC was off is still worth a press.
-PERSONAL_MAX_AGE_SECONDS = 7 * 24 * 3600
+# it — so the one sent at 3 a.m. while the PC was off is still worth a press. A
+# day covers the night; older than that it was taken by hand or refunded.
+PERSONAL_MAX_AGE_SECONDS = 24 * 3600
 
 MODES = ("claim", "watch", "off")
 DEFAULT_MODE = "claim"
@@ -107,6 +109,42 @@ JOIN_RE = re.compile(
     r"(?:(?:joinchat/|\+)([A-Za-z0-9_-]{6,})|([A-Za-z][A-Za-z0-9_]{3,31}))/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
+# The post itself says its check is over: wallet bots edit their inline message
+# in place («Чек активирован», «10/10»). Read only in a bot's own text — a
+# person's «прошлый чек закончился, вот новый» must not kill the new one.
+DEAD_POST_RE = re.compile(
+    r"(?:мульти)?чек\w*\s+(?:уже\s+)?(?:был\w*\s+)?(?:активирован|использован|получен|забран|закончил"
+    r"|истёк|истек|недействител|отозван|удал[её]н)"
+    r"|активаций\s+(?:больше\s+)?нет|все\s+активации|активации\s+закончил"
+    r"|(?:check|cheque)\s+(?:has\s+been\s+|was\s+|is\s+)?(?:activated|claimed|used|expired|deleted)"
+    r"|already\s+(?:activated|claimed)|no\s+(?:more\s+)?activations",
+    re.IGNORECASE,
+)
+# A button a bot relabelled once the check was gone.
+DEAD_LABEL_RE = re.compile(r"активирован|получен|забран|закончил|истёк|истек|activated|claimed|expired|ended",
+                           re.IGNORECASE)
+_COUNTER_RE = re.compile(r"(\d+)\s*(?:/|из|of)\s*(\d+)", re.IGNORECASE)
+_COUNTER_LINE_RE = re.compile(r"актив|activ", re.IGNORECASE)
+
+
+def post_is_dead(bot_text: str, labels: Iterable[str] = ()) -> bool:
+    """True when a check post says its check is used up.
+
+    ``bot_text`` is the post's text only when a bot wrote it (sent via a bot),
+    else ""; button labels are always a bot's.
+    """
+    if any(DEAD_LABEL_RE.search(label or "") for label in labels):
+        return True
+    if DEAD_POST_RE.search(bot_text or ""):
+        return True
+    for line in (bot_text or "").splitlines():
+        if _COUNTER_LINE_RE.search(line):
+            match = _COUNTER_RE.search(line)
+            if match and int(match.group(2)) > 0 and int(match.group(1)) >= int(match.group(2)):
+                return True
+    return False
+
+
 RECHECK_LABEL_RE = re.compile(
     r"провер|подписал|готово|продолж|получить|активир|check|done|continue|receive|claim",
     re.IGNORECASE,
@@ -141,6 +179,7 @@ class CheckInfo:
     amount: str = ""  # «0.1 USDT», "" when the post does not say
     addressee: str = ""  # lowercase username without @; "" = anyone
     password: str = ""  # written in the post, for checks behind one
+    dead: bool = False  # the post says the check is used up (see post_is_dead)
 
 
 def _text(message: Any) -> str:
@@ -223,11 +262,13 @@ def find_check(message: Any) -> Optional[CheckInfo]:
     labels = [link.label for link in links if link.label]
     if not (CHECK_WORD_RE.search(text) or any(CLAIM_LABEL_RE.search(label) for label in labels)):
         return None
+    bot_text = text if getattr(message, "via_bot_id", None) else ""
     return CheckInfo(
         links=links,
         amount=parse_amount([*labels, text]),
         addressee=addressee(text),
         password=post_password(text),
+        dead=post_is_dead(bot_text, labels),
     )
 
 

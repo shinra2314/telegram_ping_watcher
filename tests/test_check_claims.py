@@ -175,11 +175,32 @@ class ConfigAndMiscTests(unittest.TestCase):
 
     def test_freshness(self):
         now = datetime.now(timezone.utc)
-        self.assertTrue(cc.is_fresh(now - timedelta(minutes=5), now))
-        self.assertFalse(cc.is_fresh(now - timedelta(hours=2), now))
-        self.assertTrue(cc.is_fresh(now - timedelta(hours=2), now, personal=True))
-        self.assertFalse(cc.is_fresh(now - timedelta(days=8), now, personal=True))
+        self.assertTrue(cc.is_fresh(now - timedelta(minutes=4), now))
+        self.assertFalse(cc.is_fresh(now - timedelta(minutes=10), now))
+        self.assertTrue(cc.is_fresh(now - timedelta(hours=9), now, personal=True))
+        self.assertFalse(cc.is_fresh(now - timedelta(days=2), now, personal=True))
         self.assertTrue(cc.is_fresh(None, now))
+
+    def test_dead_posts(self):
+        for text in ("🚀 Чек на 5 USDT\n\n✅ Чек активирован", "Мультичек на 1 TON\nАктивировано: 10/10",
+                     "Активаций больше нет", "This cheque has been activated"):
+            with self.subTest(text=text):
+                self.assertTrue(cc.post_is_dead(text))
+        for text in ("🚀 Чек на 5 USDT (5.0$)", "Мультичек на 1 TON\nАктивировано: 3/10",
+                     "🚀 Чек на 0.1 USDT (0.1$) для @MCshinra"):
+            with self.subTest(text=text):
+                self.assertFalse(cc.post_is_dead(text))
+        self.assertTrue(cc.post_is_dead("", ["✅ Чек активирован"]))
+        self.assertFalse(cc.post_is_dead("", ["Получить 5 USDT"]))
+
+    def test_dead_marker_counts_only_in_a_bots_text(self):
+        # A person's comment next to a fresh link must not kill it.
+        human = message("прошлый чек закончился, вот новый t.me/xrocket?start=mc_New1")
+        self.assertFalse(cc.find_check(human).dead)
+        edited = message("🚀 Чек на 5 USDT\n✅ Чек активирован",
+                         buttons=[[button("Получить 5 USDT", "https://t.me/xrocket?start=mc_Old1")]],
+                         via_bot_id=5014831088)
+        self.assertTrue(cc.find_check(edited).dead)
 
     def test_totals(self):
         self.assertEqual(cc.amount_totals(["0.1 USDT", "0.2 USDT", "1 GRAM", "", "junk"]),

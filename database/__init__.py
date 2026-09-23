@@ -96,6 +96,7 @@ from .channels import (
     upsert_channel_profile,
 )
 from .check_claims import (
+    get_check_attempts,
     get_check_claim_stats,
     get_recent_check_claims,
     has_check_claim,

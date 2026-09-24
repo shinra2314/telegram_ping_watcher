@@ -60,5 +60,8 @@ async def pulse(caller: Caller = Depends(current_caller)) -> dict:
     except Exception:
         logger.warning("Mini App pulse failed", exc_info=True)
         return hit[1] if hit else {}
+    # Forget people who stopped polling: the process runs for days.
+    for stale in [k for k, (at, _body) in _cache.items() if now - at >= CACHE_SECONDS]:
+        del _cache[stale]
     _cache[key] = (now, body)
     return body

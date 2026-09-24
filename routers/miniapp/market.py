@@ -115,6 +115,8 @@ async def market_history(
     since = (datetime.now() - timedelta(days=days)).replace(microsecond=0).isoformat()
     snapshots = await get_market_history(limit=20000, since_iso=since)
     body = {"src": src, "dst": dst, "days": days, "points": history_points(snapshots, src, dst)}
+    for stale in [k for k, (at, _body) in _history_cache.items() if now - at >= HISTORY_CACHE_SECONDS]:
+        del _history_cache[stale]
     _history_cache[key] = (now, body)
     return body
 

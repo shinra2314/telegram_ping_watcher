@@ -38,6 +38,12 @@ FILE_RULES: tuple[tuple[str, str, int], ...] = (
     ("data/cards", "*.png", 1),
     ("data", "telegram_login_*.svg", 1),
     ("logs", "codex-*.log", 7),
+    # The watchdog renames a runtime.out.log past 20 MB to .1 before a restart.
+    ("logs", "runtime.out.log.1", 30),
+    # Logs from before logs/ existed and from the old restart script: nothing
+    # writes them any more (a live one keeps a fresh mtime and stays).
+    ("", "app.log", 30),
+    ("", "restart_std*.log", 30),
 )
 
 _BACKUP_STAMP = re.compile(r"_(\d{8}_\d{6})\.db(?:\.zip)?$")

@@ -393,3 +393,60 @@ class RateLimiterTests(unittest.TestCase):
         now[0] = 61
         self.assertTrue(limiter.allow("fresh", 5))
         self.assertEqual(list(limiter.hits), ["fresh"])
+
+
+class LogNoiseTests(unittest.TestCase):
+    def record(self, message, name="telethon.network.mtprotosender"):
+        return logging.LogRecord(name, logging.WARNING, __file__, 1, message, (), None)
+
+    def test_telethon_reconnect_storm_is_one_line_a_minute(self):
+        from pulse_desk.logging_config import CollapseRepeats
+
+        now = [0.0]
+        noise = CollapseRepeats(window=60, clock=lambda: now[0])
+        storm = "Security error while unpacking a received message: Server replied with a wrong session ID"
+        passed = [noise.filter(self.record(storm)) for _ in range(723)]
+        self.assertEqual(passed.count(True), 1)
+        # Another kind has its own minute; our own logger is never touched.
+        self.assertTrue(noise.filter(self.record("Server closed the connection: [WinError 121]")))
+        self.assertTrue(noise.filter(self.record(storm, name="pulse_desk")))
+        now[0] = 61
+        first_after = self.record(storm)
+        self.assertTrue(noise.filter(first_after))
+        self.assertIn("and 722 more", first_after.getMessage())
+        self.assertTrue(noise.filter(self.record("Some other telethon warning")))
+
+    def test_a_hidden_console_gets_warnings_only(self):
+        import io
+
+        from pulse_desk.logging_config import console_level
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        self.assertEqual(console_level(io.StringIO()), logging.WARNING)
+        self.assertEqual(console_level(None), logging.WARNING)
+        self.assertEqual(console_level(Terminal()), logging.NOTSET)
+
+
+class FileRuleTests(unittest.TestCase):
+    def test_stale_root_logs_go_and_live_ones_stay(self):
+        import os
+
+        from pulse_desk import housekeeping
+        from pulse_desk.loops import _prune_files
+
+        rules = {(d, p): days for d, p, days in housekeeping.FILE_RULES}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "logs").mkdir()
+            old = time.time() - 40 * 86400
+            for name in ("app.log", "restart_stderr.log", "restart_stdout.log", "logs/runtime.out.log.1"):
+                (root / name).write_text("x")
+                os.utime(root / name, (old, old))
+            (root / "logs" / "runtime.out.log").write_text("live")
+            for (directory, pattern), days in rules.items():
+                _prune_files(root / directory, pattern, days)
+            left = sorted(str(p.relative_to(root)).replace("\\", "/") for p in root.rglob("*") if p.is_file())
+        self.assertEqual(left, ["logs/runtime.out.log"])

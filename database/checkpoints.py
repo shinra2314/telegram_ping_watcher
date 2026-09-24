@@ -1,7 +1,7 @@
 """Incremental scan checkpoints (per session/username)."""
 from __future__ import annotations
 
-from ._core import _connect, _now_iso
+from ._core import _connect, _now_iso, retry_locked
 
 
 async def get_checkpoint(session_name: str, username: str) -> int:
@@ -65,6 +65,7 @@ async def save_checkpoint(session_name: str, username: str, last_message_id: int
         await db.commit()
 
 
+@retry_locked()
 async def save_checkpoints(session_name: str, checkpoints: dict[str, int]) -> None:
     rows = [
         (session_name, str(username), int(last_message_id), _now_iso())

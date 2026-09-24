@@ -27,6 +27,8 @@ from ._core import (
     _parse_mentions,
     _search_tokens,
     _sync_ping_indexes,
+    is_locked_error,
+    retry_locked,
 )
 
 # Mutable on purpose: tests and tooling override these per-run.
@@ -164,6 +166,7 @@ from .pings import (
     add_ping_tag,
     delete_ping,
     delete_ping_by_message_id,
+    delete_pings,
     get_all_tags,
     get_giveaway_pings_with_links,
     get_ping_by_id,

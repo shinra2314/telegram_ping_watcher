@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import aiosqlite
 
-from ._core import _connect, _now_iso
+from ._core import _connect, _now_iso, retry_locked
 
 
 async def upsert_channel_profile(
@@ -43,6 +43,7 @@ async def get_channel_profile(chat_id: int) -> Optional[dict[str, Any]]:
             return dict(row) if row else None
 
 
+@retry_locked()
 async def recalculate_source_scores() -> None:
     now = _now_iso()
     async with _connect() as db:

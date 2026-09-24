@@ -6,10 +6,14 @@ monkeypatch ``database.DB_PATH``; everything here reads it dynamically via
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import os
+import random
 import re
+import sqlite3
 import sys
 import time
 import traceback
@@ -61,6 +65,43 @@ def _now_iso() -> str:
 
 
 _SLOW_HOLD_SECONDS = float(os.getenv("PULSE_DB_TRACE_SECONDS", "2.0"))
+# How long a writer waits for the lock inside SQLite. The wait happens on the
+# connection's own thread, not on the event loop, so waiting is cheaper than
+# failing: 5 s was being blown by bursts of short writes (24.09).
+BUSY_TIMEOUT_MS = 10_000
+
+
+def is_locked_error(exc: BaseException) -> bool:
+    """SQLite's "another writer holds the lock" — worth another try, unlike a real error."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def retry_locked(attempts: int = 3, base_delay: float = 0.5):
+    """Re-run a whole DB function when the lock was not granted in time.
+
+    For background writers whose one failed write used to cost a whole cycle
+    (a scan pass, a score recalculation). The failed transaction was rolled
+    back when its connection closed, so running the function again is safe as
+    long as it does nothing but database work.
+    """
+
+    def decorate(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(1, attempts + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if attempt >= attempts or not is_locked_error(exc):
+                        raise
+                    await asyncio.sleep(base_delay * attempt + random.uniform(0, base_delay))
+
+        return wrapper
+
+    return decorate
 
 
 @asynccontextmanager
@@ -68,7 +109,7 @@ async def _connect():
     started = time.perf_counter()
     async with aiosqlite.connect(db_path()) as db:
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         await db.execute("PRAGMA foreign_keys=ON")
         try:
             yield db

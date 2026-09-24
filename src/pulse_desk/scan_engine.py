@@ -36,6 +36,44 @@ scan_status = state.scan_status
 _edit_sweep_last_run: dict[tuple[str, Any], float] = {}
 
 
+# A progress row is written at most this often per scan run; see save_scan_progress.
+PROGRESS_WRITE_SECONDS = 5.0
+_progress_mark: dict[str, Any] = {"run": None, "at": 0.0}
+
+
+async def save_scan_progress(scan_run_id: int, *, force: bool = False, **fields: Any) -> bool:
+    """Record a scan run's progress — best effort, and not on every channel.
+
+    ``scan_status`` in memory is the live number; the row is a record of it, and
+    the run's final update writes the totals. One write per processed channel
+    (hundreds per account per sweep, eight accounts) was a steady stream of write
+    transactions, and one of them failing with «database is locked» used to abort
+    the account's whole pass (24.09). Returns whether the row was written.
+    """
+    from database import update_scan_run
+
+    now = time.monotonic()
+    if not force and _progress_mark["run"] == scan_run_id and now - _progress_mark["at"] < PROGRESS_WRITE_SECONDS:
+        return False
+    _progress_mark.update(run=scan_run_id, at=now)
+    try:
+        await update_scan_run(scan_run_id, **fields)
+    except Exception as exc:
+        logger.warning("Scan progress not saved (run %s): %s", scan_run_id, exc)
+        return False
+    return True
+
+
+async def finish_scan_run(scan_run_id: int, **fields: Any) -> None:
+    """The final row of a run. It matters more than progress (a run left
+    «running» is marked interrupted at the next start), but a failure here
+    must still not skip the rest of the run's cleanup."""
+    try:
+        await save_scan_progress(scan_run_id, force=True, **fields)
+    except Exception:  # pragma: no cover - save_scan_progress already swallows
+        logger.exception("Could not finish scan run %s", scan_run_id)
+
+
 def channel_checkpoint_key(username: str, chat_id: Any) -> str:
     return f"{username}|channel:{chat_id}"
 
@@ -182,7 +220,7 @@ async def save_channel_username_checkpoints(
 
 
 async def scan_single_account(client: TelegramClient, limit: Optional[int] = None) -> int:
-    from database import get_ping_by_message_ref, save_checkpoint, update_scan_run
+    from database import get_ping_by_message_ref, save_checkpoint
 
     session_name = getattr(client, "_session_name_custom", "unknown")
     found = 0
@@ -197,7 +235,7 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
         state.heartbeat("auto-scan")
         scan_status["processed_usernames"] += units
         if scan_status.get("scan_run_id"):
-            await update_scan_run(
+            await save_scan_progress(
                 int(scan_status["scan_run_id"]),
                 processed_usernames=scan_status["processed_usernames"],
                 found=scan_status["found"],
@@ -274,8 +312,9 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
         expected_units = len(dialogs) * len(state.ping_usernames)
         scan_status["total_usernames"] = int(scan_status.get("total_usernames") or 0) + expected_units
         if scan_status.get("scan_run_id"):
-            await update_scan_run(
+            await save_scan_progress(
                 int(scan_status["scan_run_id"]),
+                force=True,
                 total_usernames=scan_status["total_usernames"],
                 last_error=scan_status.get("last_error"),
             )
@@ -426,7 +465,7 @@ async def scan_single_account(client: TelegramClient, limit: Optional[int] = Non
 
 
 async def full_history_scan() -> None:
-    from database import start_scan_run, update_scan_run
+    from database import start_scan_run
 
     if state.scan_lock.locked():
         logger.info("History scan skipped: already running.")
@@ -475,8 +514,9 @@ async def full_history_scan() -> None:
                     break
                 await task  # count is tracked via scan_status["found"], not the return value
                 scan_status["processed_accounts"] += 1
-                await update_scan_run(
+                await save_scan_progress(
                     scan_run_id,
+                    force=True,
                     processed_accounts=scan_status["processed_accounts"],
                     processed_usernames=scan_status["processed_usernames"],
                     found=scan_status["found"],
@@ -497,7 +537,7 @@ async def full_history_scan() -> None:
                 "current_channel": None,
                 "cancel_requested": state.scan_cancel_event.is_set(),
             })
-            await update_scan_run(
+            await finish_scan_run(
                 scan_run_id,
                 status=status_value,
                 finished_at=scan_status["finished_at"],
@@ -516,7 +556,7 @@ async def backfill_account_name_mentions(client: TelegramClient, per_channel_lim
     search, so pings delivered as text-mentions (name links) are re-evaluated.
     Messages already stored are skipped; historical hits raise no notifications.
     """
-    from database import get_ping_by_message_ref, update_scan_run
+    from database import get_ping_by_message_ref
 
     session_name = getattr(client, "_session_name_custom", "unknown")
     found = 0
@@ -576,7 +616,7 @@ async def backfill_account_name_mentions(client: TelegramClient, per_channel_lim
             finally:
                 scan_status["processed_usernames"] += 1
                 if scan_status.get("scan_run_id"):
-                    await update_scan_run(
+                    await save_scan_progress(
                         int(scan_status["scan_run_id"]),
                         processed_usernames=scan_status["processed_usernames"],
                         found=scan_status["found"],
@@ -598,7 +638,7 @@ async def backfill_name_mention_scan(per_channel_limit: int = 1000) -> None:
     channel history across all accounts. Reuses the scan lock and status so the
     dashboard shows progress and the existing cancel button works.
     """
-    from database import start_scan_run, update_scan_run
+    from database import start_scan_run
 
     if state.scan_lock.locked():
         logger.info("Mention backfill skipped: a scan is already running.")
@@ -638,8 +678,9 @@ async def backfill_name_mention_scan(per_channel_limit: int = 1000) -> None:
                     break
                 await backfill_account_name_mentions(client, per_channel_limit)
                 scan_status["processed_accounts"] += 1
-                await update_scan_run(
+                await save_scan_progress(
                     scan_run_id,
+                    force=True,
                     processed_accounts=scan_status["processed_accounts"],
                     processed_usernames=scan_status["processed_usernames"],
                     found=scan_status["found"],
@@ -655,7 +696,7 @@ async def backfill_name_mention_scan(per_channel_limit: int = 1000) -> None:
                 "current_channel": None,
                 "cancel_requested": state.scan_cancel_event.is_set(),
             })
-            await update_scan_run(
+            await finish_scan_run(
                 scan_run_id,
                 status=status_value,
                 finished_at=scan_status["finished_at"],

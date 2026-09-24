@@ -31,7 +31,7 @@ from database import init_db, interrupt_stale_scan_runs
 from pulse_desk import APP_VERSION
 from pulse_desk import check_claimer, ignored_chats
 from pulse_desk import watch_settings as ws
-from pulse_desk.app_ctx import logger, settings, state
+from pulse_desk.app_ctx import logger, loop_watch, settings, state
 from pulse_desk.bot_service import bot_start_needs_retry, init_bot, retry_bot_start
 from pulse_desk.common import record_app_event, start_background_task, start_supervised
 from pulse_desk.loops import (
@@ -65,6 +65,8 @@ state.session_names = settings.discover_sessions()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # First: a stall during startup (migrations, the first sweep) is caught too.
+    loop_watch.start()
     await init_db()
     interrupted_scans = await interrupt_stale_scan_runs()
     if interrupted_scans:
@@ -133,6 +135,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Launcher service registration failed", exc_info=True)
     yield
     state.shutting_down = True
+    loop_watch.stop()
     with suppress(Exception):
         await get_supervisor().shutdown()
     for task in list(state.background_tasks.values()):

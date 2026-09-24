@@ -11,6 +11,7 @@ HTTP остался ровно ради этой ручки — её опраш�
 """
 from __future__ import annotations
 
+import asyncio
 import shutil
 from datetime import datetime
 
@@ -19,7 +20,7 @@ from fastapi import APIRouter
 import database
 from pulse_desk import APP_VERSION
 from pulse_desk import watch_settings as ws
-from pulse_desk.app_ctx import settings, state
+from pulse_desk.app_ctx import handler_errors, loop_watch, settings, state
 from pulse_desk.common import now_iso
 from pulse_desk.jobs import expected_jobs, feature_job_polls, runtime_health
 from pulse_desk.watchdog import classify_job, default_thresholds
@@ -28,6 +29,19 @@ router = APIRouter()
 
 # Бот обычно переподключается за пару шагов backoff; дольше — это уже простой.
 BOT_OFFLINE_DEGRADED_SECONDS = 600
+# Сколько ручка ждёт каждую SQL-цифру. Сторож даёт на ответ 5 с; 23.09 шторм
+# блокировок растянул две выборки дольше — и сторож перезапустил живой процесс.
+DB_FIELD_TIMEOUT_SECONDS = 2.0
+
+
+async def _db_field(query) -> tuple[object, bool]:
+    """(значение, успело ли) — занятая база даёт None, а не зависший ответ."""
+    try:
+        return await asyncio.wait_for(query(), DB_FIELD_TIMEOUT_SECONDS), True
+    except asyncio.TimeoutError:
+        return None, False
+    except Exception:
+        return None, True
 
 
 @router.get("/api/health")
@@ -84,16 +98,10 @@ async def health():
     bot_last_update_seconds = (
         int((now - state.bot_last_update_at).total_seconds()) if state.bot_last_update_at else None
     )
-    try:
-        pending_backlog = await database.pending_sends_backlog()
-    except Exception:
-        pending_backlog = None
-    try:
-        # Owner's ping cards not delivered yet (ping_notify). A number that stays
-        # up means mentions are being found but not reaching the owner.
-        owed_ping_cards = await database.count_owed_ping_notifications()
-    except Exception:
-        owed_ping_cards = None
+    pending_backlog, backlog_in_time = await _db_field(database.pending_sends_backlog)
+    # Owner's ping cards not delivered yet (ping_notify). A number that stays
+    # up means mentions are being found but not reaching the owner.
+    owed_ping_cards, owed_in_time = await _db_field(database.count_owed_ping_notifications)
     bot_ok = (
         not bot_configured
         or (
@@ -118,8 +126,13 @@ async def health():
             "bot_handler_calls": state.bot_handler_calls,
             "bot_handler_errors": state.bot_handler_errors,
             "bot_handler_slow": state.bot_handler_slow,
+            "account_handler_errors": handler_errors.total(),
             "pending_sends_backlog": pending_backlog,
             "owed_ping_cards": owed_ping_cards,
+            # The two numbers above did not come back in time: the database is
+            # busy, the process is not dead — the watchdog must not restart it.
+            "db_slow": not (backlog_in_time and owed_in_time),
+            **loop_watch.stats(),
             "unhealthy_jobs": unhealthy_jobs,
             "time": now_iso(),
             "version": APP_VERSION,

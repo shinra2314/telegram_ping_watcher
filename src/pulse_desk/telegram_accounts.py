@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from contextlib import suppress
 from datetime import datetime, timedelta
@@ -20,11 +21,13 @@ from .app_ctx import (
     TELEGRAM_RECONNECT_JITTER_SECONDS,
     TELEGRAM_RECONNECT_MAX_SECONDS,
     TELEGRAM_RETRY_DELAY_SECONDS,
+    handler_errors,
     logger,
     settings,
     state,
 )
 from .common import flood_wait_seconds, now_iso, record_app_event, start_background_task
+from .resilience import guard
 from .telegram_errors import AUTH_KEY_DUPLICATED_STATUS, auth_key_duplicated_message, is_auth_key_duplicated
 from .telegram_reconnect import reconnect_delay_seconds as calculate_reconnect_delay_seconds
 
@@ -32,6 +35,32 @@ try:
     from telethon.errors import FloodWaitError
 except ImportError:  # pragma: no cover
     FloodWaitError = Exception
+
+
+def deletion_key(chat_id: Any, message_ids: list[int], session_name: str) -> str:
+    """Dedupe key for one deletion event.
+
+    A channel or supergroup deletion reaches every account in the chat, and one
+    of them is enough. An event without a chat (private chats, basic groups) is
+    numbered in each account's own sequence, so it is keyed by the session too.
+    """
+    digest = hashlib.blake2b(",".join(map(str, sorted(message_ids))).encode(), digest_size=8).hexdigest()
+    return f"del:{chat_id if chat_id else 'nochat:' + session_name}:{digest}"
+
+
+async def on_messages_deleted(session_name: str, chat_id: Any, deleted_ids: Any) -> int:
+    """Soft-delete/drop what we stored of a deletion event; how many pings it touched.
+
+    One database call per event, not one write per deleted id per account: that
+    was 400 competing write transactions for a 50-message cleanup in a channel
+    eight of our accounts sit in, and the source of the 24.09 lock storms.
+    """
+    from database import delete_pings
+
+    ids = [value for value in deleted_ids or [] if isinstance(value, int) and not isinstance(value, bool)]
+    if not ids or not state.remember_message(deletion_key(chat_id, ids, session_name)):
+        return 0
+    return await delete_pings(chat_id or None, ids)
 
 
 def live_message_key(message: Any, session_name: str, suffix: Any = "") -> str:
@@ -221,8 +250,6 @@ async def monitor_client_disconnect(client: TelegramClient, session_name: str) -
 async def start_client(session_name: str, retry_count: int = 0) -> None:
     from .ping_pipeline import process_ping_message
 
-    from database import delete_ping, delete_ping_by_message_id
-
     if not API_ID or not API_HASH:
         logger.warning("Telegram API credentials are missing.")
         return
@@ -263,6 +290,7 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
         })
 
         @client.on(events.NewMessage())
+        @guard("new-message", handler_errors, clean_name)
         async def handler(event):
             # Proof the account still receives updates (account_health: "silent").
             account["last_update_at"] = now_iso()
@@ -277,6 +305,7 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
                                        account_username=account.get("username") or "", notify=True)
 
         @client.on(events.MessageEdited())
+        @guard("edited-message", handler_errors, clean_name)
         async def edit_handler(event):
             account["last_update_at"] = now_iso()
             if state.bot_id and event.sender_id == state.bot_id:
@@ -295,12 +324,9 @@ async def start_client(session_name: str, retry_count: int = 0) -> None:
             )
 
         @client.on(events.MessageDeleted())
+        @guard("deleted-messages", handler_errors, clean_name)
         async def delete_handler(event):
-            for msg_id in event.deleted_ids:
-                if event.chat_id:
-                    await delete_ping(event.chat_id, msg_id)
-                else:
-                    await delete_ping_by_message_id(msg_id)
+            await on_messages_deleted(clean_name, event.chat_id, event.deleted_ids)
 
         state.clients.append(client)
         start_background_task(f"telegram-watch:{clean_name}", monitor_client_disconnect(client, clean_name))

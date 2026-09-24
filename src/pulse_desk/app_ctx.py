@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from .config import get_settings
 from .logging_config import configure_logging
+from .resilience import LoopWatch, ThrottledErrors
 from .runtime import AppState
 from .scan import normalize_scan_history_limit, normalize_recent_edit_scan_limit
 from .telegram_reconnect import reconnect_delay_seconds as _calc_reconnect_delay  # noqa: F401
@@ -22,6 +23,10 @@ from .telegram_reconnect import reconnect_delay_seconds as _calc_reconnect_delay
 settings = get_settings()
 state = AppState()
 logger = configure_logging(settings.log_file, settings.log_level, settings.telethon_log_level)
+# Errors of the accounts' update handlers: one traceback a minute per kind.
+handler_errors = ThrottledErrors(logger)
+# Started in main.lifespan; its numbers go to /api/health.
+loop_watch = LoopWatch(logger)
 
 # ---------------------------------------------------------------------------
 # Derived constants (mirror of the block in main.py lines 154-232)

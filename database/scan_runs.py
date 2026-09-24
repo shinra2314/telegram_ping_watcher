@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import aiosqlite
 
-from ._core import _connect, _now_iso
+from ._core import _connect, _now_iso, retry_locked
 
 
 async def start_scan_run(total_accounts: int, total_usernames: int) -> int:
@@ -24,6 +24,7 @@ async def start_scan_run(total_accounts: int, total_usernames: int) -> int:
         return int(cursor.lastrowid)
 
 
+@retry_locked()
 async def update_scan_run(scan_run_id: int, **fields: Any) -> None:
     allowed = {
         "status",

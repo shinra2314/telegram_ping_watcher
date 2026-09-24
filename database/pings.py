@@ -16,6 +16,7 @@ from ._core import (
     _parse_mentions,
     _search_tokens,
     _sync_ping_indexes,
+    retry_locked,
 )
 
 
@@ -387,54 +388,72 @@ async def update_ping_meta(
         await db.commit()
 
 
-async def delete_ping(chat_id: int, message_id: int) -> None:
-    """Win/giveaway pings survive channel deletion as soft-deleted rows
-    (deleted_at) so they stay visible on the giveaways board."""
+# SQLite's default cap on bound parameters is 999; a deletion event carries at most 100 ids.
+_DELETE_CHUNK = 500
+
+
+@retry_locked()
+async def delete_pings(chat_id: Optional[int], message_ids: Sequence[int]) -> int:
+    """One deletion event: win/giveaway pings survive as soft-deleted rows
+    (deleted_at) so they stay on the giveaways board; the rest are removed.
+
+    Returns how many stored pings the event touched. Nearly every deleted
+    message is one we never stored, so the rows are looked up first and the
+    write lock is taken only when something matched — and then once for the
+    whole event. A write transaction per deleted id (×8 accounts receiving the
+    same channel deletion) was the biggest source of «database is locked» (24.09).
+
+    ``chat_id=None`` is a deletion event that carries no chat, which Telegram
+    sends for private chats and basic groups — those share one per-account
+    message-id sequence, so the bare id identifies the message. Channel posts are
+    numbered per channel and collide with it constantly, so they are excluded: a
+    deleted DM must not mark an unrelated channel win as "post removed" or drop a
+    channel mention that is still live.
+    """
+    ids = sorted({int(value) for value in message_ids if isinstance(value, int) and not isinstance(value, bool)})
+    if not ids:
+        return 0
+    chunks = [ids[start:start + _DELETE_CHUNK] for start in range(0, len(ids), _DELETE_CHUNK)]
+
+    def scope(chunk: list[int]) -> tuple[str, list[Any]]:
+        marks = ",".join("?" for _ in chunk)
+        if chat_id is None:
+            return f"COALESCE(chat_type, '') <> 'channel' AND message_id IN ({marks})", list(chunk)
+        return f"chat_id = ? AND message_id IN ({marks})", [chat_id, *chunk]
+
     async with _connect() as db:
-        await db.execute(
-            "UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE chat_id = ? AND message_id = ? AND (is_win = 1 OR is_giveaway = 1)",
-            (_now_iso(), chat_id, message_id),
-        )
-        rows = await (await db.execute(
-            "SELECT id FROM pings WHERE chat_id = ? AND message_id = ? AND is_win = 0 AND is_giveaway = 0",
-            (chat_id, message_id),
-        )).fetchall()
-        for row in rows:
-            await db.execute("DELETE FROM pings_fts WHERE rowid = ?", (row[0],))
-        await db.execute(
-            "DELETE FROM pings WHERE chat_id = ? AND message_id = ? AND is_win = 0 AND is_giveaway = 0",
-            (chat_id, message_id),
-        )
+        touched = 0
+        for chunk in chunks:
+            where, params = scope(chunk)
+            row = await (await db.execute(f"SELECT COUNT(*) FROM pings WHERE {where}", params)).fetchone()
+            touched += int(row[0] or 0)
+        if not touched:
+            return 0
+        now = _now_iso()
+        for chunk in chunks:
+            where, params = scope(chunk)
+            await db.execute(
+                f"UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE {where} AND (is_win = 1 OR is_giveaway = 1)",
+                (now, *params),
+            )
+            # The FTS table has no trigger: its rows go first, by the ids about to be dropped.
+            await db.execute(
+                f"DELETE FROM pings_fts WHERE rowid IN (SELECT id FROM pings WHERE {where} AND is_win = 0 AND is_giveaway = 0)",
+                params,
+            )
+            await db.execute(f"DELETE FROM pings WHERE {where} AND is_win = 0 AND is_giveaway = 0", params)
         await db.commit()
+        return touched
+
+
+async def delete_ping(chat_id: int, message_id: int) -> None:
+    """One message of one chat; see :func:`delete_pings`."""
+    await delete_pings(chat_id, [message_id])
 
 
 async def delete_ping_by_message_id(message_id: int) -> None:
-    """See delete_ping: win/giveaway rows are soft-deleted, the rest removed.
-
-    Used only for deletion events that carry no chat, which Telegram sends for
-    private chats and basic groups — those share one per-account message-id
-    sequence, so the bare id identifies the message. Channel posts are numbered
-    per channel and collide with it constantly, so they are excluded here: a
-    deleted DM must not mark an unrelated channel win as "post removed" or drop
-    a channel mention that is still live.
-    """
-    scope = "COALESCE(chat_type, '') <> 'channel' AND message_id = ?"
-    async with _connect() as db:
-        await db.execute(
-            f"UPDATE pings SET deleted_at = COALESCE(deleted_at, ?) WHERE {scope} AND (is_win = 1 OR is_giveaway = 1)",
-            (_now_iso(), message_id),
-        )
-        rows = await (await db.execute(
-            f"SELECT id FROM pings WHERE {scope} AND is_win = 0 AND is_giveaway = 0",
-            (message_id,),
-        )).fetchall()
-        for row in rows:
-            await db.execute("DELETE FROM pings_fts WHERE rowid = ?", (row[0],))
-        await db.execute(
-            f"DELETE FROM pings WHERE {scope} AND is_win = 0 AND is_giveaway = 0",
-            (message_id,),
-        )
-        await db.commit()
+    """One message of a deletion event without a chat; see :func:`delete_pings`."""
+    await delete_pings(None, [message_id])
 
 
 async def get_giveaway_pings_with_links(limit: int = 5000) -> list[dict[str, Any]]:

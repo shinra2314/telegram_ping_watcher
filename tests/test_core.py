@@ -1528,6 +1528,27 @@ class BotAccessTests(unittest.IsolatedAsyncioTestCase):
         holders = await database.list_bot_key_members(mine["id"])
         self.assertEqual([m["tg_id"] for m in holders], [11])
 
+    async def test_key_delay_reaches_its_holders_but_other_grants_do_not(self):
+        from pulse_desk.bot.sections.keys import save_permissions
+        from pulse_desk.bot_permissions import parse_permissions, set_delay, set_features
+
+        key = await database.create_bot_key("late", "late-secret-123456", "viewer", None,
+                                            '{"features": ["stats"], "delay_minutes": 1}')
+        other = await database.create_bot_key("keep", "keep-secret-123456", "viewer", None,
+                                              '{"delay_minutes": 5}')
+        await database.upsert_bot_member(31, "a", "A", key["id"], "viewer", '{"features": ["stats"], "delay_minutes": 1}')
+        await database.upsert_bot_member(32, "b", "B", other["id"], "viewer", '{"delay_minutes": 5}')
+
+        grants = set_features(set_delay(parse_permissions(key["permissions"]), 0), ["stats", "market"])
+        await save_permissions(key["id"], grants)
+
+        holder = parse_permissions((await database.get_bot_member(31))["permissions"])
+        self.assertEqual(holder["delay_minutes"], 0)
+        # The snapshot still guards the menu: only the delay is carried over.
+        self.assertEqual(holder["features"], ["stats"])
+        stranger = parse_permissions((await database.get_bot_member(32))["permissions"])
+        self.assertEqual(stranger["delay_minutes"], 5)
+
     async def test_delete_key_removes_it_but_keeps_the_member(self):
         key = await database.create_bot_key("gone", "del-secret-1234567", "viewer", None, '{"features": ["stats"]}')
         await database.upsert_bot_member(901, "u", "U", key["id"], "viewer", '{"features": ["stats"]}')

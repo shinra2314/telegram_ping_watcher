@@ -13,7 +13,7 @@ from __future__ import annotations
 from database import (
     delete_bot_key, get_bot_key, list_bot_key_members, list_bot_keys, set_bot_key_expiry,
     set_bot_key_label, set_bot_key_max_uses, set_bot_key_permissions, set_bot_key_revoked,
-    set_bot_key_role,
+    set_bot_key_role, set_bot_member_permissions,
 )
 
 from ...app_ctx import state
@@ -99,7 +99,27 @@ def link_text(key: dict) -> str:
 
 async def save_permissions(key_id: int, grants: dict) -> None:
     await set_bot_key_permissions(key_id, dump_permissions(grants))
-    await record_app_event("INFO", "bot", "Bot key grants updated", {"id": key_id, "via": "bot"})
+    synced = await sync_holders_delay(key_id, permission_delay_minutes(grants))
+    await record_app_event("INFO", "bot", "Bot key grants updated", {"id": key_id, "via": "bot", "holders_synced": synced})
+
+
+async def sync_holders_delay(key_id: int, minutes: int) -> int:
+    """Carry the key's send delay onto everyone who already holds it.
+
+    Holders keep a snapshot of the grants taken at redeem time, so that editing
+    the key never strips an onboarded guest of their menu. The delay is not a
+    menu, and the snapshot made it deaf to the panel: a key set to «мгновенно»
+    still held its holder's copies back by the minute copied in June. Only the
+    delay travels; sections, notification types and accounts stay the snapshot.
+    """
+    synced = 0
+    for member in await list_bot_key_members(key_id):
+        held = parse_permissions(member.get("permissions"))
+        if permission_delay_minutes(held) == minutes:
+            continue
+        await set_bot_member_permissions(int(member["tg_id"]), dump_permissions(set_delay(held, minutes)))
+        synced += 1
+    return synced
 
 
 # ---- typed input --------------------------------------------------------

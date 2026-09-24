@@ -11,7 +11,9 @@ A grant is a plain dict::
 gets their own notification immediately.
 Grants are chosen by the owner when an access key (invite link) is created and
 copied onto the member row when the key is redeemed, so revoking or editing the
-key later never strips an already-onboarded guest of a working menu.
+key later never strips an already-onboarded guest of a working menu. The delay
+is the exception: it is not a menu, so a key edit carries it onto every holder
+(``bot.sections.keys.sync_holders_delay``).
 
 No Telethon/DB imports — everything here is unit-testable in isolation.
 """

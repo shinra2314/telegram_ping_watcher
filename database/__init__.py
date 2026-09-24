@@ -82,6 +82,7 @@ from .bot_access import (
     set_bot_key_revoked,
     set_bot_key_role,
     set_bot_member_blocked,
+    set_bot_member_permissions,
     set_bot_member_prefs,
     set_bot_member_role,
     touch_bot_member,

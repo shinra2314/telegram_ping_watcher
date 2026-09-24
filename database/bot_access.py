@@ -231,6 +231,15 @@ async def upsert_bot_member(
         await db.commit()
 
 
+async def set_bot_member_permissions(tg_id: int, permissions: str) -> None:
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE bot_members SET permissions = ? WHERE tg_id = ?",
+            (permissions or "", int(tg_id)),
+        )
+        await db.commit()
+
+
 async def get_bot_member(tg_id: int) -> Optional[dict]:
     """One member row, with the label of the key they joined through.
 

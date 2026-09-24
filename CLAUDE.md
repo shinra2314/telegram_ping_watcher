@@ -289,19 +289,28 @@ src/pulse_desk/
                       several times a minute
   check_claims.py   — Wallet-bot checks (pure): a check is `t.me/<bot>?start=<code>`
                       (URL button, hidden link or text) for `xrocket` / `send` /
-                      `CryptoBot` / `redcubebetbot` (casino, inline @redcube) **and** a post that reads like one («чек» in the
+                      `CryptoBot` / `redcubebetbot` (casino, inline @redcube) / `loses`
+                      (Rampage casino, inline @loses) **and** a post that reads like one («чек» in the
                       text or a «Получить/Receive» button) — referral links in
                       chatter do not count; CryptoBot codes only `CQ…` (invoices are
                       `IV…`), xRocket anything but `inv…` (its invoices; a personal
                       check it calls «перевод»), RedCube `C` + 11 (`U<id>` is a
-                      profile link). Amounts with a ticker or in `$`. Amount, addressee
+                      profile link), Rampage anything but a referral (bare user id,
+                      `ref…`) — its real code format was not seen yet (23.09); a
+                      post through a wallet bot whose button is a callback is
+                      logged as «not read as a check» with its labels. Amounts with
+                      a ticker or in `$` («0.3$», «$0.5»). Rampage's counter
+                      «Осталось активаций: 50 из 50» counts what is **left** (dead
+                      only at 0), unlike xRocket's «10/10» used. Amount, addressee
                       («для @X»), a password written in the post, the own-sender
                       rule, reply classification (claimed / gone / not_for_you /
                       own / turnover / premium / captcha / password / subscribe /
                       unknown — order matters: «уже активирован» is `gone` before
                       «активирован» can read as a win). `turnover` is a casino
                       check behind a betting turnover («нужен оборот 1 000$ за 1
-                      день»): skipped with no relay card and dead for every
+                      день») or a deposit («Депозит за 7 дней от $10», Rampage —
+                      only as a condition, a bare «депозит» may be a menu word):
+                      skipped with no relay card and dead for every
                       account (owner's order, 23.09), config (`check_claim` key:
                       `mode` claim|watch|off, `disabled` sessions; absent = claim, all)
   check_claimer.py  — Presses checks (I/O). `on_message` runs in **every account's**

@@ -216,11 +216,17 @@ def _note_unreadable(message: Any) -> None:
     """A post with a wallet-bot button that did not read as a check: logged once.
 
     A Mini App link or a new code format would otherwise make the claimer go
-    quiet with nothing in the log to say why.
+    quiet with nothing in the log to say why. So would a post sent through a
+    wallet bot whose «Получить» is a callback, not a link (Rampage's format was
+    not seen yet, 23.09): its button labels are logged instead.
     """
-    if getattr(message, "reply_markup", None) is None:
+    markup = getattr(message, "reply_markup", None)
+    if markup is None:
         return
     links = [(label, url) for url, label in cc.message_links(message) if cc.WALLET_LINK_RE.search(url)]
+    if not links and getattr(message, "via_bot_id", None) in state.check_bot_ids:
+        links = [(getattr(button, "text", ""), "callback") for row in getattr(markup, "rows", None) or []
+                 for button in getattr(row, "buttons", None) or []]
     if links and _first(state.check_seen, f"unreadable|{getattr(message, 'chat_id', None)}|{getattr(message, 'id', None)}"):
         logger.info("Wallet-bot button not read as a check in %s/%s: %s | %r",
                     getattr(message, "chat_id", None), getattr(message, "id", None), links[:3],
@@ -406,8 +412,8 @@ def _incoming(batch: Any, base: Optional[int]) -> list:
 
 
 # Answers that mean the check is over for every one of our accounts. «Premium
-# only» is not among them: some of ours have Premium. A turnover check is: none
-# of ours bets, and the owner does not want them (23.09).
+# only» is not among them: some of ours have Premium. A turnover (or deposit)
+# check is: none of ours bets or pays in, and the owner does not want them (23.09).
 DEAD_OUTCOMES = {"gone", "invoice", "turnover"}
 
 # Our messages further apart than this are not one burst of presses.
@@ -693,7 +699,7 @@ _DONE_HEADS = {
     "own": "🙈 **Это свой чек**",
     "premium": "💎 **Чек только для Premium**",
     "invoice": "🧾 **Это счёт на оплату, не чек**",
-    "turnover": "🎰 **Чек с оборотом — пропущен**",
+    "turnover": "🎰 **Чек с оборотом или депозитом — пропущен**",
     "subscribe": "📢 **Подписаться не вышло**",
     "error": "⚠️ **Не получилось**",
 }

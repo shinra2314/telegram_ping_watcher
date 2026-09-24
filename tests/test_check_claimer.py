@@ -539,6 +539,30 @@ class TurnoverTests(ClaimerCase):
         self.assertIn("xrocket|mc_Gen1", state.dead_check_codes)
 
 
+def deposit_script(kind, value):
+    if kind == "start":
+        return [{"text": "❌ Условия не выполнены:\nНужен хотя бы один свой реферал\nДепозит за 7 дней от $10"}]
+    return []
+
+
+class RampageDepositTests(ClaimerCase):
+    only_a = True
+    script = staticmethod(deposit_script)
+
+    async def test_a_rampage_check_behind_a_deposit_is_pressed_then_dropped_quietly(self):
+        # The owner's screenshot, 23.09: «Осталось активаций: 50 из 50» is a fresh check, not a used one.
+        message = post("Мультичек на 💲 25 (0.5$ x 50)\nОсталось активаций: 50 из 50\nДепозит за 7 дней от $10")
+        message.reply_markup.rows[0].buttons[0] = SimpleNamespace(
+            text="💲 Получить $0.5", url="https://t.me/loses?start=mcRampage1")
+        message.via_bot_id = 777001
+        self.see(self.a, message)
+        await self.settle()
+        self.assertEqual(self.a.starts, ["mcRampage1"])
+        self.assertEqual([(r["bot"], r["outcome"]) for r in await self.rows()], [("rampage", "turnover")])
+        self.notify.assert_not_awaited()
+        self.assertEqual(state.check_relays, {})
+
+
 def later_password_script(kind, value):
     if kind == "start":
         return [{"text": "Введите пароль от чека", "buttons": [[Btn("❌ Отмена", data=b"x")]]}]

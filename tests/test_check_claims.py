@@ -92,6 +92,23 @@ class FindCheckTests(unittest.TestCase):
         self.assertIsNone(cc.find_check(message("Чек игрока t.me/redcubebetbot?start=U1741523718")))
         self.assertEqual(cc.amount_totals(["0.3 $", "0.3 $"]), {"$": "0.6"})
 
+    def test_rampage_multicheck(self):
+        # The owner's screenshot, 23.09: inline @loses, «Получить $0.5», a counter of what is LEFT.
+        post = message("Мультичек на 💲 25 (0.5$ x 50)\nОсталось активаций: 50 из 50\nОт: @kerosen\n\n"
+                       "Условия активации\nНужно поставить емодзи 🎲 из пака\n"
+                       "Нужен хотя бы один свой реферал\nДепозит за 7 дней от $10",
+                       buttons=[[button("💲 Получить $0.5", "https://t.me/loses?start=mcAbC123xyz")]],
+                       via_bot_id=777001)
+        info = cc.find_check(post)
+        self.assertEqual([(link.bot, link.code) for link in info.links], [("rampage", "mcAbC123xyz")])
+        self.assertEqual(info.amount, "0.5 $")
+        self.assertEqual(info.addressee, "")
+        self.assertFalse(info.dead)
+        self.assertEqual(cc.parse_amount(["🧾 Мультичек на $0.7 × 200"]), "0.7 $")
+        # Referral links on the same bot are not checks.
+        self.assertIsNone(cc.find_check(message("Чек? нет, рефка t.me/loses?start=123456789")))
+        self.assertIsNone(cc.find_check(message("Получи чек t.me/loses?start=ref_kerosen")))
+
     def test_same_code_twice_is_one_link(self):
         post = message("Чек https://t.me/xrocket?start=mc_Same1",
                        buttons=[[button("Получить", "https://t.me/xrocket?start=mc_Same1")]])
@@ -154,6 +171,10 @@ class ClassifyTests(unittest.TestCase):
         "⚠️ Для активации чека, нужен оборот 1 000$ за 1 день. Вам осталось набрать 1 000$": "turnover",
         "Чтобы получить чек, отыграйте 500$": "turnover",
         "Wager 100$ to activate this check": "turnover",
+        # Rampage's conditions: a deposit is money in, and none of ours pays in either.
+        "❌ Депозит за 7 дней от $10": "turnover",
+        "Для активации нужен депозит от 10$": "turnover",
+        "✅ Вы получили $0.5\nДепозит за 7 дней от $10 ✅": "claimed",
     }
 
     def test_money_out_labels(self):
@@ -214,8 +235,11 @@ class ConfigAndMiscTests(unittest.TestCase):
                      "Активаций больше нет", "This cheque has been activated"):
             with self.subTest(text=text):
                 self.assertTrue(cc.post_is_dead(text))
+        # Rampage counts what is left: «50 из 50» is untouched, «0 из 50» is over.
+        self.assertTrue(cc.post_is_dead("Мультичек на 💲 25\nОсталось активаций: 0 из 50"))
         for text in ("🚀 Чек на 5 USDT (5.0$)", "Мультичек на 1 TON\nАктивировано: 3/10",
-                     "🚀 Чек на 0.1 USDT (0.1$) для @MCshinra"):
+                     "🚀 Чек на 0.1 USDT (0.1$) для @MCshinra",
+                     "Мультичек на 💲 25\nОсталось активаций: 50 из 50", "Осталось активаций: 1 из 50"):
             with self.subTest(text=text):
                 self.assertFalse(cc.post_is_dead(text))
         self.assertTrue(cc.post_is_dead("", ["✅ Чек активирован"]))

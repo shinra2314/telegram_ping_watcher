@@ -189,10 +189,17 @@ static/app/                — the panel page. Vanilla JS, no build step, one gl
   a stale session refused, offered after reopening; only `RETRYABLE` paths —
   never login), `Offline` (last answer of the read-only screens, shown when
   the PC is off; no post texts, accounts, keys). `/app-sw.js` (static/app/sw.js)
-  is a network-first shell cache so the page opens at all while the PC is off;
+  is a network-first shell cache so the page opens at all while the PC is off
+  (waits 6 s for the network, serves the cached shell over the tunnel's 5xx);
   it never touches /api. `Pulse` polls `/api/app/pulse` every 30 s while
   visible and only marks tabs/lists as new — lists are never repainted under
   the reader.
+  **`api()` never waits forever** (24.09): `fetch` has a timeout
+  (`API_TIMEOUT_MS`: read 20 s, action 45 s, `/api/app/login/*` 90 s); a
+  stalled read or the tunnel's 502/504 falls back to the `Offline` snapshot like
+  a dropped connection, a stalled action says «действие могло пройти», a 503
+  read (busy DB) is retried once after 1.5 s. `unhandledrejection` / `error`
+  show a toast (≤ 1 per 4 s) instead of a button that silently does nothing.
   Dev: `scripts/miniapp_dev_link.py` prints a localhost link with initData
   signed by the real bot token (no auth bypass exists in the server).
 
@@ -208,7 +215,26 @@ src/pulse_desk/
                       digest settings + runtime tunables (SCAN_INTERVAL_SECONDS
                       etc.). Read tunables via the module: `ws.SCAN_HISTORY_LIMIT`
   telegram_accounts.py — Account lifecycle: start_client, reconnect/cooldown,
-                      auth-session helpers, disconnect
+                      auth-session helpers, disconnect. The three update
+                      handlers are wrapped in `resilience.guard` — they never
+                      raise into Telethon (which logs a full traceback per
+                      update). A deletion event is **one** `delete_pings` call
+                      (`on_messages_deleted`), deduped across accounts by
+                      `deletion_key` (chat + ids; a chatless event — private
+                      chats, basic groups — is per-account numbering, so keyed
+                      by session too). It used to be one write transaction per
+                      deleted id per account, stored or not: 400 writers for a
+                      50-message cleanup, the 24.09 «database is locked» storms
+  resilience.py     — `ThrottledErrors` (one traceback a minute per kind, the
+                      rest counted), `guard` (handler that never raises) and
+                      `LoopWatch`: the loop stamps a tick every 0.5 s, a daemon
+                      thread logs the **loop thread's stack** when the stamp is
+                      older than 1.5 s («Event loop blocked for …; it is
+                      running:»), once per stall, then «is back after a Ns
+                      stall». Numbers → `/api/health` (`loop_lag_ms`,
+                      `loop_max_lag_ms` over ~5 min, `loop_stalls`,
+                      `loop_longest_stall_ms`). It found the 2.9 s startup
+                      freeze in `group_duplicates` on its first run
   ping_pipeline.py  — process_ping_message: classify, score,
                       persist, notify. Watches **channels and groups**
                       (`WATCHED_CHAT_TYPES`; groups = supergroups and the
@@ -293,12 +319,15 @@ src/pulse_desk/
                       (Rampage casino, inline @loses) **and** a post that reads like one («чек» in the
                       text or a «Получить/Receive» button) — referral links in
                       chatter do not count; CryptoBot codes only `CQ…` (invoices are
-                      `IV…`), xRocket anything but `inv…` (its invoices; a personal
-                      check it calls «перевод»), RedCube `C` + 11 (`U<id>` is a
+                      `IV…`), xRocket anything but `inv…` (its invoices) and `i_…`
+                      (its referrals; a personal check it calls «перевод»), RedCube `C` + 11 (`U<id>` is a
                       profile link), Rampage anything but a referral (bare user id,
                       `ref…`) — its real code format was not seen yet (23.09); a
                       post through a wallet bot whose button is a callback is
-                      logged as «not read as a check» with its labels. Amounts with
+                      logged as «not read as a check» with its labels — but a link of
+                      a format known not to be a check (`known_not_check`: `inv_`/`i_`,
+                      `IV`/`r-`, `U…`, `ref…`/digits) is not: casino chats post
+                      dozens an hour and buried the one line that log is for. Amounts with
                       a ticker or in `$` («0.3$», «$0.5»). Rampage's counter
                       «Осталось активаций: 50 из 50» counts what is **left** (dead
                       only at 0), unlike xRocket's «10/10» used. Amount, addressee
@@ -365,7 +394,25 @@ src/pulse_desk/
                       to the owner: the bot's text + picture, its callback buttons
                       mirrored as `ck:b:<token>:<r>:<c>`, «✍️ Ответить» (typed text
                       sent from the account), «🔁 Повторить». Relays
-                      live 30 min (`bot-janitor`). **Money never moves out:** a reply
+                      live 30 min (`bot-janitor`); the card's id is kept
+                      (`send_admin_bot_message(want_id=True)`) and an expired one is
+                      edited to «⌛ … закрыт» without its dead buttons
+                      (`close_expired_cards`). **Every Telegram call is bounded**
+                      (24.09): a read of the bot chat 10 s (a slow one is a missed
+                      poll), the press 15 s, a click/answer/join 15 s, the whole
+                      conversation after the press 60 s, a relay action 40 s — a
+                      hung request can no longer hold the (account, bot) lock and
+                      queue every later check. **A press that surely did not go
+                      out is handed on:** startBot runs with
+                      `flood_sleep_threshold=0`, so a FloodWait raises at once
+                      instead of Telethon sleeping through the check; the account
+                      sits out the wait (`_cooldown_until`, also 60 s on a dead
+                      connection) and `_taker` skips it; a general check goes to
+                      the next account that can press (≤ `MAX_HANDOFFS` = 2). Never
+                      after a timeout (the press may have reached the bot — one press
+                      per check stays the rule) and never for a personal check. A
+                      failed press drops the cached peer. `stats_snapshot()` →
+                      `/api/health` `checks`. **Money never moves out:** a reply
                       that reads as an invoice («Счёт на…», «оплатите») ends the
                       attempt as `invoice`; a button labelled like a payment,
                       transfer, withdrawal, top-up or bet (`money_out`) is never
@@ -380,7 +427,17 @@ src/pulse_desk/
                       `max_age` (24 h). No session — verified on every request
   miniapp_server.py — The panel's own ASGI app + uvicorn task on MINIAPP_PORT,
                       bound to 127.0.0.1, docs/OpenAPI off. Adds `no-store` to
-                      `/api/*` and a CSP to the page
+                      `/api/*` and a CSP to the page. An endpoint that raises is
+                      caught in that middleware (not an exception handler —
+                      Starlette re-raises from the outermost layer and the headers
+                      would be lost): «database is locked» → 503 + `Retry-After: 2`,
+                      anything else → JSON 500 «записано в журнал», a traceback a
+                      minute per path and an ERROR `miniapp` app event. **uvicorn
+                      calls `sys.exit(1)` on a taken port**: `SystemExit` is not an
+                      `Exception`, it went past the supervisor and stopped the event
+                      loop — the whole app over the panel's port. `serve_miniapp`
+                      turns it into a RuntimeError, and `jobs.start_supervised_task`
+                      treats `SystemExit` as a crash to restart
   tunnel.py         — Runs the tunnel agent as a child process and owns
                       `state.public_url` (`tunnel` job); the «🛰 Панель» button
                       (`keyboards.webapp_row`) exists only while it is set.
@@ -593,7 +650,8 @@ src/pulse_desk/
                       build_detailed_analytics (bot 📈 Аналитика) / channel_account_stats
   jobs.py           — Task supervision primitives (start_tracked/supervised_task),
                       `EXPECTED_JOBS`, `feature_job_polls` (which feature-gated
-                      jobs this install runs → `watchdog.default_thresholds`)
+                      jobs this install runs → `watchdog.default_thresholds`).
+                      The supervisor restarts a job on `SystemExit` too (uvicorn)
   autoclean.py      — Auto-delete of minor notifications (pure): owner choice in
                       the `autoclean` key (⚙️ → 🔔 «🧹 Удалять мелкие»), member's
                       in `notification_prefs.autoclean_hours`; kinds mention /
@@ -619,7 +677,10 @@ src/pulse_desk/
                       > group > private, then earliest) via `pings.duplicate_of`;
                       the debts board lists primaries, `apply_ping_meta`
                       propagates statuses to copies. Linked on save
-                      (`ping_pipeline.link_win_copies`), backfilled at startup
+                      (`ping_pipeline.link_win_copies`), backfilled at startup.
+                      `group_duplicates` buckets rows by normalised text first
+                      and runs in `asyncio.to_thread`: comparing every win with
+                      every other froze the loop 2.9 s at every start (24.09)
   report.py         — Weekly / monthly report (pure data + text; card in
                       `render/screens.build_report_card`); `rp:*` (🖼 Отчёт in
                       the management grid), `/report [месяц]`, sent by
@@ -630,7 +691,9 @@ src/pulse_desk/
                       ended by `bot-janitor` when the date passes
   housekeeping.py   — Pure maintenance rules, unit tested: `vacuum_due`
                       (freelist share / stored interval), backup rotation
-                      (`backups_to_delete`, `backup_needed`), `FILE_RULES`,
+                      (`backups_to_delete`, `backup_needed`), `FILE_RULES` (also
+                      a rotated `runtime.out.log.1`, the root `app.log` and
+                      `restart_std*.log` nothing writes any more — 30 days),
                       `disk_low`, `gap_worth_reporting` (downtime report)
   scan.py           — Scan limit normalisation + sweep-start helpers + sweep
                       pacing (`channel_has_new_messages`, `edit_sweep_due`,
@@ -777,7 +840,13 @@ database/                  — SQLite layer (aiosqlite), split per area.
                 trimmed at 90 days by `cleanup_unbounded_tables`
   bot_access.py also: max_uses (one-time invites, `/invite`, 🎟 in the key panel;
   a person already in is not counted against the limit)
-  WAL mode + FK enabled + 5 s busy timeout everywhere.
+  WAL mode + FK enabled + 10 s busy timeout everywhere (`BUSY_TIMEOUT_MS`;
+  the wait is on the connection's thread, not the loop). `retry_locked` re-runs
+  a whole DB function up to 3× on «database is locked» — only on background
+  writers that do nothing but DB work (`update_scan_run`, `save_checkpoints`,
+  `recalculate_source_scores`, `delete_pings`). `pings.delete_pings(chat_id,
+  ids)` answers a deletion from a read and takes the write lock only when a
+  stored row matched.
 
 telegram_ping_watcher.py   — Telethon client helpers and message parsing utilities
 auth_accounts.py           — Console tool for Telegram account authentication
@@ -827,7 +896,7 @@ scripts/                   — One-off tools: generate_bot_assets.py (bot brandi
 | `maintenance` | Stamps `last_alive_at` every 5 min (the next start compares against it to tell a restart from the nightly shutdown — `loops.detect_downtime`), and once an hour (first pass 10 min after start) runs `run_maintenance_once`: age cleanup (`PINGS_RETENTION_DAYS`; wins, giveaways and favourites are never aged out), unbounded-table trim (`scan_runs`/`settings_history`/`access_audit`/`giveaway_actions`/`scan_checkpoints`; `settings_history` capped **per key** as well as by age; `scan_checkpoints` drops channels unseen for 90 days **and** rows of sessions that no longer exist or usernames no longer tracked), the size cap (evicts oldest non-favorite/non-win pings to `pulse_desk_archive.db`), archive-record pruning, daily pruning of broadcast/pending-send/outbox bookkeeping (was startup-only), **VACUUM when ≥20 % and ≥16 MB of the file is free pages** (`housekeeping.vacuum_due`; the old in-memory "every 168 h since start" never fired on a PC that reboots nightly and left 114 MB of free pages in a 136 MB file), a daily backup + rotation, the `housekeeping.FILE_RULES` file prune (render cache, stale login QR files) and a once-per-episode low-disk alert. State in the `maintenance` settings key (`audit=False`), last result on `state.maintenance_stats` (→ `/api/health`, 🩺 Диагностика, 💾 Бэкапы, where «🧹 Уборка сейчас» runs a pass) | `DB_MAX_SIZE_MB`, `DB_ARCHIVE_ENABLED`, `ARCHIVE_RETENTION_DAYS`, `SCAN_RUNS_RETENTION`, `AUDIT_RETENTION_DAYS`, `VACUUM_INTERVAL_HOURS` (fallback), `DISK_FREE_ALERT_MB`, `BACKUP_*` |
 | `daily-digest` | Ticks every 30 s and sends once per slot (`digest.digest_due`; handled slot date in the `digest_state` key, `audit=False`), so a 10:00 slot the PC was off for still goes out when it boots — within `DIGEST_CATCHUP_HOURS` (4 h). Sends the daily digest to admin + opted-in bot members at a configurable time (settings key `digest`, default 10:00) as a two-image album: a ping treemap (24 h, wins/giveaways/mentions per chat, today-vs-yesterday counter) and a crypto heatmap (all 8 tracked coins, area by market cap, day delta from our own `market_history` snapshots, leader/laggard, UAH line). The caption carries only the win links; if Pillow can't render, the old text digest goes out instead | — |
 | `roulette-reminder` | Daily nudge to spin the yobo-bot roulette from every account. The alarm time *is* the previous day's last-click time, reported back by the owner (button, `/roulette 21:47`, or a bare `21:47` in the bot chat). Ticks every 30 s instead of sleeping to the target, so a time reported mid-day applies at once and a slot missed while the PC was off still fires once on the next tick | settings key `roulette` |
-| `bot-janitor` | Every 60 s: deletes unanswered «✍️» prompts (5 min TTL), closes abandoned Mini App logins (`account_login.sweep_expired` — each held a connected Telethon client), forgets stale feed queries / debt marks / undo snapshots and check relay cards (30 min), deletes due auto-clean notifications (`bot_ephemeral_messages`) and ends an expired vacation | — |
+| `bot-janitor` | Every 60 s: deletes unanswered «✍️» prompts (5 min TTL), closes abandoned Mini App logins (`account_login.sweep_expired` — each held a connected Telethon client), forgets stale feed queries / debt marks / undo snapshots and check relay cards (30 min; the expired relay's card is edited to «закрыт» without buttons), deletes due auto-clean notifications (`bot_ephemeral_messages`) and ends an expired vacation | — |
 | `account-health` | Every 5 min (first after 3 min): `account_health.account_problem` per account, pages the owner once per problem kind and once on recovery (reported kinds persisted in `account_alerts`, so the morning restart does not re-page); hourly `get_me` probe per online account catches revoked/banned sessions | — |
 | `weekly-report` | Ticks every 60 s; Monday 10:15 sends the previous ISO week, the 1st sends the previous month (catch-up 72 h counted from the period's own slot, so a PC off for the whole Monday / 1st still gets it; sent periods in `report_state`) | — |
 | `bot-connection` | Reconnects the bot client after Telethon gives up, so incoming updates never stall (started only when the bot is configured) | — |
@@ -928,7 +997,24 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
   lifespan), so a synchronous read or a Pillow render freezes the API *and* every
   bot button. Current users: the digest card render, the `/logs` tail
   (`common.tail_lines`, which seeks from the end instead of reading the file),
-  backups (snapshot + zip) and the file prune in `maintenance`.
+  backups (snapshot + zip), the file prune in `maintenance` and the startup
+  win dedupe (`group_duplicates`). A pure-CPU pass over every stored row counts
+  as blocking too. **`LoopWatch` names the culprit:** grep `app.log` for «Event
+  loop blocked» — the stack under it is what held the loop.
+- **An account's update handler never raises.** `resilience.guard` wraps them;
+  Telethon's own «Unhandled exception on …» logged a full traceback per update
+  (142 in two days during a lock storm). New handlers get the same decorator.
+- **`/api/health` never waits on the database.** Each SQL field is
+  `wait_for(…, 2 s)`; a timeout gives `null` + `db_slow: true`, not a hang. The
+  watchdog restarts on an unanswered probe, and 23.09 it restarted a live
+  process because two counts sat behind a lock storm.
+- **Scan progress is best effort.** `scan_engine.save_scan_progress` writes a
+  run's row at most every 5 s and swallows errors (`finish_scan_run` for the
+  last one): one failed progress write used to abort the account's whole pass.
+- **Logs:** `logging_config.CollapseRepeats` lets Telethon's reconnect noise
+  («Security error while unpacking…», «Server closed the connection…»,
+  «Attempt N at connecting failed…») through once a minute with a count; a
+  hidden console (host_stderr.log, runtime.out.log) gets WARNING+ only.
 - **Bot handler errors are visible.** `safe()` wraps every handler: it times it
   (`SLOW_HANDLER_SECONDS`, the early warning for callback-query expiry), counts
   calls/errors/slow runs onto `state`, records an `ERROR` app event, and reports
@@ -984,7 +1070,7 @@ Session discovery: if `TELEGRAM_SESSIONS` is empty, all `*.session` files in `./
   Telegram bug, not the panel. If a crash comes back, the fastest isolation is
   `MINIAPP_ENABLED=false` (button and tunnel both disappear, the bot is unchanged).
 - **`cryptg` must stay installed.** Without it Telethon decrypts every MTProto packet with `pyaes`, in pure Python, on the event loop thread. With 8 accounts plus the bot that took ~50 % of the loop and starved everything else: bot callbacks expired (`QueryIdInvalidError`), awaited SQLite calls blew their 5 s busy timeout (`database is locked` storms), and the HTTP server went unreachable long enough for the watchdog to restart the app. If the bot ever "hangs" again, check `import cryptg` first.
-- **Profiling the running app:** `py-spy record --pid <pid of :8000 listener> --duration 120 --format speedscope --threads`. `database/_core.py` also logs a stack for any DB connection held ≥ `PULSE_DB_TRACE_SECONDS` (default 2 s).
+- **Profiling the running app:** `py-spy record --pid <pid of :8000 listener> --duration 120 --format speedscope --threads`. `database/_core.py` also logs a stack for any DB connection held ≥ `PULSE_DB_TRACE_SECONDS` (default 2 s) — that time includes waiting for a lagging loop, so read it next to `LoopWatch`'s «Event loop blocked» lines and `/api/health` `loop_max_lag_ms`.
 - **No frontend toolchain.** Node, npm and `node --check` are not part of this
   project; the panel's JS is checked by opening it (the dev link above) in a browser
   and reading the console.

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import io
 import secrets
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime, timedelta
@@ -50,7 +51,28 @@ RELAY_TTL = timedelta(minutes=30)
 PASSWORD_WAIT = timedelta(minutes=10)
 SEEN_LIMIT = 5000
 
+# Every Telegram call here is bounded. A request that hangs (a connection half
+# dead after a network flap) used to hold the (account, bot) lock with it, and
+# every later check of that account queued behind it.
+GET_TIMEOUT_SECONDS = 10.0
+PRESS_TIMEOUT_SECONDS = 15.0
+STEP_TIMEOUT_SECONDS = 15.0  # a button click, a typed answer, a join
+CONTEXT_TIMEOUT_SECONDS = 5.0
+# Everything after the press: reading the answer, a subscription, a password.
+CONVERSATION_TIMEOUT_SECONDS = 60.0
+# One owner action on a relay card (press, answer, retry).
+RELAY_TIMEOUT_SECONDS = 40.0
+# How many other accounts may take a general check whose press did not go out.
+MAX_HANDOFFS = 2
+# An account whose press failed on the connection sits out this long.
+PRESS_FAIL_COOLDOWN_SECONDS = 60.0
+
 _saved_admin_chats: list[int] = []
+# session -> time.monotonic() until which the account presses nothing (a FloodWait).
+_cooldown_until: dict[str, float] = {}
+# What the claimer did since the start, for /api/health.
+stats: dict[str, Any] = {"pressed": 0, "handoffs": 0, "timeouts": 0, "outcomes": {}, "last_error": "",
+                         "last_error_at": None}
 # (session, bot key) -> the wallet bot's input peer, filled by warm_up: the press
 # then needs no lookup at all, not even the session file's entity table.
 _bot_peers: dict[tuple[str, str], Any] = {}
@@ -197,11 +219,62 @@ def _dispatch(client: Any, session: str, account: dict, message: Any, live: bool
 
 
 def _taker(client: Any, session: str, account: dict, cfg: dict) -> Optional[tuple[Any, str, dict]]:
-    """The account that saw the check, or — when it is switched off in 🧾 Чеки —
-    the first online account that is not."""
-    if session not in cfg["disabled"]:
+    """The account that saw the check, or — when it is switched off in 🧾 Чеки or
+    sits out a FloodWait — the first online account that can press."""
+    if _available(session, cfg):
         return client, session, account
-    return next((entry for entry in _online_accounts() if entry[1] not in cfg["disabled"]), None)
+    return _next_taker({session}, cfg)
+
+
+def _next_taker(exclude: set, cfg: dict) -> Optional[tuple[Any, str, dict]]:
+    return next((entry for entry in _online_accounts() if entry[1] not in exclude and _available(entry[1], cfg)),
+                None)
+
+
+def _available(session: str, cfg: dict) -> bool:
+    return session not in cfg["disabled"] and not _cooling(session)
+
+
+def _cooling(session: str, now: Optional[float] = None) -> bool:
+    until = _cooldown_until.get(session)
+    if until is None:
+        return False
+    if (time.monotonic() if now is None else now) >= until:
+        _cooldown_until.pop(session, None)
+        return False
+    return True
+
+
+def _note_press_failure(session: str, bot_key: str, exc: BaseException) -> None:
+    """A FloodWait benches the account for its length; a dead connection for a
+    minute. Any other failure may be a stale cached peer: it is resolved anew."""
+    seconds = getattr(exc, "seconds", None)
+    if isinstance(seconds, int) and seconds > 0:
+        _cooldown_until[session] = time.monotonic() + seconds
+        return
+    if isinstance(exc, (ConnectionError, OSError, asyncio.TimeoutError)):
+        _cooldown_until[session] = time.monotonic() + PRESS_FAIL_COOLDOWN_SECONDS
+    _bot_peers.pop((session, bot_key), None)
+
+
+def _press_surely_failed(exc: BaseException) -> bool:
+    """The press did not reach the wallet bot, so another account may try.
+
+    Not after a timeout: the request may have gone out and only its answer got
+    lost, and the owner's rule is one press per check (23.09)."""
+    return not isinstance(exc, asyncio.TimeoutError)
+
+
+def _note_error(text: str) -> None:
+    stats["last_error"] = text
+    stats["last_error_at"] = datetime.now().replace(microsecond=0).isoformat()
+
+
+def stats_snapshot() -> dict[str, Any]:
+    now = time.monotonic()
+    return {**stats, "outcomes": dict(stats["outcomes"]),
+            "cooling": sorted(name for name, until in _cooldown_until.items() if until > now),
+            "relays_open": len(state.check_relays)}
 
 
 def _online_accounts():
@@ -223,7 +296,10 @@ def _note_unreadable(message: Any) -> None:
     markup = getattr(message, "reply_markup", None)
     if markup is None:
         return
-    links = [(label, url) for url, label in cc.message_links(message) if cc.WALLET_LINK_RE.search(url)]
+    # Invoices and referrals are known formats, not new ones: casino chats post
+    # dozens an hour, and they buried the one line this log exists for.
+    links = [(label, url) for url, label in cc.message_links(message)
+             if cc.WALLET_LINK_RE.search(url) and not cc.known_not_check(url)]
     if not links and getattr(message, "via_bot_id", None) in state.check_bot_ids:
         links = [(getattr(button, "text", ""), "callback") for row in getattr(markup, "rows", None) or []
                  for button in getattr(row, "buttons", None) or []]
@@ -254,12 +330,17 @@ def _launch(client: Any, session: str, account: dict, message: Any, info: cc.Che
 # ---- the claim --------------------------------------------------------------
 async def claim(client: Any, session: str, account: dict, message: Any, info: cc.CheckInfo,
                 link: cc.CheckLink, *, announce: bool = True, live: bool = True,
-                received: Optional[float] = None) -> str:
+                received: Optional[float] = None, passed: tuple[str, ...] = ()) -> str:
     """Press one check from one account; returns the outcome.
 
     The press goes out before anything else — no lock, no lookup, no SQLite.
     Only what follows (reading the answer, a subscription, a password) waits
-    its turn in the account's conversation with the bot.
+    its turn in the account's conversation with the bot, and never longer than
+    ``CONVERSATION_TIMEOUT_SECONDS``.
+
+    A general check whose press did not go out at all (a FloodWait, a dropped
+    connection) is handed to the next account that can press; ``passed`` are the
+    accounts that already could not. A personal check has nobody to hand to.
     """
     if not live and await _tried_before(session, link):
         return "skipped"
@@ -268,17 +349,38 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
     try:
         bot = await _bot_peer(client, session, link.bot)
         sent_id = await _press_start(client, bot, link.code)
-        press_ms = int((loop.time() - (received if received is not None else loop.time())) * 1000)
-        async with _lock_for(session, link.bot):
-            replies = await _await_replies(client, bot, sent_id, link.code)
-            outcome, reply, action = _judge(replies)
-            if outcome == "subscribe":
-                outcome, reply, action = await _subscribe(client, bot, link, replies, action)
-            if outcome == "password" and info.password:
-                outcome, reply, action = await _answer(client, bot, info.password)
     except Exception as exc:
+        _note_press_failure(session, link.bot, exc)
+        heir = None
+        if not info.addressee and len(passed) < MAX_HANDOFFS and _press_surely_failed(exc):
+            heir = _next_taker({*passed, session}, _config())
+        if heir is not None:
+            stats["handoffs"] += 1
+            logger.warning("Check %s: %s could not press (%s), handing it to %s",
+                           link.key, session, _error_text(exc), heir[1])
+            return await claim(*heir, message, info, link, announce=announce, live=live,
+                               received=received, passed=(*passed, session))
         outcome, reply = "error", _error_text(exc)
-        logger.warning("Check %s from %s failed: %s", link.key, session, exc)
+        _note_error(f"{session}: {reply}")
+        logger.warning("Check %s from %s failed to press: %s", link.key, session, reply)
+    else:
+        stats["pressed"] += 1
+        press_ms = int((loop.time() - (received if received is not None else loop.time())) * 1000)
+        try:
+            async with _lock_for(session, link.bot):
+                outcome, reply, action = await asyncio.wait_for(
+                    _converse(client, bot, sent_id, link, info), CONVERSATION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            stats["timeouts"] += 1
+            outcome, reply = "error", "бот кошелька не ответил вовремя"
+            _note_error(f"{session}: {reply}")
+            logger.warning("Check %s from %s: no answer within %.0f s", link.key, session,
+                           CONVERSATION_TIMEOUT_SECONDS)
+        except Exception as exc:
+            outcome, reply = "error", _error_text(exc)
+            _note_error(f"{session}: {reply}")
+            logger.warning("Check %s from %s failed: %s", link.key, session, exc)
+    stats["outcomes"][outcome] = stats["outcomes"].get(outcome, 0) + 1
     if outcome in DEAD_OUTCOMES:
         _first(state.dead_check_codes, link.key)
     ctx = await _context(message, info, link, session, account)
@@ -296,6 +398,18 @@ async def claim(client: Any, session: str, account: dict, message: Any, info: cc
             _await_password(message, client, session, account, bot, link, ctx, claim_id)
         await open_relay(ctx, client, bot, action, reply, outcome, claim_id)
     return outcome
+
+
+async def _converse(client: Any, bot: Any, sent_id: Optional[int], link: cc.CheckLink,
+                    info: cc.CheckInfo) -> tuple[str, str, Any]:
+    """Everything after the press, under the account's lock for this bot."""
+    replies = await _await_replies(client, bot, sent_id, link.code)
+    outcome, reply, action = _judge(replies)
+    if outcome == "subscribe":
+        outcome, reply, action = await _subscribe(client, bot, link, replies, action)
+    if outcome == "password" and info.password:
+        outcome, reply, action = await _answer(client, bot, info.password)
+    return outcome, reply, action
 
 
 # ---- a password posted after the check ------------------------------------------
@@ -339,7 +453,10 @@ async def _type_password(entry: dict, password: str) -> None:
     client, bot, link, ctx = entry["client"], entry["bot"], entry["link"], entry["ctx"]
     try:
         async with _lock_for(entry["session"], link.bot):
-            outcome, reply, _action = await _answer(client, bot, password)
+            outcome, reply, _action = await asyncio.wait_for(_answer(client, bot, password),
+                                                             CONVERSATION_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        outcome, reply = "error", "бот кошелька не ответил вовремя"
     except Exception as exc:
         outcome, reply = "error", _error_text(exc)
     if outcome in DEAD_OUTCOMES:
@@ -353,10 +470,15 @@ async def _type_password(entry: dict, password: str) -> None:
 
 
 async def _press_start(client: Any, bot: Any, code: str) -> Optional[int]:
-    """Send startBot with the code; returns the id of our «/start <code>»."""
+    """Send startBot with the code; returns the id of our «/start <code>».
+
+    ``flood_sleep_threshold=0``: a FloodWait raises at once instead of Telethon
+    sleeping through it (up to a minute) while the check is taken by others —
+    the check goes to another account instead (see :func:`claim`)."""
     from telethon.tl.functions.messages import StartBotRequest
 
-    return _sent_id(await client(StartBotRequest(bot=bot, peer=bot, start_param=code)))
+    request = StartBotRequest(bot=bot, peer=bot, start_param=code)
+    return _sent_id(await asyncio.wait_for(client(request, flood_sleep_threshold=0), PRESS_TIMEOUT_SECONDS))
 
 
 async def _start(client: Any, bot: Any, code: str) -> list:
@@ -366,9 +488,14 @@ async def _start(client: Any, bot: Any, code: str) -> list:
 async def _bot_peer(client: Any, session: str, bot_key: str) -> Any:
     peer = _bot_peers.get((session, bot_key))
     if peer is None:
-        peer = await client.get_input_entity(cc.BOT_USERNAMES[bot_key])
+        peer = await asyncio.wait_for(client.get_input_entity(cc.BOT_USERNAMES[bot_key]), STEP_TIMEOUT_SECONDS)
         _bot_peers[(session, bot_key)] = peer
     return peer
+
+
+async def _get(client: Any, bot: Any, **kwargs: Any) -> Any:
+    """One read of the bot's chat, bounded."""
+    return await asyncio.wait_for(client.get_messages(bot, **kwargs), GET_TIMEOUT_SECONDS)
 
 
 def _update_lag(message: Any) -> str:
@@ -472,13 +599,19 @@ async def _await_replies(client: Any, bot: Any, after_id: Optional[int], marker:
     delay, base = POLL_FIRST_DELAY, after_id
     while True:
         await asyncio.sleep(delay)
-        batch = await client.get_messages(bot, limit=20)
+        try:
+            batch = await _get(client, bot, limit=20)
+        except asyncio.TimeoutError:
+            batch = []  # one slow read is a missed poll, not a failed claim
         if base is None:
             base = _own_message_id(batch, marker)
         incoming = _replies_for(batch, base)
         if incoming:
             await asyncio.sleep(SETTLE_SECONDS)
-            return _replies_for(await client.get_messages(bot, limit=20), base) or incoming
+            try:
+                return _replies_for(await _get(client, bot, limit=20), base) or incoming
+            except asyncio.TimeoutError:
+                return incoming
         if loop.time() >= deadline:
             return []
         delay = min(delay * 1.5, POLL_MAX_DELAY)
@@ -492,11 +625,16 @@ async def _await_change(client: Any, bot: Any, message: Any, old_text: str, old_
     delay = POLL_FIRST_DELAY
     while True:
         await asyncio.sleep(delay)
-        newer = _incoming(await client.get_messages(bot, limit=10, min_id=message.id), message.id)
-        if newer:
-            await asyncio.sleep(SETTLE_SECONDS)
-            return _incoming(await client.get_messages(bot, limit=10, min_id=message.id), message.id) or newer
-        again = await client.get_messages(bot, ids=message.id)
+        try:
+            newer = _incoming(await _get(client, bot, limit=10, min_id=message.id), message.id)
+            if newer:
+                await asyncio.sleep(SETTLE_SECONDS)
+                with suppress(asyncio.TimeoutError):
+                    newer = _incoming(await _get(client, bot, limit=10, min_id=message.id), message.id) or newer
+                return newer
+            again = await _get(client, bot, ids=message.id)
+        except asyncio.TimeoutError:
+            again = None  # one slow read is a missed poll
         if again is not None and ((getattr(again, "raw_text", "") or "") != old_text
                                   or getattr(again, "edit_date", None) != old_edit):
             return [again]
@@ -517,14 +655,14 @@ def _judge(replies: list, extra: str = "") -> tuple[str, str, Any]:
 
 async def _press(client: Any, bot: Any, message: Any, row: int, column: int) -> tuple[str, str, Any]:
     old_text, old_edit = getattr(message, "raw_text", "") or "", getattr(message, "edit_date", None)
-    answer = await message.click(row, column)
+    answer = await asyncio.wait_for(message.click(row, column), STEP_TIMEOUT_SECONDS)
     alert = getattr(answer, "message", None)
     replies = await _await_change(client, bot, message, old_text, old_edit)
     return _judge(replies, extra=alert if isinstance(alert, str) else "")
 
 
 async def _answer(client: Any, bot: Any, text: str) -> tuple[str, str, Any]:
-    sent = await client.send_message(bot, text)
+    sent = await asyncio.wait_for(client.send_message(bot, text), STEP_TIMEOUT_SECONDS)
     return _judge(await _await_replies(client, bot, getattr(sent, "id", None), text))
 
 
@@ -538,7 +676,9 @@ async def _subscribe(client: Any, bot: Any, link: cc.CheckLink, replies: list, a
     joined: list[str] = []
     for kind, value in targets:
         try:
-            await client(ImportChatInviteRequest(value) if kind == "invite" else JoinChannelRequest(value))
+            await asyncio.wait_for(
+                client(ImportChatInviteRequest(value) if kind == "invite" else JoinChannelRequest(value)),
+                STEP_TIMEOUT_SECONDS)
             joined.append(value)
         except Exception as exc:
             if type(exc).__name__ == "UserAlreadyParticipantError":
@@ -580,7 +720,7 @@ async def _context(message: Any, info: cc.CheckInfo, link: cc.CheckLink, session
     chat = getattr(message, "chat", None)
     if chat is None:
         with suppress(Exception):
-            chat = await message.get_chat()
+            chat = await asyncio.wait_for(message.get_chat(), CONTEXT_TIMEOUT_SECONDS)
     return {
         "bot": link.bot,
         "code": link.code,
@@ -736,7 +876,7 @@ async def _picture(client: Any, action: Any) -> Optional[io.BytesIO]:
     if action is None or getattr(action, "photo", None) is None:
         return None
     try:
-        data = await client.download_media(action, file=bytes)
+        data = await asyncio.wait_for(client.download_media(action, file=bytes), STEP_TIMEOUT_SECONDS)
     except Exception:
         return None
     if not data:
@@ -764,15 +904,27 @@ async def send_relay_card(relay: dict[str, Any], client: Any, action: Any, reply
 
     picture = await _picture(client, action)
     text = relay_text(relay, _clip(reply, 300) if picture else reply, outcome)
-    with suppress(Exception):
-        await send_admin_bot_message(text, buttons=relay_buttons(relay, action), file=picture)
+    try:
+        # The id lets the janitor close the card when the relay expires.
+        relay["card_id"] = await send_admin_bot_message(text, buttons=relay_buttons(relay, action), file=picture,
+                                                        want_id=True)
+    except Exception:
+        logger.warning("Could not send the relay card for %s", relay.get("key"), exc_info=True)
 
 
 async def _relay_target(relay: dict[str, Any]) -> tuple[Any, Any]:
-    client = client_for(relay["step"]["session"])
+    session = relay["step"]["session"]
+    client = client_for(session)
     if client is None:
         raise RuntimeError("аккаунт не в сети")
-    return client, await client.get_input_entity(cc.BOT_USERNAMES[relay["ctx"]["bot"]])
+    return client, await _bot_peer(client, session, relay["ctx"]["bot"])
+
+
+async def _bounded_relay(work) -> tuple[str, str, Any]:
+    try:
+        return await asyncio.wait_for(work, RELAY_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise RuntimeError("бот кошелька не ответил вовремя — нажмите «🔁 Повторить»") from None
 
 
 async def _relay_settle(relay: dict[str, Any], client: Any, bot: Any, outcome: str, reply: str,
@@ -798,8 +950,8 @@ async def relay_press(token: str, row: int, column: int) -> tuple[str, str, Any]
     """Press button (row, column) of the wallet bot's message, as the owner chose."""
     relay = state.check_relays[token]
     client, bot = await _relay_target(relay)
-    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
-        message = await client.get_messages(bot, ids=relay["step"]["msg_id"])
+    async def work() -> tuple[str, str, Any]:
+        message = await _get(client, bot, ids=relay["step"]["msg_id"])
         if message is None:
             raise RuntimeError("сообщение бота пропало")
         rows = getattr(message, "buttons", None) or []
@@ -811,23 +963,32 @@ async def relay_press(token: str, row: int, column: int) -> tuple[str, str, Any]
         outcome, reply, action = await _press(client, bot, message, row, column)
         return await _relay_settle(relay, client, bot, outcome, reply, action)
 
+    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
+        return await _bounded_relay(work())
+
 
 async def relay_answer(token: str, text: str) -> tuple[str, str, Any]:
     """Send the owner's typed answer (a password, a captcha code) from the account."""
     relay = state.check_relays[token]
     client, bot = await _relay_target(relay)
-    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
+    async def work() -> tuple[str, str, Any]:
         outcome, reply, action = await _answer(client, bot, text)
         return await _relay_settle(relay, client, bot, outcome, reply, action)
+
+    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
+        return await _bounded_relay(work())
 
 
 async def relay_retry(token: str) -> tuple[str, str, Any]:
     """Start the check again from the same account (a fresh captcha, a finished onboarding)."""
     relay = state.check_relays[token]
     client, bot = await _relay_target(relay)
-    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
+    async def work() -> tuple[str, str, Any]:
         outcome, reply, action = _judge(await _start(client, bot, relay["ctx"]["code"]))
         return await _relay_settle(relay, client, bot, outcome, reply, action)
+
+    async with _lock_for(relay["step"]["session"], relay["ctx"]["bot"]):
+        return await _bounded_relay(work())
 
 
 def sweep_relays(now: Optional[datetime] = None) -> int:
@@ -838,8 +999,43 @@ def sweep_relays(now: Optional[datetime] = None) -> int:
             state.check_awaiting_password.pop(chat_id, None)
     stale = [token for token, relay in state.check_relays.items() if now - relay["created_at"] > RELAY_TTL]
     for token in stale:
-        state.check_relays.pop(token, None)
+        relay = state.check_relays.pop(token, None)
+        card = (relay or {}).get("card_id")
+        if isinstance(card, int) and not isinstance(card, bool):
+            _expired_cards.append(relay)
     return len(stale)
+
+
+# Relays forgotten by sweep_relays whose card still shows live buttons.
+_expired_cards: list[dict[str, Any]] = []
+
+
+def expired_card(relay: dict[str, Any]) -> tuple[str, list]:
+    """What an expired relay card turns into: the check, and no dead buttons."""
+    from telethon import Button
+
+    ctx = relay["ctx"]
+    lines = [f"⌛ **Чек ждал ответа 30 мин — закрыт** · {ctx['amount'] or 'сумма не указана'}",
+             _where(ctx, relay["step"]["account"])]
+    buttons = [[Button.url("↗️ К посту", ctx["link"])]] if ctx.get("link") else []
+    return "\n".join(lines), buttons
+
+
+async def close_expired_cards() -> int:
+    """Edit the cards of expired relays: their buttons would only answer «кнопка устарела»."""
+    closed = 0
+    while _expired_cards:
+        relay = _expired_cards.pop()
+        if state.bot_client is None or not ADMIN_ID:
+            continue
+        text, buttons = expired_card(relay)
+        try:
+            await state.bot_client.edit_message(int(ADMIN_ID), int(relay["card_id"]), text, buttons=buttons or None)
+            closed += 1
+        except Exception as exc:
+            # Already deleted by the owner, too old to edit, or unchanged: nothing left to close.
+            logger.debug("Could not close relay card %s: %s", relay.get("card_id"), exc)
+    return closed
 
 
 # ---- setup ------------------------------------------------------------------
@@ -848,7 +1044,7 @@ async def warm_up(client: Any, session: str) -> None:
     and the bots' private chats are recognised by id."""
     for key, username in cc.BOT_USERNAMES.items():
         try:
-            peer = await client.get_input_entity(username)
+            peer = await asyncio.wait_for(client.get_input_entity(username), STEP_TIMEOUT_SECONDS)
         except Exception as exc:
             logger.debug("Could not resolve @%s for %s: %s", username, session, exc)
             continue

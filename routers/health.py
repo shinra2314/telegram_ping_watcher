@@ -20,6 +20,7 @@ from fastapi import APIRouter
 import database
 from pulse_desk import APP_VERSION
 from pulse_desk import watch_settings as ws
+from pulse_desk import check_claimer
 from pulse_desk.app_ctx import handler_errors, loop_watch, settings, state
 from pulse_desk.common import now_iso
 from pulse_desk.jobs import expected_jobs, feature_job_polls, runtime_health
@@ -133,6 +134,8 @@ async def health():
             # busy, the process is not dead — the watchdog must not restart it.
             "db_slow": not (backlog_in_time and owed_in_time),
             **loop_watch.stats(),
+            # Presses, hand-offs, timeouts, outcomes, accounts sitting out a FloodWait.
+            "checks": check_claimer.stats_snapshot(),
             "unhealthy_jobs": unhealthy_jobs,
             "time": now_iso(),
             "version": APP_VERSION,

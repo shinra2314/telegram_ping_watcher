@@ -113,7 +113,10 @@ async def _consume_reply(event, pending: dict, raw: str) -> None:
         await event.respond(f"⚠️ Не отправил: {exc}")
         return
     text, buttons = check_claimer.relay_screen(relay, outcome, reply, action)
-    await event.respond(text, buttons=buttons or None)
+    sent = await event.respond(text, buttons=buttons or None)
+    if token in state.check_relays and isinstance(getattr(sent, "id", None), int):
+        # The live card is now this one: it is what the janitor closes on expiry.
+        relay["card_id"] = sent.id
 
 
 REPLY_KIND = register_prompt(

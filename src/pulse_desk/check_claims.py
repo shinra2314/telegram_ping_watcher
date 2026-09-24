@@ -230,18 +230,39 @@ def message_links(message: Any) -> list[tuple[str, str]]:
 
 
 def code_is_check(bot: str, code: str) -> bool:
-    """CryptoBot checks are ``CQ…`` (its invoices ``IV…``); xRocket invoices ``inv…``;
-    RedCube checks ``C`` + 11 (``U<id>`` is a player's profile link). Rampage's code
-    format was not seen yet (23.09): anything but a referral (a bare user id, ``ref…``)."""
+    """CryptoBot checks are ``CQ…`` (its invoices ``IV…``); xRocket invoices ``inv…``
+    and referrals ``i_…``; RedCube checks ``C`` + 11 (``U<id>`` is a player's profile
+    link). Rampage's code format was not seen yet (23.09): anything but a referral (a
+    bare user id, ``ref…``)."""
     if bot == "send":
         return code.startswith("CQ")
     if bot == "xrocket":
-        return not code.lower().startswith("inv")
+        return not code.lower().startswith(("inv", "i_"))
     if bot == "redcube":
         return re.fullmatch(r"C[A-Za-z0-9]{8,}", code) is not None
     if bot == "rampage":
         return not (code.isdigit() or code.lower().startswith("ref"))
     return False
+
+
+# Links to a wallet bot that are known not to be checks: invoices and referrals.
+# Casino chats post them by the dozen an hour; only an unknown format is worth a log line.
+_KNOWN_NOT_CHECK = {
+    "xrocket": re.compile(r"^(?:inv|i_)", re.IGNORECASE),
+    "send": re.compile(r"^(?:IV|r-)"),
+    "redcube": re.compile(r"^U\d"),
+    "rampage": re.compile(r"^(?:ref|\d+$)", re.IGNORECASE),
+}
+
+
+def known_not_check(url: str) -> bool:
+    """A wallet-bot link of a format we know is not a check (an invoice, a referral)."""
+    match = LINK_RE.search(url or "")
+    if not match:
+        return False
+    bot = BOT_ALIASES.get(match.group(1).lower())
+    rule = _KNOWN_NOT_CHECK.get(bot or "")
+    return bool(rule and rule.search(match.group(2)))
 
 
 def parse_amount(sources: Iterable[str]) -> str:

@@ -81,7 +81,7 @@ class FakeClient:
     async def get_input_entity(self, username):
         return SimpleNamespace(user_id=BOT_ID, username=username)
 
-    async def __call__(self, request):
+    async def __call__(self, request, **kwargs):
         self.requests.append(request)
         if type(request).__name__ == "StartBotRequest":
             mine = self.add(True, f"/start {request.start_param}")

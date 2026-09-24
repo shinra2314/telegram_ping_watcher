@@ -25,8 +25,9 @@ state = AppState()
 logger = configure_logging(settings.log_file, settings.log_level, settings.telethon_log_level)
 # Errors of the accounts' update handlers: one traceback a minute per kind.
 handler_errors = ThrottledErrors(logger)
-# Started in main.lifespan; its numbers go to /api/health.
-loop_watch = LoopWatch(logger)
+# Started in main.lifespan; its numbers go to /api/health. 1.5 s: a 2.3 s freeze
+# at startup (24.09) went unreported at 3 s, and a stack is what we are after.
+loop_watch = LoopWatch(logger, stall=1.5)
 
 # ---------------------------------------------------------------------------
 # Derived constants (mirror of the block in main.py lines 154-232)

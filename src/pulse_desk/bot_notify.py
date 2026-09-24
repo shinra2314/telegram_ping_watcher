@@ -231,20 +231,25 @@ async def schedule_autoclean(chat_id: Any, sent: Any, kind: str, hours: Any) -> 
 
 
 async def send_admin_bot_message(message: str, *, buttons: Optional[list[list[Button]]] = None,
-                                 file: Optional[Any] = None, kind: str = "") -> bool:
+                                 file: Optional[Any] = None, kind: str = "", want_id: bool = False) -> Any:
     """Message the owner. ``kind`` ("market", "system", "mention") marks it as
-    minor, so it is deleted later if the owner switched auto-delete on."""
+    minor, so it is deleted later if the owner switched auto-delete on.
+
+    Returns whether it was sent — or, with ``want_id``, the owner's message id
+    (None when the owner got no copy), for a card that is edited later."""
     if not ADMIN_ID:
-        return False
+        return None if want_id else False
     owner, delegate = await vacation_routing(kind)
     if delegate:
         # Vacation delegate gets the owner's copy (see vacation.py).
         await _send_bot_message(delegate, message, buttons=buttons, file=file)
     if not owner:
-        return True
+        return None if want_id else True
     sent = await _send_bot_message(ADMIN_ID, message, buttons=buttons, file=file)
     if sent is not None and kind:
         await schedule_autoclean(ADMIN_ID, sent, kind, await owner_autoclean_hours())
+    if want_id:
+        return getattr(sent, "id", None) if sent is not None else None
     return sent is not None
 
 

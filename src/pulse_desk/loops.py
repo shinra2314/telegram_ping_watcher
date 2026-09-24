@@ -1057,7 +1057,7 @@ async def run_janitor_once(now: Optional[datetime] = None) -> dict[str, int]:
     from .bot.sections.feed import QUERY_TTL
 
     now = now or datetime.now()
-    stats = {"prompts": 0, "logins": 0, "queries": 0, "marks": 0, "deleted": 0}
+    stats = {"prompts": 0, "logins": 0, "queries": 0, "marks": 0, "deleted": 0, "relays": 0}
 
     # Armed prompts nobody answered: the entry goes, and so does its «✍️» message.
     for entry in sweep_pending():
@@ -1075,9 +1075,10 @@ async def run_janitor_once(now: Optional[datetime] = None) -> dict[str, int]:
     from .bot.undo import sweep as sweep_undo
 
     sweep_undo(now)
-    from .check_claimer import sweep_relays
+    from .check_claimer import close_expired_cards, sweep_relays
 
     sweep_relays(now)
+    stats["relays"] = await close_expired_cards()
     try:
         await check_expiry(now)
     except Exception:

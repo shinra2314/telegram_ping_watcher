@@ -72,21 +72,35 @@ def same_win(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 
 def group_duplicates(rows: Iterable[dict[str, Any]]) -> list[tuple[int, list[int]]]:
-    """``[(primary_id, [duplicate ids])]`` over win rows; rows without copies are omitted."""
-    groups: list[list[dict[str, Any]]] = []
-    for row in sorted(rows, key=_ts):
-        for group in groups:
-            # A copy elsewhere matches every post of its template; it must not
-            # pull a second post of the primary's chat into the group. Two
-            # pastes of one post into another chat are both copies.
-            primary = min(group, key=source_rank)
-            if row.get("chat_id") != primary.get("chat_id") and any(same_win(row, member) for member in group):
-                group.append(row)
-                break
-        else:
-            groups.append([row])
+    """``[(primary_id, [duplicate ids])]`` over win rows; rows without copies are omitted.
+
+    Only rows with the same normalised text can be copies, so rows are grouped by
+    it first and compared within their text only. Comparing every win with every
+    other (normalising both texts per pair) held the event loop for 2.9 s at every
+    start (24.09). Groups come out in the order of their earliest row, as before.
+    """
+    buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, row in enumerate(sorted(rows, key=_ts)):
+        text = normalize_text(row.get("text"))
+        if len(text) >= MIN_TEXT_LENGTH:
+            buckets.setdefault(text, []).append((index, row))
+    found: list[tuple[int, list[dict[str, Any]]]] = []
+    for members in buckets.values():
+        groups: list[tuple[int, list[dict[str, Any]]]] = []
+        for index, row in members:
+            for _first, group in groups:
+                # A copy elsewhere matches every post of its template; it must not
+                # pull a second post of the primary's chat into the group. Two
+                # pastes of one post into another chat are both copies.
+                primary = min(group, key=source_rank)
+                if row.get("chat_id") != primary.get("chat_id") and any(same_win(row, member) for member in group):
+                    group.append(row)
+                    break
+            else:
+                groups.append((index, [row]))
+        found.extend(groups)
     result: list[tuple[int, list[int]]] = []
-    for group in groups:
+    for _first, group in sorted(found, key=lambda item: item[0]):
         if len(group) < 2:
             continue
         ordered = sorted(group, key=source_rank)

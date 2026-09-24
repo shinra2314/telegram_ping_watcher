@@ -246,3 +246,60 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DedupeSpeedTests(unittest.TestCase):
+    """group_duplicates ran on the event loop at every start: 2.9 s frozen (24.09)."""
+
+    @staticmethod
+    def reference(rows):
+        from pulse_desk.dedupe import _ts, same_win, source_rank
+
+        groups = []
+        for row in sorted(rows, key=_ts):
+            for group in groups:
+                primary = min(group, key=source_rank)
+                if row.get("chat_id") != primary.get("chat_id") and any(same_win(row, m) for m in group):
+                    group.append(row)
+                    break
+            else:
+                groups.append([row])
+        out = []
+        for group in groups:
+            if len(group) > 1:
+                ordered = sorted(group, key=source_rank)
+                out.append((int(ordered[0]["id"]), [int(r["id"]) for r in ordered[1:]]))
+        return out
+
+    @staticmethod
+    def rows(count):
+        import random
+
+        rng = random.Random(7)
+        templates = [f"Итоги розыгрыша номер {n}: победители @alpha и @beta, пишите админу за призом" for n in range(40)]
+        rows = []
+        for i in range(1, count + 1):
+            rows.append({
+                "id": i, "chat_id": rng.choice([1, 2, 3, 4, 5, 6]),
+                "chat_type": rng.choice(["channel", "group", "private"]),
+                "text": rng.choice(templates) if rng.random() < 0.6 else f"уникальный текст поста {i} " * 3,
+                "mentions": ["@alpha"] if rng.random() < 0.8 else ["@gamma"],
+                "detected_at": f"2026-09-{rng.randint(1, 20):02d}T{rng.randint(0, 23):02d}:00:00",
+            })
+        return rows
+
+    def test_same_groups_as_before(self):
+        from pulse_desk.dedupe import group_duplicates
+
+        for count in (0, 1, 50, 400):
+            rows = self.rows(count)
+            with self.subTest(count=count):
+                self.assertEqual(group_duplicates(rows), self.reference(rows))
+
+    def test_two_thousand_wins_group_fast(self):
+        from pulse_desk.dedupe import group_duplicates
+
+        rows = self.rows(2000)
+        started = time.perf_counter()
+        group_duplicates(rows)
+        self.assertLess(time.perf_counter() - started, 1.0)

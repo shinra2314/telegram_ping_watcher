@@ -1,6 +1,7 @@
 """Ping processing pipeline: classify message, score, persist, notify."""
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -434,7 +435,9 @@ async def dedupe_existing_wins() -> int:
     rows = await get_wins_for_dedupe()
     by_id = {int(r["id"]): r for r in rows}
     marked = 0
-    for primary_id, copies in group_duplicates(rows):
+    # Pure CPU over every stored win: off the event loop the bot and the
+    # accounts share (it froze them for 2.9 s at every start, 24.09).
+    for primary_id, copies in await asyncio.to_thread(group_duplicates, rows):
         primary = by_id[primary_id]
         if (primary.get("action_status") or "new") not in final:
             # The owner may have claimed one of the copies before they were

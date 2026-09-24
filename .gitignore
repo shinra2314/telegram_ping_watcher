@@ -29,3 +29,7 @@ coverage.xml
 
 # Stable base interpreter for .venv (copied from the Codex runtime, which Codex replaces on update)
 .python/
+
+# Claude Code: per-machine settings and agent worktrees (launch.json is shared)
+.claude/settings.local.json
+.claude/worktrees/

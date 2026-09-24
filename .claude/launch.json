@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "panel-dev",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-c",
+        "import sys; sys.path[:0] = ['src', '.']; import uvicorn; from pulse_desk.miniapp_server import build_miniapp; uvicorn.run(build_miniapp(), host='127.0.0.1', port=8011, log_level='warning')"
+      ],
+      "port": 8011
+    }
+  ]
+}

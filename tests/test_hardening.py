@@ -303,3 +303,93 @@ class DedupeSpeedTests(unittest.TestCase):
         started = time.perf_counter()
         group_duplicates(rows)
         self.assertLess(time.perf_counter() - started, 1.0)
+
+
+class PanelServerTests(unittest.IsolatedAsyncioTestCase):
+    """The panel's port must never take the process down, nor answer a bare 500."""
+
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from pulse_desk.miniapp_server import build_miniapp
+
+        app = build_miniapp()
+
+        async def boom():
+            raise RuntimeError("kaputt")
+
+        async def busy():
+            raise sqlite3.OperationalError("database is locked")
+
+        app.add_api_route("/api/app/test-boom", boom)
+        app.add_api_route("/api/app/test-busy", busy)
+        return TestClient(app, raise_server_exceptions=False)
+
+    async def test_an_endpoint_that_raises_answers_json_with_the_usual_headers(self):
+        from pulse_desk import miniapp_server
+
+        with self.assertLogs("pulse_desk", "ERROR"), \
+                mock.patch.object(miniapp_server, "record_app_event", mock.AsyncMock()) as event:
+            response = self.client().get("/api/app/test-boom")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], miniapp_server.INTERNAL)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        event.assert_awaited_once()
+
+    async def test_a_busy_database_is_503_with_retry_after(self):
+        from pulse_desk import miniapp_server
+
+        response = self.client().get("/api/app/test-busy")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        self.assertEqual(response.json()["detail"], miniapp_server.BUSY)
+
+    async def test_a_taken_port_is_an_error_not_a_process_exit(self):
+        from pulse_desk import miniapp_server
+
+        async def exits(self, sockets=None):
+            raise SystemExit(1)
+
+        with mock.patch("uvicorn.Server.serve", exits):
+            with self.assertRaises(RuntimeError):
+                await miniapp_server.serve_miniapp()
+
+    async def test_the_supervisor_survives_a_job_that_calls_exit(self):
+        from pulse_desk.jobs import start_supervised_task
+        from pulse_desk.runtime import AppState
+
+        runs = []
+
+        async def job():
+            runs.append(1)
+            if len(runs) == 1:
+                raise SystemExit(1)
+            await asyncio.sleep(3600)
+
+        app_state = AppState()
+        with self.assertLogs("test.jobs", "ERROR"):
+            task = start_supervised_task(app_state, logging.getLogger("test.jobs"), "panel", job,
+                                         backoff_base=0.01, backoff_max=0.01)
+            for _ in range(100):
+                if len(runs) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(app_state.job_restart_count["panel"], 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+
+class RateLimiterTests(unittest.TestCase):
+    def test_idle_people_are_forgotten(self):
+        from routers.miniapp.common import RateLimiter
+
+        now = [0.0]
+        limiter = RateLimiter(window=60, clock=lambda: now[0])
+        for person in range(50):
+            self.assertTrue(limiter.allow(person, 5))
+        now[0] = 61
+        self.assertTrue(limiter.allow("fresh", 5))
+        self.assertEqual(list(limiter.hits), ["fresh"])

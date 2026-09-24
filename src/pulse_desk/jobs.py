@@ -107,7 +107,9 @@ def start_supervised_task(
                 attempt = 0
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
+                # SystemExit too: uvicorn exits on a taken port, and past this
+                # point it would stop the event loop and the whole app with it.
                 attempt += 1
                 state.job_restart_count[name] = state.job_restart_count.get(name, 0) + 1
                 state.job_last_error[name] = f"{type(exc).__name__}: {exc}"

@@ -144,8 +144,34 @@ function whoami() {
 const RETRY_KEY = 'pd.retry.' + whoami();
 const RETRY_TTL_MS = 30 * 60 * 1000;
 
+// How long a request may take before the page stops waiting. Without a limit a
+// stalled tunnel left the skeleton on screen for good. Logging into an account
+// waits on Telegram itself, so it gets longer.
+const API_TIMEOUT_MS = { read: 20000, write: 45000, login: 90000 };
+// The tunnel's own answers when the PC is off or the app is restarting.
+const GATEWAY_DOWN = [502, 504];
+
+function apiTimeout(path, body) {
+  if (/^\/api\/app\/login\//.test(path)) return API_TIMEOUT_MS.login;
+  return body === undefined ? API_TIMEOUT_MS.read : API_TIMEOUT_MS.write;
+}
+
+async function fetchWithin(path, init, ms) {
+  if (typeof AbortController === 'undefined') return fetch(path, init);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(path, Object.assign({}, init, { signal: ctl.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // `label` names the action for «Повторить: …» if the session has run out.
-async function api(path, body, label) {
+// `again` marks the one automatic retry of a read the server called busy (503).
+async function api(path, body, label, again) {
   const init = { headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || initDataFromHash() } };
   if (body !== undefined) {
     init.method = 'POST';
@@ -154,7 +180,9 @@ async function api(path, body, label) {
   }
   let res;
   try {
-    res = await fetch(path, init);
+    res = await fetchWithin(path, init, apiTimeout(path, body));
+    // For a read, the tunnel saying the PC is down is the same as no answer.
+    if (body === undefined && GATEWAY_DOWN.includes(res.status)) throw new Error('gateway ' + res.status);
   } catch (e) {
     // The PC is off for the night (or the tunnel is down): show what this
     // screen last had, read-only. Actions have nothing to fall back on.
@@ -163,13 +191,26 @@ async function api(path, body, label) {
       Offline.enter(hit.at);
       return hit.data;
     }
-    throw new ApiError(0, Offline.on
-      ? 'Pulse Desk выключен — это действие подождёт, пока компьютер включится'
-      : 'Нет связи с Pulse Desk. Компьютер включён?');
+    const timedOut = e && e.name === 'AbortError';
+    if (timedOut && body !== undefined) {
+      // It may have reached the server and only the answer is late.
+      throw new ApiError(0, 'Ответа нет — действие могло пройти. Обновите экран, прежде чем повторять');
+    }
+    throw new ApiError(0, timedOut ? 'Pulse Desk не ответил вовремя — попробуйте ещё раз'
+      : (Offline.on
+        ? 'Pulse Desk выключен — это действие подождёт, пока компьютер включится'
+        : 'Нет связи с Pulse Desk. Компьютер включён?'));
   }
   Offline.leave();
+  if (res.status === 503 && body === undefined && !again) {
+    // The database was busy for a moment (Retry-After: 2): one quiet retry.
+    await pause(1500);
+    return api(path, body, label, true);
+  }
   if (!res.ok) {
-    let detail = 'Ошибка ' + res.status;
+    let detail = GATEWAY_DOWN.includes(res.status)
+      ? 'Pulse Desk не отвечает — он выключен или перезапускается. Попробуйте через минуту'
+      : 'Ошибка ' + res.status;
     try {
       const data = await res.json();
       detail = typeof data.detail === 'string' ? data.detail : detail;
@@ -611,6 +652,27 @@ function failed(err) {
   }
   toast((err && err.message) || 'Ошибка', true);
 }
+
+// Last line of defence: a promise nobody awaited or a thrown handler would
+// otherwise fail silently and leave a button that does nothing. At most one
+// toast every few seconds, so a loop of errors does not bury the screen.
+let lastCrashToast = 0;
+function crashed(message) {
+  const now = Date.now();
+  if (now - lastCrashToast < 4000) return;
+  lastCrashToast = now;
+  toast(message || 'Что-то пошло не так — обновите экран', true);
+}
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  if (event.preventDefault) event.preventDefault();
+  crashed(reason && reason.message);
+});
+window.addEventListener('error', (event) => {
+  // Benign browser noise, not our code.
+  if (/ResizeObserver/.test(String(event.message || ''))) return;
+  crashed('Ошибка на странице — обновите экран');
+});
 
 function dispatch(kind, event) {
   const target = event.target.closest('[data-act]');

@@ -16,11 +16,12 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .app_ctx import logger, settings
 from .common import record_app_event
+from .resilience import ThrottledErrors
 
 APP_DIR = Path(__file__).resolve().parents[2] / "static" / "app"
 
@@ -35,6 +36,31 @@ CSP = (
     "frame-ancestors https://web.telegram.org https://*.telegram.org 'self'; "
     "base-uri 'none'; form-action 'none'"
 )
+
+
+BUSY = "База занята — повторите через пару секунд"
+INTERNAL = "Внутренняя ошибка — она записана в журнал"
+# One traceback a minute per path: a broken endpoint polled by Pulse every
+# 30 s must not fill the log.
+_errors = ThrottledErrors(logger)
+
+
+async def error_response(request: Request, exc: Exception) -> JSONResponse:
+    """What an endpoint that raised answers: JSON the page can show, never a bare 500.
+
+    A busy database is not a bug — «database is locked» gets 503 and
+    ``Retry-After``, and the page retries a read once. Anything else is logged
+    (throttled) with an ERROR app event, so it shows up in 🩺 Диагностика.
+    """
+    from database import is_locked_error
+
+    path = request.url.path
+    if is_locked_error(exc):
+        return JSONResponse({"detail": BUSY}, status_code=503, headers={"Retry-After": "2"})
+    if _errors.report(f"miniapp:{path}", f"Mini App {request.method} {path} failed: {exc}", exc):
+        await record_app_event("ERROR", "miniapp", "Panel request failed",
+                               {"path": path, "error": f"{type(exc).__name__}: {exc}"[:300]})
+    return JSONResponse({"detail": INTERNAL}, status_code=500)
 
 
 async def journal(request: Request) -> None:
@@ -67,7 +93,12 @@ def build_miniapp() -> FastAPI:
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # Caught here, not by an exception handler: Starlette re-raises from
+            # its outermost layer, and these headers would be skipped.
+            response = await error_response(request, exc)
         if request.method == "POST" and request.url.path.startswith("/api/") and response.status_code < 400:
             await journal(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -115,3 +146,9 @@ async def serve_miniapp() -> None:
     except asyncio.CancelledError:
         server.should_exit = True
         raise
+    except SystemExit as exc:
+        # uvicorn calls sys.exit(1) when the port is taken. SystemExit is not an
+        # Exception: it went past the supervisor and out of the event loop — the
+        # whole app, bot and accounts included, died over the panel's port.
+        raise RuntimeError(f"Mini App server could not start on :{settings.miniapp_port} "
+                           f"(uvicorn exit {exc.code})") from None

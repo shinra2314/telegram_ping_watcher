@@ -50,9 +50,11 @@ class RateLimiter:
         self.window = window
         self.clock = clock
         self.hits: dict[Hashable, deque[float]] = {}
+        self._swept_at = clock()
 
     def allow(self, key: Hashable, limit: int) -> bool:
         now = self.clock()
+        self._forget_idle(now)
         hits = self.hits.setdefault(key, deque())
         while hits and now - hits[0] >= self.window:
             hits.popleft()
@@ -63,6 +65,15 @@ class RateLimiter:
 
     def reset(self) -> None:
         self.hits.clear()
+
+    def _forget_idle(self, now: float) -> None:
+        """Once a window, drop the keys nobody used within it: the process runs
+        for days, and every person who ever opened the panel kept an entry."""
+        if now - self._swept_at < self.window:
+            return
+        self._swept_at = now
+        for key in [key for key, hits in self.hits.items() if not hits or now - hits[-1] >= self.window]:
+            del self.hits[key]
 
 
 LIMITER = RateLimiter()

@@ -38,19 +38,34 @@ function keyOf(request) {
   return url.origin + url.pathname;
 }
 
+// A tunnel whose PC is off may neither answer nor fail for a long while; past
+// this the cached shell is shown instead of a blank WebView.
+const NETWORK_WAIT_MS = 6000;
+
+function fromNetwork(request) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), NETWORK_WAIT_MS);
+    fetch(request).then((response) => { clearTimeout(timer); resolve(response); },
+      (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin || !SHELL.test(url.pathname)) return;
+  const cached = () => caches.match(keyOf(request));
   event.respondWith(
-    fetch(request)
+    fromNetwork(request)
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
           caches.open(CACHE).then((cache) => cache.put(keyOf(request), copy));
+          return response;
         }
-        return response;
+        // 502/504 is the tunnel's page for a PC that is off: the shell is better.
+        return response.status >= 500 ? cached().then((hit) => hit || response) : response;
       })
-      .catch(() => caches.match(keyOf(request)).then((hit) => hit || Response.error())),
+      .catch(() => cached().then((hit) => hit || Response.error())),
   );
 });
